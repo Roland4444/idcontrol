@@ -55,7 +55,8 @@ fn verify(csrf:&str,state:&Shared)->WebResult<()> {
 fn layout(title:&str,body:String)->Html<String>{
     Html(format!(r#"<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title} — Контроль ИД</title>
 <style>body{{background:#f4f7fa;color:#1d334a;font:15px system-ui,Arial;margin:0}}header{{padding:17px 5%;background:#223851;color:white}}header a{{color:white;margin-right:24px;text-decoration:none}}main{{max-width:1550px;margin:28px auto;padding:0 16px}}article{{background:white;border:1px solid #d8e0e8;border-radius:10px;padding:18px;margin:18px 0;overflow-x:auto}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #dae1e8;text-align:left;vertical-align:top}}th{{background:#eef3f7}}input,select,textarea,button{{padding:8px;border-radius:5px;border:1px solid #bbc7d2;font:inherit;margin:3px}}button{{background:#224a69;color:white;border:0;cursor:pointer}}a{{color:#116caa}}small,.muted{{color:#536778}}.warn{{color:#8b4d17}}.ok{{color:#386e4c}}.row{{display:flex;gap:12px;flex-wrap:wrap;align-items:center}}.chips{{display:flex;gap:8px;flex-wrap:wrap}}.chip{{background:#e8eff5;border-radius:15px;padding:5px 9px}}.status{{font-weight:600}}.job{{padding:12px;margin:10px 0;border:1px solid #dce4ed;border-radius:8px;background:#fafcfe}}.job-running{{border-left:4px solid #2379a1}}.job-failed{{border-left:4px solid #c34d4d}}.job-done{{border-left:4px solid #45936e}}.job-partial{{border-left:4px solid #c99a3a}}progress{{width:220px;max-width:100%;height:14px}}.toolbox{{display:flex;gap:10px;flex-wrap:wrap;align-items:center}}.toolbox form{{display:inline-flex}}.secondary{{background:#e8f0f7;color:#153b56}}.warnbutton{{background:#a0532c}}
-:root{{color-scheme:light}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{line-height:1.45}}main{{max-width:1440px}}article{{scroll-margin-top:76px}}header{{position:sticky;top:0;z-index:10;box-shadow:0 1px 6px #071c2d24}}header a{{display:inline-block;padding:3px 0}}.overview{{background:#fff;border:1px solid #d8e0e8;border-radius:12px;padding:23px;margin:18px 0;scroll-margin-top:74px}}.metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:15px}}.metric{{padding:15px;border:1px solid #dae4ed;border-radius:9px;background:#fbfdff;min-width:0}}.metric strong{{font-size:24px;display:block;color:#123b54}}.jump-links{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px;margin-top:18px}}.jump-links a{{display:block;border:1px solid #d2e0e9;border-radius:9px;padding:13px;text-decoration:none;background:#f8fbfe;font-weight:600}}.jump-links a small{{display:block;font-weight:400;margin-top:4px}}.jump-links a:hover{{background:#eaf4fb}}details.collapsible>summary{{font-size:19px;font-weight:650;cursor:pointer;padding:6px 2px;list-style:revert}}details.collapsible>summary::marker{{color:#28719e}}details.collapsible>div{{padding:12px 0}}details.collapsible:not([open]){{padding-bottom:12px}}.summarybar{{height:10px;background:#e6edf3;border-radius:8px;overflow:hidden;margin-top:12px}}.summarybar span{{background:#28719e;display:block;height:100%}}.notice{{border-left:4px solid #288258;padding:10px 14px;background:#edf8f0;margin:15px 0;border-radius:6px}}.privacy{{border:1px solid #d6ab69;background:#fffbf2;border-radius:8px;padding:14px;margin:12px 0}}.uploadfile{{max-width:100%}}.filefilter{{width:min(480px,100%)}}.filelist td{{max-width:530px;overflow-wrap:anywhere}}.filelist tr:target{{outline:2px solid #2183a5}}.minor{{font-size:13px}}.edit-row{{border:1px solid #e0e7ec;padding:10px;border-radius:6px;margin:8px 0}}.sticky-info{{display:inline-block;font-size:13px;color:#d3e7f4;margin-left:16px}}.resultlink{{text-decoration:none}}.buttonlink{{display:inline-block;background:#e8f0f7;color:#153b56;text-decoration:none;border-radius:6px;padding:9px}}.sr-only{{position:absolute;left:-9999px}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.jump-links{{grid-template-columns:repeat(2,minmax(0,1fr))}}header a{{margin-right:8px}}article{{padding:12px}}td,th{{padding:6px}}}}@media(max-width:480px){{.jump-links{{grid-template-columns:1fr}}}}</style></head>
+:root{{color-scheme:light}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{line-height:1.45}}main{{max-width:1440px}}article{{scroll-margin-top:76px}}header{{position:sticky;top:0;z-index:10;box-shadow:0 1px 6px #071c2d24}}header a{{display:inline-block;padding:3px 0}}.overview{{background:#fff;border:1px solid #d8e0e8;border-radius:12px;padding:23px;margin:18px 0;scroll-margin-top:74px}}.metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:15px}}.metric{{padding:15px;border:1px solid #dae4ed;border-radius:9px;background:#fbfdff;min-width:0}}.metric strong{{font-size:24px;display:block;color:#123b54}}.jump-links{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px;margin-top:18px}}.jump-links a{{display:block;border:1px solid #d2e0e9;border-radius:9px;padding:13px;text-decoration:none;background:#f8fbfe;font-weight:600}}.jump-links a small{{display:block;font-weight:400;margin-top:4px}}.jump-links a:hover{{background:#eaf4fb}}details.collapsible>summary{{font-size:19px;font-weight:650;cursor:pointer;padding:6px 2px;list-style:revert}}details.collapsible>summary::marker{{color:#28719e}}details.collapsible>div{{padding:12px 0}}details.collapsible:not([open]){{padding-bottom:12px}}.summarybar{{height:10px;background:#e6edf3;border-radius:8px;overflow:hidden;margin-top:12px}}.summarybar span{{background:#28719e;display:block;height:100%}}.notice{{border-left:4px solid #288258;padding:10px 14px;background:#edf8f0;margin:15px 0;border-radius:6px}}.privacy{{border:1px solid #d6ab69;background:#fffbf2;border-radius:8px;padding:14px;margin:12px 0}}.uploadfile{{max-width:100%}}.filefilter{{width:min(480px,100%)}}.filelist td{{max-width:530px;overflow-wrap:anywhere}}.filelist tr:target{{outline:2px solid #2183a5}}.minor{{font-size:13px}}.edit-row{{border:1px solid #e0e7ec;padding:10px;border-radius:6px;margin:8px 0}}.sticky-info{{display:inline-block;font-size:13px;color:#d3e7f4;margin-left:16px}}.resultlink{{text-decoration:none}}.buttonlink{{display:inline-block;background:#e8f0f7;color:#153b56;text-decoration:none;border-radius:6px;padding:9px}}.sr-only{{position:absolute;left:-9999px}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.jump-links{{grid-template-columns:repeat(2,minmax(0,1fr))}}header a{{margin-right:8px}}article{{padding:12px}}td,th{{padding:6px}}}}@media(max-width:480px){{.jump-links{{grid-template-columns:1fr}}}}.attention-panel{{background:#fff;border:1px solid #d7e2eb;border-radius:12px;padding:22px;margin:18px 0 28px}}.attention-list{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}.attention-item{{border:1px solid #d9e3eb;border-radius:9px;padding:16px;background:#fafcfe;min-width:0}}.attention-item strong{{display:block;font-size:21px;margin-bottom:6px}}.attention-item a{{display:inline-block;margin-top:8px}}.detail-sections{{border-top:3px solid #d7e2eb;margin-top:38px;padding-top:22px;scroll-margin-top:90px}}.detail-sections>h2{{margin:8px 0}}.detail-group{{margin:27px 0 36px}}.detail-group>h3{{color:#244965;margin:0 0 6px}}.detail-group>p{{margin:0 0 12px;color:#536778}}.detail-group article{{margin:10px 0}}article.highlight-section{{outline:3px solid #2b82a5;outline-offset:3px;box-shadow:0 8px 22px #2b82a51c}}.jump-links a.active{{border-color:#28719e;background:#dceefa}}.backline{{text-align:right;margin:0 0 14px}}.backline a{{font-weight:600}}.detail-intro{{color:#536778}}@media(max-width:850px){{.attention-list{{grid-template-columns:1fr}}}}
+</style></head>
 <body><header><a href="/">Контроль ИД / Synology</a><a href="/catalog/errors">34 типовые ошибки</a><a href="/norms">Нормативные правила</a><a href="/diagnostics">Диагностика / OCR</a><span class=sticky-info id=top-progress></span></header><main>{body}</main><script>
 (function(){{
   async function refresh(el){{
@@ -94,19 +95,36 @@ fn layout(title:&str,body:String)->Html<String>{
   if(topProgress && document.getElementById('summary')){{
     topProgress.textContent=coverage ? 'Комплектность: '+coverage.getAttribute('aria-valuenow')+'%' : 'Комплектность: чек-лист не настроен';
   }}
-  document.addEventListener('click', (event)=>{{
-    const a=event.target.closest('a[href]');if(!a || !a.getAttribute('href').startsWith('#'))return;
-    const section=document.getElementById(a.getAttribute('href').slice(1));
-    if(!section)return;
-    const d=section.querySelector('details.collapsible');if(d)d.open=true;
-  }});
-  function openDeepLink(){{
-    const target=location.hash ? document.getElementById(decodeURIComponent(location.hash.substring(1))) : null;
-    if(!target)return;
-    const section=target.closest('article');
-    if(section){{const d=section.querySelector('details.collapsible');if(d)d.open=true;}}
+  function navigateToAnchor(fragment, updateUrl, smooth) {{
+    let id;
+    try {{ id=decodeURIComponent(fragment.replace(/^#/,'')); }} catch (_) {{ return false; }}
+    const target=document.getElementById(id);
+    if(!target)return false;
+    const article=target.closest('article');
+    const details=article?.querySelector('details.collapsible');
+    if(details)details.open=true;
+    document.querySelectorAll('article.highlight-section').forEach(el=>el.classList.remove('highlight-section'));
+    if(article)article.classList.add('highlight-section');
+    document.querySelectorAll('#summary .jump-links a').forEach(a=>{{
+      a.classList.toggle('active',a.getAttribute('href')==='#'+id || (article && a.getAttribute('href')==='#'+article.id));
+    }});
+    if(updateUrl)history.pushState(null,'','#'+encodeURIComponent(id));
+    // Allow the revealed <details> to participate in layout before scrolling.
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{{
+      target.scrollIntoView({{behavior:smooth && !window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'smooth' : 'auto',block:'start'}});
+    }}));
+    return true;
   }}
+  document.addEventListener('click',event=>{{
+    const a=event.target.closest('a[href]');
+    if(!a)return;
+    const dest=a.getAttribute('href');
+    if(!dest || dest==='#' || !dest.startsWith('#'))return;
+    if(navigateToAnchor(dest,true,true))event.preventDefault();
+  }});
+  function openDeepLink(){{if(location.hash)navigateToAnchor(location.hash,false,false);}}
   window.addEventListener('hashchange',openDeepLink);
+  window.addEventListener('popstate',openDeepLink);
   openDeepLink();
   document.addEventListener('input', (event)=>{{
     const inp=event.target;if(!inp.matches('[data-table-search]'))return;
@@ -261,94 +279,113 @@ async fn package_view(State(st):State<Shared>,Path(id):Path<i64>,Query(params):Q
     body.push_str(&format!("<p><b>Комплектность: {coverage}</b></p>"));
     if let Some(n)=pct {body.push_str(&format!("<div class=summarybar role=progressbar aria-valuemin=0 aria-valuemax=100 aria-valuenow={n} aria-label='Покрытие чек-листа'><span style='width:{n}%'></span></div>"));}
     body.push_str("<nav class=jump-links aria-label='Разделы комплекта'><a href=#checks>Замечания<small>Результаты и решения инженера</small></a><a href=#documents>Документы<small>Файлы, типы и вложения</small></a><a href=#checklist>Чек-лист<small>Изменение обязательных позиций</small></a><a href=#upload>Загрузить<small>Несколько файлов одной операцией</small></a><a href=#classification>ИИ-классификация<small>Предложения модели и подтверждение</small></a><a href=#ocr>Обработка и прогресс<small>Фоновые задания OCR</small></a><a href=#norms-check>Нормативные правила<small>Подробные результаты</small></a></nav></section>");
-    // Start primary sections. Detailed tables are intentionally folded away.
-    body.push_str(&format!("<article id='upload'><details class=collapsible><summary>Загрузка документов</summary><div><p>Выберите сразу несколько файлов. Все они будут прикреплены к одной позиции чек-листа, если указана позиция.</p><form action='/packages/{id}/upload' method=post enctype=multipart/form-data>{}<label>Тип <select name=kind><option value=ID>Исполнительная документация</option><option value=REFERENCE>ПД/РД (локально, без отправки внешнему ИИ)</option></select></label><label>Позиция чек-листа <select name=catalog_code><option value=''>Не назначена</option>",hidden(&st.csrf)));
-    if let Some(wt)=pkg.catalog_name.as_deref().and_then(|n|st.catalog.work_type(n)) {
-        for item in &wt.items {body.push_str(&format!("<option value='{}'>{} — {}</option>",h(&item.code),h(&item.code),h(&item.title)));}
+    // A compact action-oriented summary stays above ALL detailed menus.
+    let missing=required_codes.len().saturating_sub(completed);
+    body.push_str("<section class=attention-panel aria-labelledby=attention-title><h2 id=attention-title>Что требует внимания</h2><p class=muted>Ниже перечислены только сводные результаты. Подробные таблицы находятся внизу страницы: нажмите на ссылку, чтобы открыть нужный раздел.</p><div class=attention-list>");
+    if required_codes.is_empty() {
+        body.push_str("<div class=attention-item><strong>Чек-лист не настроен</strong><span>Выберите обязательные позиции, чтобы оценить комплектность.</span><br><a href=#checklist>Настроить чек-лист ↓</a></div>");
+    } else {
+        body.push_str(&format!("<div class=attention-item><strong>{missing} отсутствуют</strong><span>Обязательные позиции без приложенных документов</span><br><a href=#checklist>Открыть чек-лист ↓</a></div>"));
     }
-    for item in &custom_items {body.push_str(&format!("<option value='{}'>{}</option>",h(&item.code),h(&item.title)));}
-    body.push_str("</select></label><p><input class=uploadfile type=file name=file multiple required accept='.pdf,.docx,.xlsx,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.webp'><small id=upload-count>Можно выбрать до 20 файлов за раз</small></p><button>Загрузить файлы</button></form>");
-    body.push_str(&format!("<form action='/packages/{id}/scan' method=post>{}<button class=secondary>Просканировать Synology</button></form></div></details></article>",hidden(&st.csrf)));
-    body.push_str(&format!("<article id=checklist><details class=collapsible><summary>Чек-лист и вид работ</summary><div><form method=post action=\"/packages/{id}/catalog\">{}<select name=work_type>",hidden(&st.csrf)));
-    for wt in &st.catalog.work_types{let sel=if pkg.catalog_name.as_deref()==Some(wt.name.as_str()){ "selected" }else{""};body.push_str(&format!("<option {sel} value=\"{}\">{}</option>",h(&wt.name),h(&wt.name)));}
-    body.push_str("</select><p class=muted>Отметьте документы, обязательность которых утвердил инженер. До утверждения ни один пункт не считается автоматически обязательным.</p>");
+    body.push_str(&format!("<div class=attention-item><strong>{unresolved} замечаний</strong><span>Ожидают решения или подтверждены инженером</span><br><a href=#checks>Открыть замечания ↓</a></div>"));
+    body.push_str(&format!("<div class=attention-item><strong>{nonclassified} не привязаны</strong><span>Файлы ИД без позиции чек-листа</span><br><a href=#documents>Перейти к документам ↓</a></div>"));
+    body.push_str("</div></section>");
+    // Build detail panels separately; they are emitted only at the BOTTOM of the page.
+    let mut panels:HashMap<&'static str,String>=HashMap::new();
+    let mut panel_html=String::new();
+    // Start primary sections. Detailed tables are intentionally folded away.
+    panel_html.push_str(&format!("<article id='upload'><details class=collapsible><summary>Загрузка документов</summary><div><p>Выберите сразу несколько файлов. Все они будут прикреплены к одной позиции чек-листа, если указана позиция.</p><form action='/packages/{id}/upload' method=post enctype=multipart/form-data>{}<label>Тип <select name=kind><option value=ID>Исполнительная документация</option><option value=REFERENCE>ПД/РД (локально, без отправки внешнему ИИ)</option></select></label><label>Позиция чек-листа <select name=catalog_code><option value=''>Не назначена</option>",hidden(&st.csrf)));
+    if let Some(wt)=pkg.catalog_name.as_deref().and_then(|n|st.catalog.work_type(n)) {
+        for item in &wt.items {panel_html.push_str(&format!("<option value='{}'>{} — {}</option>",h(&item.code),h(&item.code),h(&item.title)));}
+    }
+    for item in &custom_items {panel_html.push_str(&format!("<option value='{}'>{}</option>",h(&item.code),h(&item.title)));}
+    panel_html.push_str("</select></label><p><input class=uploadfile type=file name=file multiple required accept='.pdf,.docx,.xlsx,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.webp'><small id=upload-count>Можно выбрать до 20 файлов за раз</small></p><button>Загрузить файлы</button></form>");
+    panel_html.push_str(&format!("<form action='/packages/{id}/scan' method=post>{}<button class=secondary>Просканировать Synology</button></form></div></details></article>",hidden(&st.csrf)));
+    panels.insert("upload",std::mem::take(&mut panel_html));
+    panel_html.push_str(&format!("<article id=checklist><details class=collapsible><summary>Чек-лист и вид работ</summary><div><form method=post action=\"/packages/{id}/catalog\">{}<select name=work_type>",hidden(&st.csrf)));
+    for wt in &st.catalog.work_types{let sel=if pkg.catalog_name.as_deref()==Some(wt.name.as_str()){ "selected" }else{""};panel_html.push_str(&format!("<option {sel} value=\"{}\">{}</option>",h(&wt.name),h(&wt.name)));}
+    panel_html.push_str("</select><p class=muted>Отметьте документы, обязательность которых утвердил инженер. До утверждения ни один пункт не считается автоматически обязательным.</p>");
 
     if let Some(wt)=pkg.catalog_name.as_deref().and_then(|n|st.catalog.work_type(n)){
         for item in &wt.items{
             let checked=if selected_codes.contains(&item.code){"checked"}else{""};
-            body.push_str(&format!("<p><label><input type=checkbox name=required_codes value=\"{}\" {checked}> <b>{}</b> {} <small>({})</small></label></p>",h(&item.code),h(&item.code),h(&item.title),h(&item.norm_reference)));
+            panel_html.push_str(&format!("<p><label><input type=checkbox name=required_codes value=\"{}\" {checked}> <b>{}</b> {} <small>({})</small></label></p>",h(&item.code),h(&item.code),h(&item.title),h(&item.norm_reference)));
         }
     }
-    body.push_str("<button>Сохранить шаблон и обязательность</button></form><h3>Дополнительные позиции этого комплекта</h3>");
+    panel_html.push_str("<button>Сохранить шаблон и обязательность</button></form><h3>Дополнительные позиции этого комплекта</h3>");
     for item in &custom_items {
-        body.push_str(&format!("<form class=edit-row method=post action='/packages/{id}/checklist/custom/{}'>{}<label>Название <input name=title required maxlength=300 size=47 value=\"{}\"></label><label>Примечание <input name=note maxlength=500 size=28 value=\"{}\"></label><label><input type=checkbox name=required value=yes {}> Обязательный</label><button>Сохранить</button><button class=warnbutton name=remove value=yes onclick=\"return confirm('Убрать позицию из чек-листа? Приложенные документы останутся в архиве.')\">Убрать</button></form>",item.id,hidden(&st.csrf),h(&item.title),h(&item.note),if item.required {"checked"}else{""}));
+        panel_html.push_str(&format!("<form class=edit-row method=post action='/packages/{id}/checklist/custom/{}'>{}<label>Название <input name=title required maxlength=300 size=47 value=\"{}\"></label><label>Примечание <input name=note maxlength=500 size=28 value=\"{}\"></label><label><input type=checkbox name=required value=yes {}> Обязательный</label><button>Сохранить</button><button class=warnbutton name=remove value=yes onclick=\"return confirm('Убрать позицию из чек-листа? Приложенные документы останутся в архиве.')\">Убрать</button></form>",item.id,hidden(&st.csrf),h(&item.title),h(&item.note),if item.required {"checked"}else{""}));
     }
-    body.push_str(&format!("<form method=post action='/packages/{id}/checklist/custom'>{}<label>Добавить позицию <input name=title required minlength=2 maxlength=300 placeholder='Например: Протокол испытания сваи' size=48></label><label>Примечание <input name=note maxlength=500 placeholder='Необязательно'></label><label><input type=checkbox name=required value=yes checked> Обязательная</label><button>Добавить</button></form></div></details></article>",hidden(&st.csrf)));
+    panel_html.push_str(&format!("<form method=post action='/packages/{id}/checklist/custom'>{}<label>Добавить позицию <input name=title required minlength=2 maxlength=300 placeholder='Например: Протокол испытания сваи' size=48></label><label>Примечание <input name=note maxlength=500 placeholder='Необязательно'></label><label><input type=checkbox name=required value=yes checked> Обязательная</label><button>Добавить</button></form></div></details></article>",hidden(&st.csrf)));
+    panels.insert("checklist",std::mem::take(&mut panel_html));
     // AI review is explicitly opted in per package; never triggered by Synology polling.
     let ai_consent:(bool,)=sqlx::query_as("SELECT ai_consent FROM packages WHERE id=$1")
         .bind(id).fetch_one(&st.db).await?;
-    body.push_str("<article id=ai-check><details class=collapsible><summary>Внешняя ИИ-проверка (ограничена)</summary><div><p class=privacy><b>Не передавайте ПД/РД внешним ИИ!</b> На сервере передача проектной/рабочей документации в VibeCode, GigaCowork и другие внешние сервисы запрещена. ИИ-классификация доступна только для файлов ИД.</p>");
-    body.push_str(&format!("<p>Режим ИИ: <b>{}</b>. Передавать можно только разрешённые выдержки ИД; ПД/РД обрабатываются исключительно локально.</p>",h(&st.cfg.ai_mode)));
-    body.push_str(&format!("<form method=post action=\"/packages/{id}/ai-consent\">{}<label><input type=checkbox name=consent value=yes {}> Разрешаю передавать выдержки из исполнительной документации для ИИ-классификации. ПД/РД никогда не передавать</label><button>Сохранить разрешение</button></form>",hidden(&st.csrf),if ai_consent.0 {"checked"} else {""}));
-    body.push_str("<p class=warn>Внешняя сверка ИД с ПД/РД отключена, так как для неё потребовалась бы передача ПД/РД внешнему провайдеру.</p>");
-    body.push_str("<p class=muted>ИИ не правит документы, не утверждает ГОСТ и не создаёт официальные замечания. Результаты — предложения для инженера.</p>");
+    panel_html.push_str("<article id=ai-check><details class=collapsible><summary>Внешняя ИИ-проверка (ограничена)</summary><div><p class=privacy><b>Не передавайте ПД/РД внешним ИИ!</b> На сервере передача проектной/рабочей документации в VibeCode, GigaCowork и другие внешние сервисы запрещена. ИИ-классификация доступна только для файлов ИД.</p>");
+    panel_html.push_str(&format!("<p>Режим ИИ: <b>{}</b>. Передавать можно только разрешённые выдержки ИД; ПД/РД обрабатываются исключительно локально.</p>",h(&st.cfg.ai_mode)));
+    panel_html.push_str(&format!("<form method=post action=\"/packages/{id}/ai-consent\">{}<label><input type=checkbox name=consent value=yes {}> Разрешаю передавать выдержки из исполнительной документации для ИИ-классификации. ПД/РД никогда не передавать</label><button>Сохранить разрешение</button></form>",hidden(&st.csrf),if ai_consent.0 {"checked"} else {""}));
+    panel_html.push_str("<p class=warn>Внешняя сверка ИД с ПД/РД отключена, так как для неё потребовалась бы передача ПД/РД внешнему провайдеру.</p>");
+    panel_html.push_str("<p class=muted>ИИ не правит документы, не утверждает ГОСТ и не создаёт официальные замечания. Результаты — предложения для инженера.</p>");
     let jobs:Vec<(i64,String,String,i32)>=sqlx::query_as(
        "SELECT id,provider,status,coalesce(suggestions_created,0) FROM ai_jobs WHERE package_id=$1 ORDER BY id DESC LIMIT 8")
        .bind(id).fetch_all(&st.db).await?;
     if !jobs.is_empty() {
-        body.push_str("<p><b>Задания ИИ:</b> ");
+        panel_html.push_str("<p><b>Задания ИИ:</b> ");
         for (job_id,provider,status,count) in jobs {
-            body.push_str(&format!(" #{} [{}: {}, {} предложений] ",job_id,h(&provider),h(&status),count));
+            panel_html.push_str(&format!(" #{} [{}: {}, {} предложений] ",job_id,h(&provider),h(&status),count));
         }
-        body.push_str("</p>");
+        panel_html.push_str("</p>");
     }
     let suggestions:Vec<AiSuggestionRow>=sqlx::query_as(
         "SELECT id,document_id,reference_document_id,source_quote,reference_quote,description,proposed_action,review_status,comment FROM ai_suggestions WHERE package_id=$1 ORDER BY id DESC LIMIT 150")
         .bind(id).fetch_all(&st.db).await?;
     if !suggestions.is_empty() {
-        body.push_str("<table><tr><th>Документы/цитаты</th><th>Предложение ИИ</th><th>Решение инженера</th></tr>");
+        panel_html.push_str("<table><tr><th>Документы/цитаты</th><th>Предложение ИИ</th><th>Решение инженера</th></tr>");
         for s in suggestions {
-            body.push_str(&format!("<tr><td>ИД #{} / РД #{}<p>{}</p><p>{}</p></td><td>{}<p><small>{}</small></p></td><td><form method=post action=\"/ai-suggestions/{}/review\">{}<select name=status>",s.document_id,s.reference_document_id.unwrap_or(0),h(&s.source_quote),h(&s.reference_quote),h(&s.description),h(&s.proposed_action),s.id,hidden(&st.csrf)));
+            panel_html.push_str(&format!("<tr><td>ИД #{} / РД #{}<p>{}</p><p>{}</p></td><td>{}<p><small>{}</small></p></td><td><form method=post action=\"/ai-suggestions/{}/review\">{}<select name=status>",s.document_id,s.reference_document_id.unwrap_or(0),h(&s.source_quote),h(&s.reference_quote),h(&s.description),h(&s.proposed_action),s.id,hidden(&st.csrf)));
             for (value,label) in [("pending","На рассмотрении"),("confirmed","Подтверждено"),("rejected","Отклонено")] {
                 let sel=if s.review_status==value {"selected"}else{""};
-                body.push_str(&format!("<option value={value} {sel}>{label}</option>"));
+                panel_html.push_str(&format!("<option value={value} {sel}>{label}</option>"));
             }
-            body.push_str(&format!("</select><input name=comment maxlength=2000 placeholder=Комментарий value=\"{}\"><button>Сохранить</button></form></td></tr>",h(&s.comment)));
+            panel_html.push_str(&format!("</select><input name=comment maxlength=2000 placeholder=Комментарий value=\"{}\"><button>Сохранить</button></form></td></tr>",h(&s.comment)));
         }
-        body.push_str("</table>");
+        panel_html.push_str("</table>");
     }
-    body.push_str("</div></details></article>");
+    panel_html.push_str("</div></details></article>");
+    panels.insert("ai-check",std::mem::take(&mut panel_html));
     // Classification provider is selected PER PACKAGE, independent of the OCR provider.
     let provider_options:Option<(String,bool)>=sqlx::query_as("SELECT provider,auto_queue FROM classification_settings WHERE package_id=$1")
         .bind(id).fetch_optional(&st.db).await?;
     let (provider,auto_queue)=provider_options.unwrap_or_else(||("vibecode".into(),false));
-    body.push_str("<article id=classification><details class=collapsible><summary>ИИ-классификация документов</summary><div><p class=muted>После OCR анализируется распознанный текст. Это не нормативная проверка. ИИ предлагает тип документа; инженер подтверждает или отклоняет предложение. Оригиналы не изменяются.</p>");
-    body.push_str(&format!("<form method=post action='/packages/{id}/classification/provider'>{}<label>Языковая модель <select name=provider>",hidden(&st.csrf)));
+    panel_html.push_str("<article id=classification><details class=collapsible><summary>ИИ-классификация документов</summary><div><p class=muted>После OCR анализируется распознанный текст. Это не нормативная проверка. ИИ предлагает тип документа; инженер подтверждает или отклоняет предложение. Оригиналы не изменяются.</p>");
+    panel_html.push_str(&format!("<form method=post action='/packages/{id}/classification/provider'>{}<label>Языковая модель <select name=provider>",hidden(&st.csrf)));
     for (v,label) in [("vibecode","Bitrix VibeCode"),("gigacowork","GigaCowork (через корпоративный адаптер)")] {
-        body.push_str(&format!("<option value='{v}' {}>{label}</option>",if provider==v {"selected"}else{""}));
+        panel_html.push_str(&format!("<option value='{v}' {}>{label}</option>",if provider==v {"selected"}else{""}));
     }
-    body.push_str(&format!("</select></label><label><input type=checkbox name=auto_queue value=yes {}> Автоматически ставить в очередь новые распознанные документы (только при наличии согласия)</label><button>Сохранить настройки</button></form>", if auto_queue {"checked"} else {""}));
-    body.push_str(&format!("<p>VibeCode: {}. GigaCowork: {}. <b>Выбран:</b> {}.</p>",
+    panel_html.push_str(&format!("</select></label><label><input type=checkbox name=auto_queue value=yes {}> Автоматически ставить в очередь новые распознанные документы (только при наличии согласия)</label><button>Сохранить настройки</button></form>", if auto_queue {"checked"} else {""}));
+    panel_html.push_str(&format!("<p>VibeCode: {}. GigaCowork: {}. <b>Выбран:</b> {}.</p>",
        if classification::configured(&st.cfg,"vibecode") {"ключ настроен"} else {"нет VIBE_OCR_KEY"},
        if classification::configured(&st.cfg,"gigacowork") {"адаптер настроен"} else {"нет CLASSIFY_COWORK_URL"},
        h(&provider)));
     if !ai_consent.0 {
-        body.push_str("<p class=warn>Перед внешней ИИ-классификацией включи согласие на передачу текстовых фрагментов в блоке выше.</p>");
+        panel_html.push_str("<p class=warn>Перед внешней ИИ-классификацией включи согласие на передачу текстовых фрагментов в блоке выше.</p>");
     }
     if !classification::configured(&st.cfg,&provider) {
-        body.push_str("<p class=warn>Выбранный провайдер пока не настроен: запросы не отправляются.</p>");
+        panel_html.push_str("<p class=warn>Выбранный провайдер пока не настроен: запросы не отправляются.</p>");
     }
     let disabled=if ai_consent.0 && classification::configured(&st.cfg,&provider) {""} else {"disabled"};
-    body.push_str(&format!("<div class=toolbox><form method=post action='/packages/{id}/classification/unclassified'>{}<button {disabled}>Классифицировать неопределённые</button></form><form method=post action='/packages/{id}/classification/all'>{}<button class=secondary {disabled}>Переклассифицировать все</button></form></div>",hidden(&st.csrf),hidden(&st.csrf)));
-    body.push_str(&format!("<div class='classification-live' data-url='/packages/{id}/classification/fragment'>Загрузка журнала классификации...</div>"));
-    body.push_str("<p class=muted>В GigaCowork нет подтверждённого публичного REST API: нужен собственный адаптер по контракту docs/GIGACOWORK_CLASSIFIER_ADAPTER_RU.md. Ключи только в .env; никакого автоматического переключения или отправки документов без согласия.</p></div></details></article>");
+    panel_html.push_str(&format!("<div class=toolbox><form method=post action='/packages/{id}/classification/unclassified'>{}<button {disabled}>Классифицировать неопределённые</button></form><form method=post action='/packages/{id}/classification/all'>{}<button class=secondary {disabled}>Переклассифицировать все</button></form></div>",hidden(&st.csrf),hidden(&st.csrf)));
+    panel_html.push_str(&format!("<div class='classification-live' data-url='/packages/{id}/classification/fragment'>Загрузка журнала классификации...</div>"));
+    panel_html.push_str("<p class=muted>В GigaCowork нет подтверждённого публичного REST API: нужен собственный адаптер по контракту docs/GIGACOWORK_CLASSIFIER_ADAPTER_RU.md. Ключи только в .env; никакого автоматического переключения или отправки документов без согласия.</p></div></details></article>");
+    panels.insert("classification",std::mem::take(&mut panel_html));
     let classification_rows:Vec<(i64,String,String,f64,String,String,serde_json::Value)>=sqlx::query_as(
         "SELECT document_id,provider,predicted_type,confidence,explanation,review_status,evidence_json FROM classification_results WHERE document_id IN (SELECT id FROM documents WHERE package_id=$1)")
         .bind(id).fetch_all(&st.db).await?;
     let classification_by_document:HashMap<i64,(String,String,f64,String,String,serde_json::Value)>=classification_rows
         .into_iter().map(|(did,p,t,c,e,r,q)|(did,(p,t,c,e,r,q))).collect();
-    body.push_str(&format!("<article id=ocr><details class=collapsible><summary>Повторное распознавание и задания</summary><div><p class=muted>Работает фоновая очередь. Статусы обновляются каждые 4 секунды без перезагрузки страницы. Оригиналы и версии файлов не изменяются.</p><div class=toolbox><form method=post action='/packages/{id}/reprocess-errors'>{}<button>Распознать все с ошибками</button></form><form method=post action='/packages/{id}/reprocess-all'>{}<button class=secondary onclick=\"return confirm('Повторно обработать ВСЕ документы комплекта? При OCR_MODE=vibecode возможны платные запросы VibeCode.')\">Перераспознать весь комплект</button></form><a href='/diagnostics'>Журнал и диагностика</a> <small id=ocr-poll-state></small></div><div class='ocr-live' data-url='/ocr/jobs/fragment?package_id={id}'>Загрузка очереди...</div></div></details></article>",hidden(&st.csrf),hidden(&st.csrf)));
-    body.push_str("<article id=documents><details class=collapsible><summary>Документы и вложения</summary><div><p>Документы, назначенные одной позиции чек-листа, считаются подтверждающими её вложениями. Можно прикреплять любое количество файлов.</p><label>Поиск по файлам и типам <input type=search class=filefilter data-table-search=doc-table placeholder='Название, тип, статус'></label><table class=filelist id=doc-table><thead><tr><th>Файл</th><th>Тип и распознавание</th><th>Версия</th><th>Действия</th></tr></thead><tbody>");
+    panel_html.push_str(&format!("<article id=ocr><details class=collapsible><summary>Повторное распознавание и задания</summary><div><p class=muted>Работает фоновая очередь. Статусы обновляются каждые 4 секунды без перезагрузки страницы. Оригиналы и версии файлов не изменяются.</p><div class=toolbox><form method=post action='/packages/{id}/reprocess-errors'>{}<button>Распознать все с ошибками</button></form><form method=post action='/packages/{id}/reprocess-all'>{}<button class=secondary onclick=\"return confirm('Повторно обработать ВСЕ документы комплекта? При OCR_MODE=vibecode возможны платные запросы VibeCode.')\">Перераспознать весь комплект</button></form><a href='/diagnostics'>Журнал и диагностика</a> <small id=ocr-poll-state></small></div><div class='ocr-live' data-url='/ocr/jobs/fragment?package_id={id}'>Загрузка очереди...</div></div></details></article>",hidden(&st.csrf),hidden(&st.csrf)));
+    panels.insert("ocr",std::mem::take(&mut panel_html));
+    panel_html.push_str("<article id=documents><details class=collapsible><summary>Документы и вложения</summary><div><p>Документы, назначенные одной позиции чек-листа, считаются подтверждающими её вложениями. Можно прикреплять любое количество файлов.</p><label>Поиск по файлам и типам <input type=search class=filefilter data-table-search=doc-table placeholder='Название, тип, статус'></label><table class=filelist id=doc-table><thead><tr><th>Файл</th><th>Тип и распознавание</th><th>Версия</th><th>Действия</th></tr></thead><tbody>");
     let mut shown:Vec<_>=current.values().collect();
     shown.sort_by(|a,b| a.source_kind.cmp(&b.source_kind)
         .then(a.catalog_code.cmp(&b.catalog_code)).then(a.relative_path.cmp(&b.relative_path)));
@@ -362,62 +399,82 @@ async fn package_view(State(st):State<Shared>,Path(id):Path<i64>,Query(params):Q
             format!("{} — {}",code,title.unwrap_or("Позиция чек-листа"))
         }else{"Без привязки к чек-листу".to_string()};
         if group!=last_group {
-            body.push_str(&format!("<tr class=group-row><th colspan=4>{}</th></tr>",h(&group)));
+            panel_html.push_str(&format!("<tr class=group-row><th colspan=4>{}</th></tr>",h(&group)));
             last_group=group;
         }
         let delete_msg=if !doc.is_present{" <span class=warn>(отсутствует на NAS)</span>"}else{""};
-        body.push_str(&format!("<tr id=doc-{}><td>{}{}<br><small>{}</small></td><td>{}<br><small>{}</small></td><td>v{}</td><td><a href=\"/documents/{}/download\">Оригинал</a>",doc.id,h(&doc.relative_path),delete_msg,h(&doc.sha256[..12]),h(doc.document_type.as_deref().unwrap_or("не классифицирован")),h(&doc.recognition_status),doc.version,doc.id));
-        body.push_str(&format!(" <span class='ocr-inline' data-doc='{}'></span>",doc.id));
+        panel_html.push_str(&format!("<tr id=doc-{}><td>{}{}<br><small>{}</small></td><td>{}<br><small>{}</small></td><td>v{}</td><td><a href=\"/documents/{}/download\">Оригинал</a>",doc.id,h(&doc.relative_path),delete_msg,h(&doc.sha256[..12]),h(doc.document_type.as_deref().unwrap_or("не классифицирован")),h(&doc.recognition_status),doc.version,doc.id));
+        panel_html.push_str(&format!(" <span class='ocr-inline' data-doc='{}'></span>",doc.id));
         if let Some((ai_provider,ai_label,score,explanation,review_status,evidence))=classification_by_document.get(&doc.id) {
-            body.push_str(&format!("<div class=job><small>ИИ ({}) — <b>{}</b> · уверенность {:.0}% · {}</small><div><small>{}</small></div>",
+            panel_html.push_str(&format!("<div class=job><small>ИИ ({}) — <b>{}</b> · уверенность {:.0}% · {}</small><div><small>{}</small></div>",
                 h(ai_provider),h(ai_label),(*score)*100.0,h(review_status),h(explanation)));
             if let Some(items)=evidence.as_array() {
-                for quote in items.iter().filter_map(|v|v.as_str()).take(3){body.push_str(&format!("<div><small>Цитата: {}</small></div>",h(quote)));}
+                for quote in items.iter().filter_map(|v|v.as_str()).take(3){panel_html.push_str(&format!("<div><small>Цитата: {}</small></div>",h(quote)));}
             }
             if review_status=="suggested" {
-                body.push_str(&format!("<form method=post action='/documents/{}/ai-classify/confirm'>{}<button>Подтвердить тип ИИ</button></form><form method=post action='/documents/{}/ai-classify/reject'>{}<button class=secondary>Отклонить</button></form>",doc.id,hidden(&st.csrf),doc.id,hidden(&st.csrf)));
+                panel_html.push_str(&format!("<form method=post action='/documents/{}/ai-classify/confirm'>{}<button>Подтвердить тип ИИ</button></form><form method=post action='/documents/{}/ai-classify/reject'>{}<button class=secondary>Отклонить</button></form>",doc.id,hidden(&st.csrf),doc.id,hidden(&st.csrf)));
             }
-            body.push_str("</div>");
+            panel_html.push_str("</div>");
         }
         if doc.source_kind=="ID" {
-            body.push_str(&format!("<form method=post action='/documents/{}/ai-classify'>{}<button class=secondary>ИИ: повторить классификацию</button></form>",doc.id,hidden(&st.csrf)));
+            panel_html.push_str(&format!("<form method=post action='/documents/{}/ai-classify'>{}<button class=secondary>ИИ: повторить классификацию</button></form>",doc.id,hidden(&st.csrf)));
         }
         if doc.source_kind=="ID"{
-            body.push_str(&format!("<form method=post action=\"/documents/{}/classify\">{}<select name=catalog_code><option value=\"\">Не определён</option>",doc.id,hidden(&st.csrf)));
+            panel_html.push_str(&format!("<form method=post action=\"/documents/{}/classify\">{}<select name=catalog_code><option value=\"\">Не определён</option>",doc.id,hidden(&st.csrf)));
             if let Some(wt)=pkg.catalog_name.as_deref().and_then(|n|st.catalog.work_type(n)){
-                for item in &wt.items{let sel=if doc.catalog_code.as_deref()==Some(item.code.as_str()){"selected"}else{""};body.push_str(&format!("<option {sel} value=\"{}\">{} — {}</option>",h(&item.code),h(&item.code),h(&item.title)));}
+                for item in &wt.items{let sel=if doc.catalog_code.as_deref()==Some(item.code.as_str()){"selected"}else{""};panel_html.push_str(&format!("<option {sel} value=\"{}\">{} — {}</option>",h(&item.code),h(&item.code),h(&item.title)));}
             }
             for item in &custom_items {
                 let sel=if doc.catalog_code.as_deref()==Some(item.code.as_str()){"selected"}else{""};
-                body.push_str(&format!("<option {sel} value=\"{}\">{} — {}</option>",h(&item.code),h(&item.code),h(&item.title)));
+                panel_html.push_str(&format!("<option {sel} value=\"{}\">{} — {}</option>",h(&item.code),h(&item.code),h(&item.title)));
             }
-            body.push_str("</select><button>Сохранить тип</button></form>");
+            panel_html.push_str("</select><button>Сохранить тип</button></form>");
         }
-        body.push_str(&format!("<form method=post action='/documents/{}/reprocess'>{}<button class=secondary>Повторить OCR</button></form>",doc.id,hidden(&st.csrf)));
-        body.push_str("</td></tr>");
+        panel_html.push_str(&format!("<form method=post action='/documents/{}/reprocess'>{}<button class=secondary>Повторить OCR</button></form>",doc.id,hidden(&st.csrf)));
+        panel_html.push_str("</td></tr>");
     }
-    body.push_str("</tbody></table></div></details></article>");
-    body.push_str("<article id=checks><details class=collapsible open><summary>Проверки и замечания</summary><div><div class=row>");
-    for run in &runs{body.push_str(&format!("<a class=chip href=\"/packages/{id}?run_id={}\">Проверка #{} — {}</a>",run.id,run.id,run.started_at.format("%d.%m.%Y %H:%M")));}
-    body.push_str("</div>");
+    panel_html.push_str("</tbody></table></div></details></article>");
+    panels.insert("documents",std::mem::take(&mut panel_html));
+    panel_html.push_str("<article id=checks><details class=collapsible><summary>Проверки и замечания</summary><div><div class=row>");
+    for run in &runs{panel_html.push_str(&format!("<a class=chip href=\"/packages/{id}?run_id={}#checks\">Проверка #{} — {}</a>",run.id,run.id,run.started_at.format("%d.%m.%Y %H:%M")));}
+    panel_html.push_str("</div>");
     if let Some(run)=selected{
-        body.push_str(&format!("<p><a href=\"/packages/{id}/report/xlsx?run_id={}\">XLSX</a> · <a href=\"/packages/{id}/report/docx?run_id={}\">DOCX</a> · <a href=\"/packages/{id}/report/pdf?run_id={}\">PDF</a> — официальная выгрузка только подтверждённых/устранённых замечаний. <a href=\"/packages/{id}/report/xlsx?run_id={}&draft=true\">Черновик всех</a></p>",run.id,run.id,run.id,run.id));
+        panel_html.push_str(&format!("<p><a href=\"/packages/{id}/report/xlsx?run_id={}\">XLSX</a> · <a href=\"/packages/{id}/report/docx?run_id={}\">DOCX</a> · <a href=\"/packages/{id}/report/pdf?run_id={}\">PDF</a> — официальная выгрузка только подтверждённых/устранённых замечаний. <a href=\"/packages/{id}/report/xlsx?run_id={}&draft=true\">Черновик всех</a></p>",run.id,run.id,run.id,run.id));
     }
-    body.push_str("<table><tr><th>Блок и код</th><th>Источник и описание</th><th>Результат</th><th>Решение инженера</th></tr>");
+    panel_html.push_str("<table><tr><th>Блок и код</th><th>Источник и описание</th><th>Результат</th><th>Решение инженера</th></tr>");
     for f in findings{
-        body.push_str(&format!("<tr><td>{} / {}</td><td><small>{}</small><p>{}</p>{}</td><td class=status>{}</td><td><form method=post action=\"/findings/{}/review\">{}<select name=status>",f.block,h(&f.rule_code),h(&f.source_location),h(&f.description),if f.reference.is_empty(){"".to_string()}else{format!("<small>{}</small>",h(&f.reference))},if f.result=="mismatch"{"Выявлено несоответствие"}else{"Требуется ручная проверка"},f.id,hidden(&st.csrf)));
+        panel_html.push_str(&format!("<tr><td>{} / {}</td><td><small>{}</small><p>{}</p>{}</td><td class=status>{}</td><td><form method=post action=\"/findings/{}/review\">{}<select name=status>",f.block,h(&f.rule_code),h(&f.source_location),h(&f.description),if f.reference.is_empty(){"".to_string()}else{format!("<small>{}</small>",h(&f.reference))},if f.result=="mismatch"{"Выявлено несоответствие"}else{"Требуется ручная проверка"},f.id,hidden(&st.csrf)));
         for (value,label) in [("pending","На рассмотрении"),("confirmed","Подтверждено"),("rejected","Отклонено"),("resolved","Устранено")]{
-            let sel=if f.review_status==value{"selected"}else{""};body.push_str(&format!("<option value={value} {sel}>{label}</option>"));
+            let sel=if f.review_status==value{"selected"}else{""};panel_html.push_str(&format!("<option value={value} {sel}>{label}</option>"));
         }
-        body.push_str(&format!("</select><input name=comment placeholder=Комментарий value=\"{}\"><button>Сохранить</button></form></td></tr>",h(&f.comment)));
+        panel_html.push_str(&format!("</select><input name=comment placeholder=Комментарий value=\"{}\"><button>Сохранить</button></form></td></tr>",h(&f.comment)));
     }
-    body.push_str("</table><p class=muted>Отсутствие замечаний не подтверждает соответствие всем строительным нормам. Применяются только утверждённые правила; НТД не придумываются.</p></div></details></article>");
-    body.push_str("<article id=norms-check><details class=collapsible><summary>Проверки утверждённых нормативных правил</summary><div><p class=muted>«Найдено подтверждение» означает обнаружение заданного текста, а не полное соответствие ГОСТ/СП. Настроить правила: <a href=/norms>НТД и пункты</a>.</p><table><tr><th>Документ / правило</th><th>Норматив и источник</th><th>Результат</th></tr>");
+    panel_html.push_str("</table><p class=muted>Отсутствие замечаний не подтверждает соответствие всем строительным нормам. Применяются только утверждённые правила; НТД не придумываются.</p></div></details></article>");
+    panels.insert("checks",std::mem::take(&mut panel_html));
+    panel_html.push_str("<article id=norms-check><details class=collapsible><summary>Проверки утверждённых нормативных правил</summary><div><p class=muted>«Найдено подтверждение» означает обнаружение заданного текста, а не полное соответствие ГОСТ/СП. Настроить правила: <a href=/norms>НТД и пункты</a>.</p><table><tr><th>Документ / правило</th><th>Норматив и источник</th><th>Результат</th></tr>");
     for check in &norm_checks{
         let label=match check.result.as_str(){"evidence_found"=>"Найдено подтверждение в тексте","mismatch"=>"Вероятное несоответствие","manual"=>"Требуется проверка инженера",_=>"Неизвестно"};
-        body.push_str(&format!("<tr><td>Документ #{} / правило #{}</td><td>{}<br><small>{}</small></td><td><b>{}</b><p>{}</p></td></tr>",check.document_id,check.rule_id,h(&check.normative_basis),h(&check.source_reference),label,h(&check.details)));
+        panel_html.push_str(&format!("<tr><td>Документ #{} / правило #{}</td><td>{}<br><small>{}</small></td><td><b>{}</b><p>{}</p></td></tr>",check.document_id,check.rule_id,h(&check.normative_basis),h(&check.source_reference),label,h(&check.details)));
     }
-    body.push_str("</table></div></details></article>");
+    panel_html.push_str("</table></div></details></article>");
+    panels.insert("norms-check",std::mem::take(&mut panel_html));
+    body.push_str("<section class=detail-sections id=detail-sections aria-labelledby=details-title><h2 id=details-title>Подробные разделы</h2><p class=detail-intro>Все таблицы и настройки расположены здесь. По умолчанию они свёрнуты. Выбери нужную проверку в сводке наверху — откроется соответствующий раздел ниже.</p>");
+    for (title,description,ids) in [
+        ("Результаты проверок","Замечания инженеру и утверждённые нормативные правила",vec!["checks","norms-check"]),
+        ("Документы и комплект","Загруженные файлы, привязка к позициям, редактирование и загрузка",vec!["documents","checklist","upload"]),
+        ("Распознавание и ИИ","Предложения классификатора, очередь OCR и настройки внешнего ИИ",vec!["classification","ocr","ai-check"]),
+    ] {
+        body.push_str(&format!("<div class=detail-group><h3>{title}</h3><p>{description}</p>"));
+        for key in ids {
+            if let Some(panel)=panels.remove(key) {
+                // Every panel has a way back to the overview without a long manual scroll.
+                let panel=panel.replacen("<div>","<div><p class=backline><a href=#summary>↑ Вернуться к сводке</a></p>",1);
+                body.push_str(&panel);
+            }
+        }
+        body.push_str("</div>");
+    }
+    body.push_str("</section>");
     if docs.len()>current.len(){body.push_str(&format!("<p>Предыдущие версии: {} (сохраняются в архиве и доступны по ID).</p>",docs.len()-current.len()));}
     Ok(layout("Комплект ИД",body))
 }
