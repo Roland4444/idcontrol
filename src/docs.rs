@@ -1,3 +1,4 @@
+
 //! DOCX/XLSX via local text extraction; PDF/images via offline neural ONNX OCR
 //! or explicit opt-in VibeCode. PDF renders with Hayro, no external tools.
 use crate::{config::Config,vibecode::VibeOcr};
@@ -368,14 +369,14 @@ mod tests {
     }
     #[test] fn render_pdf_to_individual_jpeg_pages() {
         let file=Path::new(concat!(env!("CARGO_MANIFEST_DIR"),"/tests/fixtures/test_2_pages.pdf"));
-        let (images,total)=pdf_pages_as_jpegs(file,5).unwrap();
+        let (images,total)=pdf_pages_as_jpegs(file,5,&None).unwrap();
         assert_eq!(total,2);
         assert_eq!(images.len(),2);
         for image in images { assert!(image.starts_with(&[0xFF,0xD8,0xFF])); }
     }
     #[test] fn pdf_page_limit_is_reported() {
         let file=Path::new(concat!(env!("CARGO_MANIFEST_DIR"),"/tests/fixtures/test_2_pages.pdf"));
-        let (images,total)=pdf_pages_as_jpegs(file,1).unwrap();
+        let (images,total)=pdf_pages_as_jpegs(file,1,&None).unwrap();
         assert_eq!(total,2);
         assert_eq!(images.len(),1);
     }
