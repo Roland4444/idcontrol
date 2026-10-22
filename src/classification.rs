@@ -2,7 +2,7 @@
 //! GigaCowork has no confirmed public REST API: this uses an EXPLICIT organisation-owned adapter.
 //! No source document is modified, and suggestions require engineer confirmation.
 use crate::config::Config;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use reqwest::{Client, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

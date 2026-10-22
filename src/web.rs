@@ -1,14 +1,13 @@
-use crate::{catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
+use crate::{access,portal,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
 use anyhow::Result;
 use axum::{
     body::{Body,Bytes},
-    extract::{DefaultBodyLimit,Multipart,Path,Query,State},
-    http::{header,Request,StatusCode},
-    middleware::{self,Next},
+    extract::{DefaultBodyLimit,Multipart,Path,Query,State},Extension,
+    http::{header,StatusCode},
+    middleware,
     response::{Html,IntoResponse,Redirect,Response},
     routing::{get,post}, Form,Json,Router,
 };
-use base64::Engine;
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::{collections::{HashMap,HashSet},io::Write,path::PathBuf,sync::{Arc,RwLock,atomic::{AtomicBool,Ordering}}};
@@ -24,6 +23,7 @@ pub struct ScanStatus {
 }
 
 pub struct AppState {
+    pub debug_login:bool,
     pub cfg:Config, pub db:PgPool, pub catalog:Catalog,
     pub nas:crate::synology::SynologyClient, pub synology_connected:AtomicBool,
     pub scan_lock:Mutex<()>, pub csrf:String,
@@ -33,9 +33,9 @@ pub type Shared=Arc<AppState>;
 
 pub struct WebError {status:StatusCode, detail:String}
 impl WebError {
-    fn bad(s:impl Into<String>)->Self{Self{status:StatusCode::BAD_REQUEST,detail:s.into()}}
-    fn not_found()->Self{Self{status:StatusCode::NOT_FOUND,detail:"Not found".into()}}
-    fn forbidden()->Self{Self{status:StatusCode::FORBIDDEN,detail:"CSRF validation failed".into()}}
+    pub(crate) fn bad(s:impl Into<String>)->Self{Self{status:StatusCode::BAD_REQUEST,detail:s.into()}}
+    pub(crate) fn not_found()->Self{Self{status:StatusCode::NOT_FOUND,detail:"Not found".into()}}
+    pub(crate) fn forbidden()->Self{Self{status:StatusCode::FORBIDDEN,detail:"CSRF validation failed".into()}}
 }
 impl From<anyhow::Error> for WebError {
     fn from(err:anyhow::Error)->Self{error!("Request failed: {err:#}");Self{status:StatusCode::INTERNAL_SERVER_ERROR,detail:"Internal server error (check server logs)".into()}}
@@ -48,16 +48,17 @@ impl From<tokio::task::JoinError> for WebError { fn from(err:tokio::task::JoinEr
 impl IntoResponse for WebError {fn into_response(self)->Response{(self.status,self.detail).into_response()}}
 type WebResult<T>=std::result::Result<T,WebError>;
 fn h(s:&str)->String {html_escape::encode_safe(s).to_string()}
-fn hidden(csrf:&str)->String {format!("<input type=\"hidden\" name=\"csrf\" value=\"{}\">",h(csrf))}
-fn verify(csrf:&str,state:&Shared)->WebResult<()> {
+pub(crate) fn hidden(csrf:&str)->String {format!("<input type=\"hidden\" name=\"csrf\" value=\"{}\">",h(csrf))}
+pub(crate) fn verify(csrf:&str,state:&Shared)->WebResult<()> {
     if bool::from(csrf.as_bytes().ct_eq(state.csrf.as_bytes())) {Ok(())}else{Err(WebError::forbidden())}
 }
-fn layout(title:&str,body:String)->Html<String>{
+pub(crate) fn layout(title:&str,body:String)->Html<String>{
     Html(format!(r#"<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title} — Контроль ИД</title>
 <style>body{{background:#f4f7fa;color:#1d334a;font:15px system-ui,Arial;margin:0}}header{{padding:17px 5%;background:#223851;color:white}}header a{{color:white;margin-right:24px;text-decoration:none}}main{{max-width:1550px;margin:28px auto;padding:0 16px}}article{{background:white;border:1px solid #d8e0e8;border-radius:10px;padding:18px;margin:18px 0;overflow-x:auto}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #dae1e8;text-align:left;vertical-align:top}}th{{background:#eef3f7}}input,select,textarea,button{{padding:8px;border-radius:5px;border:1px solid #bbc7d2;font:inherit;margin:3px}}button{{background:#224a69;color:white;border:0;cursor:pointer}}a{{color:#116caa}}small,.muted{{color:#536778}}.warn{{color:#8b4d17}}.ok{{color:#386e4c}}.row{{display:flex;gap:12px;flex-wrap:wrap;align-items:center}}.chips{{display:flex;gap:8px;flex-wrap:wrap}}.chip{{background:#e8eff5;border-radius:15px;padding:5px 9px}}.status{{font-weight:600}}.job{{padding:12px;margin:10px 0;border:1px solid #dce4ed;border-radius:8px;background:#fafcfe}}.job-running{{border-left:4px solid #2379a1}}.job-failed{{border-left:4px solid #c34d4d}}.job-done{{border-left:4px solid #45936e}}.job-partial{{border-left:4px solid #c99a3a}}progress{{width:220px;max-width:100%;height:14px}}.toolbox{{display:flex;gap:10px;flex-wrap:wrap;align-items:center}}.toolbox form{{display:inline-flex}}.secondary{{background:#e8f0f7;color:#153b56}}.warnbutton{{background:#a0532c}}
 :root{{color-scheme:light}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{line-height:1.45}}main{{max-width:1440px}}article{{scroll-margin-top:76px}}header{{position:sticky;top:0;z-index:10;box-shadow:0 1px 6px #071c2d24}}header a{{display:inline-block;padding:3px 0}}.overview{{background:#fff;border:1px solid #d8e0e8;border-radius:12px;padding:23px;margin:18px 0;scroll-margin-top:74px}}.metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:15px}}.metric{{padding:15px;border:1px solid #dae4ed;border-radius:9px;background:#fbfdff;min-width:0}}.metric strong{{font-size:24px;display:block;color:#123b54}}.jump-links{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px;margin-top:18px}}.jump-links a{{display:block;border:1px solid #d2e0e9;border-radius:9px;padding:13px;text-decoration:none;background:#f8fbfe;font-weight:600}}.jump-links a small{{display:block;font-weight:400;margin-top:4px}}.jump-links a:hover{{background:#eaf4fb}}details.collapsible>summary{{font-size:19px;font-weight:650;cursor:pointer;padding:6px 2px;list-style:revert}}details.collapsible>summary::marker{{color:#28719e}}details.collapsible>div{{padding:12px 0}}details.collapsible:not([open]){{padding-bottom:12px}}.summarybar{{height:10px;background:#e6edf3;border-radius:8px;overflow:hidden;margin-top:12px}}.summarybar span{{background:#28719e;display:block;height:100%}}.notice{{border-left:4px solid #288258;padding:10px 14px;background:#edf8f0;margin:15px 0;border-radius:6px}}.privacy{{border:1px solid #d6ab69;background:#fffbf2;border-radius:8px;padding:14px;margin:12px 0}}.uploadfile{{max-width:100%}}.filefilter{{width:min(480px,100%)}}.filelist td{{max-width:530px;overflow-wrap:anywhere}}.filelist tr:target{{outline:2px solid #2183a5}}.minor{{font-size:13px}}.edit-row{{border:1px solid #e0e7ec;padding:10px;border-radius:6px;margin:8px 0}}.sticky-info{{display:inline-block;font-size:13px;color:#d3e7f4;margin-left:16px}}.resultlink{{text-decoration:none}}.buttonlink{{display:inline-block;background:#e8f0f7;color:#153b56;text-decoration:none;border-radius:6px;padding:9px}}.sr-only{{position:absolute;left:-9999px}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.jump-links{{grid-template-columns:repeat(2,minmax(0,1fr))}}header a{{margin-right:8px}}article{{padding:12px}}td,th{{padding:6px}}}}@media(max-width:480px){{.jump-links{{grid-template-columns:1fr}}}}.attention-panel{{background:#fff;border:1px solid #d7e2eb;border-radius:12px;padding:22px;margin:18px 0 28px}}.attention-list{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}.attention-item{{border:1px solid #d9e3eb;border-radius:9px;padding:16px;background:#fafcfe;min-width:0}}.attention-item strong{{display:block;font-size:21px;margin-bottom:6px}}.attention-item a{{display:inline-block;margin-top:8px}}.detail-sections{{border-top:3px solid #d7e2eb;margin-top:38px;padding-top:22px;scroll-margin-top:90px}}.detail-sections>h2{{margin:8px 0}}.detail-group{{margin:27px 0 36px}}.detail-group>h3{{color:#244965;margin:0 0 6px}}.detail-group>p{{margin:0 0 12px;color:#536778}}.detail-group article{{margin:10px 0}}article.highlight-section{{outline:3px solid #2b82a5;outline-offset:3px;box-shadow:0 8px 22px #2b82a51c}}.jump-links a.active{{border-color:#28719e;background:#dceefa}}.backline{{text-align:right;margin:0 0 14px}}.backline a{{font-weight:600}}.detail-intro{{color:#536778}}@media(max-width:850px){{.attention-list{{grid-template-columns:1fr}}}}
-</style></head>
-<body><header><a href="/">Контроль ИД / Synology</a><a href="/catalog/errors">34 типовые ошибки</a><a href="/norms">Нормативные правила</a><a href="/diagnostics">Диагностика / OCR</a><span class=sticky-info id=top-progress></span></header><main>{body}</main><script>
+{portal_style}</style></head>
+<body><header><a class=brand href="/"><strong>RES</strong><span>DEVELOPMENT</span></a><a class="nav-link active" href="/">Проверка</a><a class="nav-link super-only" hidden href="/catalog/errors">Типовые ошибки</a><a class="nav-link super-only" hidden href="/norms">Нормативные правила</a><a class="nav-link super-only" hidden href="/diagnostics">Диагностика / OCR</a><div class=nav-spacer></div><a id="admin-tab" class="nav-link nav-right" href="/administration" hidden>⚙ Администрирование</a><span id=user-label class=user-label></span><span class=sticky-info id=top-progress></span></header><main>{body}</main><script>
+fetch('/api/me',{{credentials:'same-origin'}}).then(r=>r.ok?r.json():null).then(u=>{{if(!u)return;const l=document.getElementById('user-label');if(l)l.textContent=u.name;const a=document.getElementById('admin-tab');if(u.superadmin){{if(a)a.hidden=false;document.querySelectorAll('.super-only').forEach(x=>x.hidden=false);}}}}).catch(()=>{{}});
 (function(){{
   async function refresh(el){{
     if(document.hidden)return;
@@ -142,36 +143,41 @@ fn layout(title:&str,body:String)->Html<String>{
       const counter=document.getElementById('upload-count');if(counter)counter.textContent=`Выбрано файлов: ${{el.files.length}}`;
     }}
   }});
+  const zone=document.getElementById('upload-drop');
+  if(zone){{
+    const input=zone.querySelector('input[type=file]');
+    zone.addEventListener('dragover',e=>{{e.preventDefault();zone.classList.add('drag-hover');}});
+    zone.addEventListener('dragleave',e=>{{e.preventDefault();zone.classList.remove('drag-hover');}});
+    zone.addEventListener('drop',e=>{{e.preventDefault();zone.classList.remove('drag-hover');
+      if(input && e.dataTransfer?.files?.length){{
+        input.files=e.dataTransfer.files;
+        input.dispatchEvent(new Event('change',{{bubbles:true}}));
+      }}
+    }});
+  }}
   setInterval(()=>document.querySelectorAll('.classification-live').forEach(refreshClassification),5000);
   document.querySelectorAll('.classification-live').forEach(refreshClassification);
   setInterval(()=>document.querySelectorAll('.ocr-live').forEach(refresh),4000);
   document.querySelectorAll('.ocr-live').forEach(refresh);
 }})();
 </script></body></html>"#,
-        title=h(title),body=body))
+        title=h(title),body=body,portal_style=include_str!("../assets/portal.css")))
 }
 
-async fn basic_auth(State(st):State<Shared>,request:Request<Body>,next:Next)->Response{
-    let header=request.headers().get(header::AUTHORIZATION).and_then(|v|v.to_str().ok()).unwrap_or("");
-    let auth=header.strip_prefix("Basic ").and_then(|token|base64::engine::general_purpose::STANDARD.decode(token).ok())
-        .and_then(|v|String::from_utf8(v).ok());
-    let authenticated=auth.and_then(|s|{
-        let (user,pass)=s.split_once(':')?;
-        let eq_user=bool::from(user.as_bytes().ct_eq(st.cfg.app_user.as_bytes()));
-        let eq_pass=bool::from(pass.as_bytes().ct_eq(st.cfg.app_password.as_bytes()));
-        Some(eq_user & eq_pass)
-    }).unwrap_or(false);
-    if !authenticated{
-        return (StatusCode::UNAUTHORIZED,[(header::WWW_AUTHENTICATE,"Basic realm=\"ID-Control\"")],"Authentication required").into_response();
-    }
-    let mut response=next.run(request).await;
-    response.headers_mut().insert(header::X_CONTENT_TYPE_OPTIONS,"nosniff".parse().unwrap());
-    response.headers_mut().insert(header::CACHE_CONTROL,"no-store".parse().unwrap());
-    response
-}
 pub fn router(state:Shared)->Router{
     Router::new()
-        .route("/",get(home))
+        .route("/",get(portal::projects))
+        .route("/bitrix",get(access::bitrix_bootstrap))
+        .route("/auth/bitrix",post(access::login))
+        .route("/auth/logout",post(access::logout))
+        .route("/api/me",get(whoami))
+        .route("/assets/projects/{filename}",get(portal::project_image))
+        .route("/projects/{id}",get(portal::project))
+        .route("/projects/{id}/works",post(portal::create_work))
+        .route("/projects/{id}/works/all",post(portal::create_all))
+        .route("/projects/{id}/assign",post(portal::assign_work))
+        .route("/administration",get(portal::administration))
+        .route("/administration/managers",post(portal::assign_manager))
         .route("/health",get(health))
         .route("/diagnostics",get(diagnostics))
         .route("/api/ocr/jobs",get(ocr_jobs_json))
@@ -184,7 +190,7 @@ pub fn router(state:Shared)->Router{
         .route("/catalog/errors",get(errors))
         .route("/norms",get(norms_view).post(create_norm_rule))
         .route("/norms/{id}/status",post(norm_rule_status))
-        .route("/projects",post(create_project))
+
         .route("/packages/{id}",get(package_view))
         .route("/packages/{id}/catalog",post(set_catalog))
         .route("/packages/{id}/checklist/custom",post(create_custom_checklist))
@@ -206,46 +212,18 @@ pub fn router(state:Shared)->Router{
         .route("/findings/{id}/review",post(review))
         .route("/packages/{id}/report/{fmt}",get(report))
         .layer(DefaultBodyLimit::max((state.cfg.max_file_mb.saturating_mul(20).saturating_mul(1024*1024).saturating_add(1024*1024)) as usize))
-        .layer(middleware::from_fn_with_state(state.clone(),basic_auth))
+        .layer(middleware::from_fn_with_state(state.clone(),access::authorize))
         .with_state(state)
 }
 
-async fn home(State(st):State<Shared>)->WebResult<Html<String>> {
-    let projects=sqlx::query_as::<_,crate::models::Project>("SELECT id,name FROM projects ORDER BY name").fetch_all(&st.db).await?;
-    let mut body=String::from("<h1>Проекты и комплекты ИД</h1><p class=muted>Открывайте нужный комплект: результаты и действия показываются только для него. Персональные кабинеты потребуют отдельной системы учётных записей и назначения работ.</p>");
-    if st.synology_connected.load(Ordering::Relaxed) {body.push_str("<p class=ok>Synology HTTPS API: последняя проверка успешна</p>");}
-    else {body.push_str("<p class=warn>Synology HTTPS API: нет успешной проверки соединения. Проверьте журнал systemd.</p>");}
-    body.push_str(&format!("<article><h2>Создать проект и комплект</h2><form method=post action=/projects>{}",hidden(&st.csrf)));
-    body.push_str("<input name=name placeholder=\"Объект строительства\" required maxlength=300><select name=work_type>");
-    for wt in &st.catalog.work_types{body.push_str(&format!("<option value=\"{}\">{}</option>",h(&wt.name),h(&wt.name)));}
-    body.push_str("</select><button>Создать</button></form></article>");
-    for p in projects {
-        body.push_str(&format!("<article><h2>{}</h2><div class=chips>",h(&p.name)));
-        let packages=sqlx::query_as::<_,Package>("SELECT id,project_id,name,catalog_name,required_codes_json FROM packages WHERE project_id=$1 ORDER BY name")
-            .bind(p.id).fetch_all(&st.db).await?;
-        for pkg in packages{body.push_str(&format!("<a class=chip href=\"/packages/{}\">{}</a>",pkg.id,h(&pkg.name)));}
-        body.push_str("</div></article>");
-    }
-    Ok(layout("Проекты",body))
+async fn whoami(Extension(actor):Extension<access::Principal>)->Json<serde_json::Value>{
+    Json(serde_json::json!({"name":actor.name,"id":actor.user_id,"superadmin":actor.superuser,"debug":actor.debug}))
 }
-#[derive(Deserialize)]struct CreateProject {name:String,work_type:String,csrf:String}
-async fn create_project(State(st):State<Shared>,Form(form):Form<CreateProject>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    let name=repo::validate_segment(&form.name).map_err(|_|WebError::bad("Invalid project name"))?;
-    let work=repo::validate_segment(&form.work_type).map_err(|_|WebError::bad("Invalid work name"))?;
-    let project=repo::get_or_create_project(&st.db,name).await?;
-    let pkg=repo::get_or_create_package(&st.db,project.id,work).await?;
-    if let Some(wt)=st.catalog.closest(work){
-        sqlx::query("UPDATE packages SET catalog_name=$1 WHERE id=$2 AND catalog_name IS NULL")
-            .bind(&wt.name).bind(pkg.id).execute(&st.db).await?;
-    }
-    repo::audit(&st.db,&st.cfg.app_user,"create_package",&format!("{name}/{work}")).await?;
-    Ok(Redirect::to(&format!("/packages/{}",pkg.id)))
-}
+
 #[derive(sqlx::FromRow)]
 struct CustomChecklist {id:i64,code:String,title:String,required:bool,note:String}
 #[derive(Deserialize,Default)]struct RunQuery{run_id:Option<i64>,notice:Option<String>,doc:Option<i64>}
-async fn package_view(State(st):State<Shared>,Path(id):Path<i64>,Query(params):Query<RunQuery>)->WebResult<Html<String>>{
+async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,Query(params):Query<RunQuery>)->WebResult<Html<String>>{
     let pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
     let projects=sqlx::query_as::<_,crate::models::Project>("SELECT id,name FROM projects WHERE id=$1")
         .bind(pkg.project_id).fetch_one(&st.db).await?;
@@ -269,7 +247,20 @@ async fn package_view(State(st):State<Shared>,Path(id):Path<i64>,Query(params):Q
     let unresolved=findings.iter().filter(|f|f.review_status=="pending" || f.review_status=="confirmed").count();
     let nonclassified=latest.iter().filter(|d|d.source_kind=="ID" && d.catalog_code.is_none()).count();
     let pct=if required_codes.is_empty(){None}else{Some((completed*100/required_codes.len()).min(100))};
-    let mut body=format!("<p><a href=\"/\">← Проекты</a></p><h1>{} / {}</h1>",h(&projects.name),h(&pkg.name));
+    let actor_role=access::package_role(&st,&actor,id).await.unwrap_or_else(||"viewer".into());
+    let mut sidebar=String::new();
+    let sibling_packages:Vec<Package>=sqlx::query_as("SELECT id,project_id,name,catalog_name,required_codes_json FROM packages WHERE project_id=$1 ORDER BY name")
+        .bind(pkg.project_id).fetch_all(&st.db).await?;
+    for p in &sibling_packages {
+        if access::package_role(&st,&actor,p.id).await.is_none(){continue;}
+        sidebar.push_str(&format!("<a class='sidebar-work {}' href='/packages/{}'>▧ {}</a>",if p.id==id{"active"}else{""},p.id,h(&p.name)));
+    }
+    let (address,slug)=portal::project_info(&projects.name).unwrap_or(("Адрес не указан","tetris"));
+    let mut body=format!(r##"<div class="crumb"><a href="/">Выбор объектов</a> › <a href="/projects/{}">{}</a> › {}</div>
+      <section class="package-hero" style="--hero-image:url('/assets/projects/{}.webp')"><div><h1>{}</h1><p>⌖ {} · {} · Комплект исполнительной документации</p></div></section>
+      <div class="package-shell"><aside class="package-sidebar"><div class="sidebar-project"><img src="/assets/projects/{}.webp" alt="Объект"><div><strong>{}</strong><small>{}</small></div></div><h3>Комплекты исполнительной документации</h3>{}</aside><div class="package-content role-{}">
+      <nav class="package-tabs"><a href="#upload">Загрузка и проверка</a><a href="#documents">Список документов</a><a href="#checks">Результаты проверки</a><a href="#checklist">Чек-лист</a><a href="#ocr">История / OCR</a></nav>"##,
+      pkg.project_id,h(&projects.name),h(&pkg.name),slug,h(&pkg.name),h(address),h(&projects.name),slug,h(&projects.name),h(address),sidebar,h(&actor_role));
     if let Some(notice)=params.notice.as_deref() {
         let msg=match notice {"classified"=>"Тип документа сохранён, комплект перепроверен.","uploaded"=>"Файлы загружены. Результаты обработки доступны ниже.","checklist"=>"Изменения чек-листа сохранены, комплект перепроверен.",_=>""};
         if !msg.is_empty(){body.push_str(&format!("<p class=notice role=status>{msg} {}</p>",params.doc.map(|d|format!("Документ #{d}")).unwrap_or_default()));}
@@ -299,7 +290,7 @@ async fn package_view(State(st):State<Shared>,Path(id):Path<i64>,Query(params):Q
         for item in &wt.items {panel_html.push_str(&format!("<option value='{}'>{} — {}</option>",h(&item.code),h(&item.code),h(&item.title)));}
     }
     for item in &custom_items {panel_html.push_str(&format!("<option value='{}'>{}</option>",h(&item.code),h(&item.title)));}
-    panel_html.push_str("</select></label><p><input class=uploadfile type=file name=file multiple required accept='.pdf,.docx,.xlsx,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.webp'><small id=upload-count>Можно выбрать до 20 файлов за раз</small></p><button>Загрузить файлы</button></form>");
+    panel_html.push_str("</select></label><div class=drop-zone id=upload-drop><strong class=upload-mark>⇧</strong><h3>Перетащите файлы сюда или выберите на компьютере</h3><p class=muted>PDF, DOCX, XLSX, JPG, PNG, TIFF, BMP, GIF, WebP · до 20 файлов (DWG пока не поддерживается)</p><input class=uploadfile type=file name=file multiple required accept='.pdf,.docx,.xlsx,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.webp'><small id=upload-count>Файлы не выбраны</small></div><button class=primary>Загрузить файлы</button></form>");
     panel_html.push_str(&format!("<form action='/packages/{id}/scan' method=post>{}<button class=secondary>Просканировать Synology</button></form></div></details></article>",hidden(&st.csrf)));
     panels.insert("upload",std::mem::take(&mut panel_html));
     panel_html.push_str(&format!("<article id=checklist><details class=collapsible><summary>Чек-лист и вид работ</summary><div><form method=post action=\"/packages/{id}/catalog\">{}<select name=work_type>",hidden(&st.csrf)));
@@ -458,10 +449,16 @@ async fn package_view(State(st):State<Shared>,Path(id):Path<i64>,Query(params):Q
     }
     panel_html.push_str("</table></div></details></article>");
     panels.insert("norms-check",std::mem::take(&mut panel_html));
+    // The upload panel is shown directly after the summary for operational staff.
+    if let Some(upload_panel)=panels.remove("upload") {
+        body.push_str("<section class='main-upload-panel'>");
+        body.push_str(&upload_panel.replacen("<details class=collapsible>","<details class=collapsible open>",1));
+        body.push_str("</section>");
+    }
     body.push_str("<section class=detail-sections id=detail-sections aria-labelledby=details-title><h2 id=details-title>Подробные разделы</h2><p class=detail-intro>Все таблицы и настройки расположены здесь. По умолчанию они свёрнуты. Выбери нужную проверку в сводке наверху — откроется соответствующий раздел ниже.</p>");
     for (title,description,ids) in [
         ("Результаты проверок","Замечания инженеру и утверждённые нормативные правила",vec!["checks","norms-check"]),
-        ("Документы и комплект","Загруженные файлы, привязка к позициям, редактирование и загрузка",vec!["documents","checklist","upload"]),
+        ("Документы и комплект","Загруженные файлы, привязка к позициям, редактирование и загрузка",vec!["documents","checklist"]),
         ("Распознавание и ИИ","Предложения классификатора, очередь OCR и настройки внешнего ИИ",vec!["classification","ocr","ai-check"]),
     ] {
         body.push_str(&format!("<div class=detail-group><h3>{title}</h3><p>{description}</p>"));
@@ -476,6 +473,7 @@ async fn package_view(State(st):State<Shared>,Path(id):Path<i64>,Query(params):Q
     }
     body.push_str("</section>");
     if docs.len()>current.len(){body.push_str(&format!("<p>Предыдущие версии: {} (сохраняются в архиве и доступны по ID).</p>",docs.len()-current.len()));}
+    body.push_str("</div></div>");
     Ok(layout("Комплект ИД",body))
 }
 
@@ -964,7 +962,7 @@ async fn ocr_status_json(State(st):State<Shared>)->WebResult<Json<serde_json::Va
     let scanning=st.scan_status.read().map(|state|state.running).unwrap_or(false);
     let scan_message=st.scan_status.read().map(|state|state.message.clone()).unwrap_or_default();
     Ok(Json(serde_json::json!({
-        "app_version":"0.6.9","ocr_mode":st.cfg.ocr_mode,
+        "app_version":"0.9.0","ocr_mode":st.cfg.ocr_mode,
         "data_root":st.cfg.data_root.to_string_lossy(),
         "temp_root":st.cfg.temp_root.to_string_lossy(),
         "local_ocr_model_dir":st.cfg.local_ocr_model_dir.to_string_lossy(),
@@ -994,7 +992,7 @@ async fn diagnostics(State(st):State<Shared>)->WebResult<Html<String>>{
     let scan=st.scan_status.read().map(|s|s.clone()).unwrap_or_default();
     let mut body=String::from("<h1>Диагностика системы и OCR</h1><p>Здесь отображаются фактические настройки запуска, очередь и события. API-ключ и содержимое документов в журнал не записываются.</p>");
     body.push_str("<article><h2>Компоненты</h2><table><tr><th>Компонент</th><th>Состояние</th></tr>");
-    body.push_str(&format!("<tr><td>Приложение</td><td>v0.6.9 · порт {}</td></tr>",h(&st.cfg.listen)));
+    body.push_str(&format!("<tr><td>Приложение</td><td>v0.9.0 · порт {}</td></tr>",h(&st.cfg.listen)));
     body.push_str(&format!("<tr><td>Локальный архив DATA_ROOT</td><td>{}</td></tr><tr><td>Временные файлы TEMP_ROOT</td><td>{}</td></tr>",
         h(&st.cfg.data_root.to_string_lossy()),h(&st.cfg.temp_root.to_string_lossy())));
     body.push_str(&format!("<tr><td>PostgreSQL</td><td>Подключена (данные получены)</td></tr><tr><td>Synology</td><td>{}</td></tr>",
@@ -1067,5 +1065,5 @@ async fn health(State(st):State<Shared>)->WebResult<Json<serde_json::Value>>{
         .fetch_one(&st.db).await?;
     Ok(Json(serde_json::json!({"synology_connected":st.synology_connected.load(Ordering::Relaxed),
         "approved_normative_rules":approved.0,"normative_rules_configured":approved.0>0,
-        "app_version":"0.6.9"})))
+        "app_version":"0.9.0"})))
 }

@@ -1,4 +1,6 @@
 mod ai;
+mod access;
+mod portal;
 mod catalog;
 mod classification;
 mod config;
@@ -28,6 +30,8 @@ async fn main()->Result<()> {
     tracing_subscriber::fmt().with_env_filter(
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_|"id_control_axum=info,tower_http=info,info".into())
     ).init();
+    let debug_login=std::env::args().any(|arg|arg=="--debug-login");
+    if debug_login { tracing::warn!("DEBUG LOGIN ACTIVE: Basic admin/super123; do not expose this mode to the Internet"); }
     let cfg=config::Config::load()?;
     info!(data_root=%cfg.data_root.display(),temp_root=%cfg.temp_root.display(),models=%cfg.local_ocr_model_dir.display(),"Local Windows/project storage paths resolved");
     // Stand-alone OCR test (no PostgreSQL or Synology required).
@@ -101,7 +105,7 @@ async fn main()->Result<()> {
     let nas=synology::SynologyClient::new(&cfg)?;
     let st=Arc::new(web::AppState{cfg:cfg.clone(),db,catalog,nas,
         synology_connected:AtomicBool::new(false),scan_lock:tokio::sync::Mutex::new(()),csrf,
-        scan_status:std::sync::RwLock::new(web::ScanStatus::default())});
+        scan_status:std::sync::RwLock::new(web::ScanStatus::default()),debug_login});
     let background=st.clone();
     tokio::spawn(async move{
         let mut interval=tokio::time::interval(Duration::from_secs(background.cfg.poll_interval));

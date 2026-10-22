@@ -82,8 +82,10 @@ impl Config {
             None=>cwd,
         }.canonicalize().context("Cannot resolve directory containing .env")?;
         let password=var("APP_PASSWORD", "");
+        if !std::env::args().any(|arg|arg=="--debug-login") {
         if password.len()<3 || password.starts_with("REPLACE") || password.starts_with("CHANGE") {
             bail!("APP_PASSWORD must have at least 3 bytes and must not start with REPLACE or CHANGE");
+        }
         }
         let database_url=var("DATABASE_URL", "");
         if !database_url.starts_with("postgres://") && !database_url.starts_with("postgresql://") {
