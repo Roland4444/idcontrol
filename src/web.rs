@@ -36,7 +36,7 @@ pub struct WebError {status:StatusCode, detail:String}
 impl WebError {
     pub(crate) fn bad(s:impl Into<String>)->Self{Self{status:StatusCode::BAD_REQUEST,detail:s.into()}}
     pub(crate) fn not_found()->Self{Self{status:StatusCode::NOT_FOUND,detail:"Not found".into()}}
-    pub(crate) fn forbidden()->Self{Self{status:StatusCode::FORBIDDEN,detail:"CSRF validation failed".into()}}
+    pub(crate) fn forbidden()->Self{Self{status:StatusCode::FORBIDDEN,detail:"Недостаточно прав или неверный защитный токен формы".into()}}
 }
 impl From<anyhow::Error> for WebError {
     fn from(err:anyhow::Error)->Self{error!("Request failed: {err:#}");Self{status:StatusCode::INTERNAL_SERVER_ERROR,detail:"Internal server error (check server logs)".into()}}
@@ -58,7 +58,18 @@ pub(crate) fn layout(title:&str,body:String)->Html<String>{
 <style>body{{background:#f4f7fa;color:#1d334a;font:15px system-ui,Arial;margin:0}}header{{padding:17px 5%;background:#223851;color:white}}header a{{color:white;margin-right:24px;text-decoration:none}}main{{max-width:1550px;margin:28px auto;padding:0 16px}}article{{background:white;border:1px solid #d8e0e8;border-radius:10px;padding:18px;margin:18px 0;overflow-x:auto}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #dae1e8;text-align:left;vertical-align:top}}th{{background:#eef3f7}}input,select,textarea,button{{padding:8px;border-radius:5px;border:1px solid #bbc7d2;font:inherit;margin:3px}}button{{background:#224a69;color:white;border:0;cursor:pointer}}a{{color:#116caa}}small,.muted{{color:#536778}}.warn{{color:#8b4d17}}.ok{{color:#386e4c}}.row{{display:flex;gap:12px;flex-wrap:wrap;align-items:center}}.chips{{display:flex;gap:8px;flex-wrap:wrap}}.chip{{background:#e8eff5;border-radius:15px;padding:5px 9px}}.status{{font-weight:600}}.job{{padding:12px;margin:10px 0;border:1px solid #dce4ed;border-radius:8px;background:#fafcfe}}.job-running{{border-left:4px solid #2379a1}}.job-failed{{border-left:4px solid #c34d4d}}.job-done{{border-left:4px solid #45936e}}.job-partial{{border-left:4px solid #c99a3a}}progress{{width:220px;max-width:100%;height:14px}}.toolbox{{display:flex;gap:10px;flex-wrap:wrap;align-items:center}}.toolbox form{{display:inline-flex}}.secondary{{background:#e8f0f7;color:#153b56}}.warnbutton{{background:#a0532c}}
 :root{{color-scheme:light}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{line-height:1.45}}main{{max-width:1440px}}article{{scroll-margin-top:76px}}header{{position:sticky;top:0;z-index:10;box-shadow:0 1px 6px #071c2d24}}header a{{display:inline-block;padding:3px 0}}.overview{{background:#fff;border:1px solid #d8e0e8;border-radius:12px;padding:23px;margin:18px 0;scroll-margin-top:74px}}.metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:15px}}.metric{{padding:15px;border:1px solid #dae4ed;border-radius:9px;background:#fbfdff;min-width:0}}.metric strong{{font-size:24px;display:block;color:#123b54}}.jump-links{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px;margin-top:18px}}.jump-links a{{display:block;border:1px solid #d2e0e9;border-radius:9px;padding:13px;text-decoration:none;background:#f8fbfe;font-weight:600}}.jump-links a small{{display:block;font-weight:400;margin-top:4px}}.jump-links a:hover{{background:#eaf4fb}}details.collapsible>summary{{font-size:19px;font-weight:650;cursor:pointer;padding:6px 2px;list-style:revert}}details.collapsible>summary::marker{{color:#28719e}}details.collapsible>div{{padding:12px 0}}details.collapsible:not([open]){{padding-bottom:12px}}.summarybar{{height:10px;background:#e6edf3;border-radius:8px;overflow:hidden;margin-top:12px}}.summarybar span{{background:#28719e;display:block;height:100%}}.notice{{border-left:4px solid #288258;padding:10px 14px;background:#edf8f0;margin:15px 0;border-radius:6px}}.privacy{{border:1px solid #d6ab69;background:#fffbf2;border-radius:8px;padding:14px;margin:12px 0}}.uploadfile{{max-width:100%}}.filefilter{{width:min(480px,100%)}}.filelist td{{max-width:530px;overflow-wrap:anywhere}}.filelist tr:target{{outline:2px solid #2183a5}}.minor{{font-size:13px}}.edit-row{{border:1px solid #e0e7ec;padding:10px;border-radius:6px;margin:8px 0}}.sticky-info{{display:inline-block;font-size:13px;color:#d3e7f4;margin-left:16px}}.resultlink{{text-decoration:none}}.buttonlink{{display:inline-block;background:#e8f0f7;color:#153b56;text-decoration:none;border-radius:6px;padding:9px}}.sr-only{{position:absolute;left:-9999px}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.jump-links{{grid-template-columns:repeat(2,minmax(0,1fr))}}header a{{margin-right:8px}}article{{padding:12px}}td,th{{padding:6px}}}}@media(max-width:480px){{.jump-links{{grid-template-columns:1fr}}}}.attention-panel{{background:#fff;border:1px solid #d7e2eb;border-radius:12px;padding:22px;margin:18px 0 28px}}.attention-list{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}.attention-item{{border:1px solid #d9e3eb;border-radius:9px;padding:16px;background:#fafcfe;min-width:0}}.attention-item strong{{display:block;font-size:21px;margin-bottom:6px}}.attention-item a{{display:inline-block;margin-top:8px}}.detail-sections{{border-top:3px solid #d7e2eb;margin-top:38px;padding-top:22px;scroll-margin-top:90px}}.detail-sections>h2{{margin:8px 0}}.detail-group{{margin:27px 0 36px}}.detail-group>h3{{color:#244965;margin:0 0 6px}}.detail-group>p{{margin:0 0 12px;color:#536778}}.detail-group article{{margin:10px 0}}article.highlight-section{{outline:3px solid #2b82a5;outline-offset:3px;box-shadow:0 8px 22px #2b82a51c}}.jump-links a.active{{border-color:#28719e;background:#dceefa}}.backline{{text-align:right;margin:0 0 14px}}.backline a{{font-weight:600}}.detail-intro{{color:#536778}}@media(max-width:850px){{.attention-list{{grid-template-columns:1fr}}}}
 {portal_style}</style></head>
-<body><header><a class=brand href="/"><strong>RES</strong><span>DEVELOPMENT</span></a><a class="nav-link active" href="/">Проверка</a><a class="nav-link super-only" hidden href="/catalog/errors">Типовые ошибки</a><a class="nav-link super-only" hidden href="/norms">Нормативные правила</a><a class="nav-link super-only" hidden href="/diagnostics">Диагностика / OCR</a><div class=nav-spacer></div><a id="admin-tab" class="nav-link nav-right" href="/administration" hidden>⚙ Администрирование</a><span id=user-label class=user-label></span><span class=sticky-info id=top-progress></span></header><main>{body}</main><script>
+<body><header><a class=brand href="/"><strong>RES</strong><span>DEVELOPMENT</span></a><a class="nav-link" href="/">Проверка</a><a class="nav-link super-only" hidden href="/catalog/errors">Типовые ошибки</a><a class="nav-link super-only" hidden href="/norms">Нормативные правила</a><a class="nav-link super-only" hidden href="/diagnostics">Диагностика / OCR</a><div class=nav-spacer></div><a id="admin-tab" class="nav-link nav-right" href="/administration" hidden>⚙ Администрирование</a><span id=user-label class=user-label></span><span class=sticky-info id=top-progress></span></header><main>{body}</main><script>
+// Active menu follows the current route, including nested project/package pages.
+(function(){{
+  const path=location.pathname;
+  const links=Array.from(document.querySelectorAll('header .nav-link'));
+  let active='/';
+  if(path.startsWith('/administration'))active='/administration';
+  else if(path.startsWith('/catalog/errors'))active='/catalog/errors';
+  else if(path.startsWith('/norms'))active='/norms';
+  else if(path.startsWith('/diagnostics'))active='/diagnostics';
+  links.forEach(link=>{{const selected=link.getAttribute('href')===active;link.classList.toggle('active',selected);if(selected)link.setAttribute('aria-current','page');}});
+}})();
 fetch('/api/me',{{credentials:'same-origin'}}).then(r=>r.ok?r.json():null).then(u=>{{if(!u)return;const l=document.getElementById('user-label');if(l)l.textContent=u.name;const a=document.getElementById('admin-tab');if(u.superadmin){{if(a)a.hidden=false;document.querySelectorAll('.super-only').forEach(x=>x.hidden=false);}}}}).catch(()=>{{}});
 (function(){{
   async function refresh(el){{
@@ -107,7 +118,7 @@ fetch('/api/me',{{credentials:'same-origin'}}).then(r=>r.ok?r.json():null).then(
     if(details)details.open=true;
     document.querySelectorAll('article.highlight-section').forEach(el=>el.classList.remove('highlight-section'));
     if(article)article.classList.add('highlight-section');
-    document.querySelectorAll('#summary .jump-links a').forEach(a=>{{
+    document.querySelectorAll('#summary .jump-links a, .package-tabs a').forEach(a=>{{
       a.classList.toggle('active',a.getAttribute('href')==='#'+id || (article && a.getAttribute('href')==='#'+article.id));
     }});
     if(updateUrl)history.pushState(null,'','#'+encodeURIComponent(id));
@@ -170,6 +181,7 @@ pub fn router(state:Shared)->Router{
         .route("/",get(portal::projects))
         .route("/bitrix",get(access::bitrix_bootstrap).post(access::bitrix_bootstrap))
         .route("/auth/bitrix",post(access::login))
+        .route("/assets/bitrix-client.js",get(access::bitrix_client_js))
         .route("/auth/logout",post(access::logout))
         .route("/api/me",get(whoami))
         .route("/assets/projects/{filename}",get(portal::project_image))
@@ -179,6 +191,7 @@ pub fn router(state:Shared)->Router{
         .route("/projects/{id}/assign",post(portal::assign_work))
         .route("/administration",get(portal::administration))
         .route("/administration/managers",post(portal::assign_manager))
+        .route("/administration/projects/access",post(portal::assign_project_access))
         .route("/administration/synology-map",post(portal::save_synology_mapping))
         .route("/health",get(health))
         .route("/diagnostics",get(diagnostics))
@@ -263,7 +276,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     let mut body=format!(r##"<div class="crumb"><a href="/">Выбор объектов</a> › <a href="/projects/{}">{}</a> › {}</div>
       <section class="package-hero" style="--hero-image:url('/assets/projects/{}.webp')"><div><h1>{}</h1><p>⌖ {} · {} · Комплект исполнительной документации</p></div></section>
       <div class="package-shell"><aside class="package-sidebar"><div class="sidebar-project"><img src="/assets/projects/{}.webp" alt="Объект"><div><strong>{}</strong><small>{}</small></div></div><h3>Комплекты исполнительной документации</h3>{}</aside><div class="package-content role-{}">
-      <nav class="package-tabs"><a href="#upload">Загрузка и проверка</a><a href="#documents">Список документов</a><a href="#checks">Результаты проверки</a><a href="#checklist">Чек-лист</a><a href="#ocr">История / OCR</a></nav>"##,
+      <nav class="package-tabs" aria-label="Разделы проверки"><a href="#upload">Загрузка и проверка</a><a href="#documents">Список документов</a><a href="#checks">Результаты проверки</a><a href="#remarks">Замечания</a><a href="#history">История проверок</a></nav>"##,
       pkg.project_id,h(&projects.name),h(&pkg.name),slug,h(&pkg.name),h(address),h(&projects.name),slug,h(&projects.name),h(address),sidebar,h(&actor_role));
     if let Some(notice)=params.notice.as_deref() {
         let msg=match notice {"classified"=>"Тип документа сохранён, комплект перепроверен.","uploaded"=>"Файлы загружены. Результаты обработки доступны ниже.","checklist"=>"Изменения чек-листа сохранены, комплект перепроверен.",_=>""};
@@ -273,7 +286,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     body.push_str(&format!("<section class=overview id=summary><h2>Результат проверки комплекта</h2><p class=muted>Прогресс показывает покрытие обязательных позиций файлами, <b>не</b> соответствие ГОСТ/СП. Рассматривается только выбранный комплект.</p><div class=metrics><div class=metric>Файлы ИД<strong>{id_docs}</strong><small>ПД/РД: {ref_docs}</small></div><div class=metric>Чек-лист<strong>{completed}/{}</strong><small>Обязательных позиций</small></div><div class=metric>Замечания<strong>{unresolved}</strong><small>Требуют рассмотрения</small></div><div class=metric>Не привязаны<strong>{nonclassified}</strong><small>Файлов ИД</small></div></div>",required_codes.len()));
     body.push_str(&format!("<p><b>Комплектность: {coverage}</b></p>"));
     if let Some(n)=pct {body.push_str(&format!("<div class=summarybar role=progressbar aria-valuemin=0 aria-valuemax=100 aria-valuenow={n} aria-label='Покрытие чек-листа'><span style='width:{n}%'></span></div>"));}
-    body.push_str("<nav class=jump-links aria-label='Разделы комплекта'><a href=#checks>Замечания<small>Результаты и решения инженера</small></a><a href=#documents>Документы<small>Файлы, типы и вложения</small></a><a href=#checklist>Чек-лист<small>Изменение обязательных позиций</small></a><a href=#upload>Загрузить<small>Несколько файлов одной операцией</small></a><a href=#classification>ИИ-классификация<small>Предложения модели и подтверждение</small></a><a href=#ocr>Обработка и прогресс<small>Фоновые задания OCR</small></a><a href=#norms-check>Нормативные правила<small>Подробные результаты</small></a></nav></section>");
+    body.push_str("<nav class=jump-links aria-label='Разделы комплекта'><a href=#remarks>Замечания<small>Результаты и решения инженера</small></a><a href=#documents>Документы<small>Файлы, типы и вложения</small></a><a href=#checklist>Чек-лист<small>Изменение обязательных позиций</small></a><a href=#upload>Загрузить<small>Несколько файлов одной операцией</small></a><a href=#classification>ИИ-классификация<small>Предложения модели и подтверждение</small></a><a href=#ocr>Обработка и прогресс<small>Фоновые задания OCR</small></a><a href=#norms-check>Нормативные правила<small>Подробные результаты</small></a></nav></section>");
     // A compact action-oriented summary stays above ALL detailed menus.
     let missing=required_codes.len().saturating_sub(completed);
     body.push_str("<section class=attention-panel aria-labelledby=attention-title><h2 id=attention-title>Что требует внимания</h2><p class=muted>Ниже перечислены только сводные результаты. Подробные таблицы находятся внизу страницы: нажмите на ссылку, чтобы открыть нужный раздел.</p><div class=attention-list>");
@@ -282,7 +295,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     } else {
         body.push_str(&format!("<div class=attention-item><strong>{missing} отсутствуют</strong><span>Обязательные позиции без приложенных документов</span><br><a href=#checklist>Открыть чек-лист ↓</a></div>"));
     }
-    body.push_str(&format!("<div class=attention-item><strong>{unresolved} замечаний</strong><span>Ожидают решения или подтверждены инженером</span><br><a href=#checks>Открыть замечания ↓</a></div>"));
+    body.push_str(&format!("<div class=attention-item><strong>{unresolved} замечаний</strong><span>Ожидают решения или подтверждены инженером</span><br><a href=#remarks>Открыть замечания ↓</a></div>"));
     body.push_str(&format!("<div class=attention-item><strong>{nonclassified} не привязаны</strong><span>Файлы ИД без позиции чек-листа</span><br><a href=#documents>Перейти к документам ↓</a></div>"));
     body.push_str("</div></section>");
     if actor_role=="manager" || actor_role=="engineer" {
@@ -433,22 +446,32 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     }
     panel_html.push_str("</tbody></table></div></details></article>");
     panels.insert("documents",std::mem::take(&mut panel_html));
-    panel_html.push_str("<article id=checks><details class=collapsible><summary>Проверки и замечания</summary><div><div class=row>");
-    for run in &runs{panel_html.push_str(&format!("<a class=chip href=\"/packages/{id}?run_id={}#checks\">Проверка #{} — {}</a>",run.id,run.id,run.started_at.format("%d.%m.%Y %H:%M")));}
-    panel_html.push_str("</div>");
-    if let Some(run)=selected{
+    panel_html.push_str("<article id=checks><details class=collapsible><summary>Результаты проверки комплекта</summary><div><p class=muted>Ниже доступны сформированные отчёты, сводка актуальной проверки и выгрузки замечаний. Решения инженера находятся во вкладке «Замечания».</p>");
+    if let Some(run)=selected {
+        panel_html.push_str(&format!("<p><strong>Проверка #{} от {}</strong> · Источник: {}</p>",run.id,run.started_at.format("%d.%m.%Y %H:%M"),h(&run.source)));
+        panel_html.push_str(&format!("<p>Зафиксировано замечаний в выбранной проверке: <strong>{}</strong></p>",findings.len()));
         panel_html.push_str(&format!("<p><a href=\"/packages/{id}/report/xlsx?run_id={}\">XLSX</a> · <a href=\"/packages/{id}/report/docx?run_id={}\">DOCX</a> · <a href=\"/packages/{id}/report/pdf?run_id={}\">PDF</a> — официальная выгрузка только подтверждённых/устранённых замечаний. <a href=\"/packages/{id}/report/xlsx?run_id={}&draft=true\">Черновик всех</a></p>",run.id,run.id,run.id,run.id));
+    } else {
+        panel_html.push_str("<p>Проверки ещё не выполнялись. Загрузите ИД и настройте чек-лист.</p>");
     }
-    panel_html.push_str("<table><tr><th>Блок и код</th><th>Источник и описание</th><th>Результат</th><th>Решение инженера</th></tr>");
+    panel_html.push_str("<p><a href=#remarks>Просмотреть замечания →</a> · <a href=#history>История проверок →</a></p></div></details></article>");
+    panels.insert("checks",std::mem::take(&mut panel_html));
+    panel_html.push_str("<article id=remarks><details class=collapsible><summary>Замечания и решения инженера</summary><div><table><tr><th>Блок и код</th><th>Источник и описание</th><th>Результат</th><th>Решение инженера</th></tr>");
     for f in findings{
         panel_html.push_str(&format!("<tr><td>{} / {}</td><td><small>{}</small><p>{}</p>{}</td><td class=status>{}</td><td><form method=post action=\"/findings/{}/review\">{}<select name=status>",f.block,h(&f.rule_code),h(&f.source_location),h(&f.description),if f.reference.is_empty(){"".to_string()}else{format!("<small>{}</small>",h(&f.reference))},if f.result=="mismatch"{"Выявлено несоответствие"}else{"Требуется ручная проверка"},f.id,hidden(&st.csrf)));
         for (value,label) in [("pending","На рассмотрении"),("confirmed","Подтверждено"),("rejected","Отклонено"),("resolved","Устранено")]{
-            let sel=if f.review_status==value{"selected"}else{""};panel_html.push_str(&format!("<option value={value} {sel}>{label}</option>"));
+            let sel=if f.review_status==value {"selected"}else{""};panel_html.push_str(&format!("<option value={value} {sel}>{label}</option>"));
         }
         panel_html.push_str(&format!("</select><input name=comment placeholder=Комментарий value=\"{}\"><button>Сохранить</button></form></td></tr>",h(&f.comment)));
     }
     panel_html.push_str("</table><p class=muted>Отсутствие замечаний не подтверждает соответствие всем строительным нормам. Применяются только утверждённые правила; НТД не придумываются.</p></div></details></article>");
-    panels.insert("checks",std::mem::take(&mut panel_html));
+    panels.insert("remarks",std::mem::take(&mut panel_html));
+    panel_html.push_str("<article id=history><details class=collapsible><summary>История проверок</summary><div><table><thead><tr><th>Проверка</th><th>Дата и время</th><th>Источник</th><th>Действия</th></tr></thead><tbody>");
+    for run in &runs {
+        panel_html.push_str(&format!("<tr><td>#{}</td><td>{}</td><td>{}</td><td><a href=\"/packages/{id}?run_id={}#remarks\">Открыть замечания</a></td></tr>",run.id,run.started_at.format("%d.%m.%Y %H:%M"),h(&run.source),run.id));
+    }
+    panel_html.push_str("</tbody></table><p class=muted>История OCR доступна в разделе «Распознавание и ИИ» ниже.</p><a href=#ocr>Перейти к заданиям OCR →</a></div></details></article>");
+    panels.insert("history",std::mem::take(&mut panel_html));
     panel_html.push_str("<article id=norms-check><details class=collapsible><summary>Проверки утверждённых нормативных правил</summary><div><p class=muted>«Найдено подтверждение» означает обнаружение заданного текста, а не полное соответствие ГОСТ/СП. Настроить правила: <a href=/norms>НТД и пункты</a>.</p><table><tr><th>Документ / правило</th><th>Норматив и источник</th><th>Результат</th></tr>");
     for check in &norm_checks{
         let label=match check.result.as_str(){"evidence_found"=>"Найдено подтверждение в тексте","mismatch"=>"Вероятное несоответствие","manual"=>"Требуется проверка инженера",_=>"Неизвестно"};
@@ -456,15 +479,25 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     }
     panel_html.push_str("</table></div></details></article>");
     panels.insert("norms-check",std::mem::take(&mut panel_html));
-    // The upload panel is shown directly after the summary for operational staff.
+    // Match the screen mock-up: upload and recent documents immediately below
+    // the tabs. Existing tables and audit history remain further down.
+    let mut primary=String::new();
     if let Some(upload_panel)=panels.remove("upload") {
-        body.push_str("<section class='main-upload-panel'>");
-        body.push_str(&upload_panel.replacen("<details class=collapsible>","<details class=collapsible open>",1));
-        body.push_str("</section>");
+        primary.push_str("<section class='main-upload-panel'>");
+        primary.push_str(&upload_panel.replacen("<details class=collapsible>","<details class=collapsible open>",1));
+        primary.push_str("</section>");
     }
+    primary.push_str("<section class='recent-documents'><div class='recent-heading'><h2>Загруженные документы</h2><a href='#documents'>Полный список документов →</a></div><table><thead><tr><th>Файл</th><th>Тип</th><th>OCR</th><th>Действие</th></tr></thead><tbody>");
+    for d in latest.iter().take(8) {
+        primary.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td><a href='/documents/{}/download'>Просмотр / оригинал</a></td></tr>",
+            h(&d.relative_path),h(d.document_type.as_deref().unwrap_or("Не классифицирован")),h(&d.recognition_status),d.id));
+    }
+    if latest.is_empty(){primary.push_str("<tr><td colspan='4'>Документы ещё не загружены.</td></tr>");}
+    primary.push_str("</tbody></table></section>");
+    if let Some(pos)=body.find("<section class=overview id=summary>") {body.insert_str(pos,&primary);}else{body.push_str(&primary);}
     body.push_str("<section class=detail-sections id=detail-sections aria-labelledby=details-title><h2 id=details-title>Подробные разделы</h2><p class=detail-intro>Все таблицы и настройки расположены здесь. По умолчанию они свёрнуты. Выбери нужную проверку в сводке наверху — откроется соответствующий раздел ниже.</p>");
     for (title,description,ids) in [
-        ("Результаты проверок","Замечания инженеру и утверждённые нормативные правила",vec!["checks","norms-check"]),
+        ("Результаты проверок","Отчёты, замечания, история и утверждённые нормативные правила",vec!["checks","remarks","history","norms-check"]),
         ("Документы и комплект","Загруженные файлы, привязка к позициям, редактирование и загрузка",vec!["documents","checklist"]),
         ("Распознавание и ИИ","Предложения классификатора, очередь OCR и настройки внешнего ИИ",vec!["classification","ocr","ai-check"]),
     ] {

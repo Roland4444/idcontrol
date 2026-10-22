@@ -21,6 +21,7 @@ fn bad_auth()->Response {(StatusCode::UNAUTHORIZED,"Войдите через п
 fn allowed_public(path:&str,method:&Method)->bool {
     (path=="/bitrix" && (method==Method::GET || method==Method::POST)) ||
     (path=="/auth/bitrix" && method==Method::POST) ||
+    (path=="/assets/bitrix-client.js" && method==Method::GET) ||
     (path.starts_with("/assets/projects/") && method==Method::GET)
 }
 fn param_id(path:&str,prefix:&str)->Option<i64>{path.strip_prefix(prefix)?.split('/').next()?.parse().ok()}
@@ -42,7 +43,7 @@ async fn actor_from_headers(st:&Shared, auth_header:Option<&str>, cookies:Option
     let session=cookie.split(';').filter_map(|p|p.trim().split_once('='))
         .find(|(k,_)|*k=="__Host-idcontrol_session").map(|(_,v)|v)?;
     if session.len()!=64 || !session.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_'){return None;}
-    let row=sqlx::query("SELECT s.member_id,s.user_id,s.display_name FROM portal_sessions s JOIN bitrix_principals p ON p.member_id=s.member_id AND p.user_id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND p.active=true")
+    let row=sqlx::query("SELECT s.member_id,s.user_id,s.display_name FROM portal_sessions s JOIN bitrix_principals p ON p.member_id=s.member_id AND p.user_id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND (p.active=true OR s.user_id IN (1,336))")
         .bind(digest(session)).fetch_optional(&st.db).await.ok()??;
     let user_id:i64=row.try_get("user_id").ok()?;
     Some(Principal{member:row.try_get("member_id").ok()?,user_id,name:row.try_get("display_name").ok()?,superuser:is_super(user_id),debug:false})
@@ -87,6 +88,11 @@ pub async fn is_manager(st:&Shared,a:&Principal,project:i64)->bool{
 }
 pub async fn project_visible(st:&Shared,a:&Principal,project:i64)->bool{
     if is_manager(st,a,project).await {return true;}
+    // Explicit project membership permits seeing the project card, but gives NO access
+    // to its packages. Legacy per-package grants continue to imply visibility.
+    let granted=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM bitrix_project_access WHERE member_id=$1 AND user_id=$2 AND project_id=$3)")
+        .bind(&a.member).bind(a.user_id).bind(project).fetch_one(&st.db).await.unwrap_or(false);
+    if granted{return true;}
     sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM bitrix_package_acl a JOIN packages p ON p.id=a.package_id WHERE a.member_id=$1 AND a.user_id=$2 AND p.project_id=$3)")
         .bind(&a.member).bind(a.user_id).bind(project).fetch_one(&st.db).await.unwrap_or(false)
 }
@@ -178,14 +184,15 @@ pub async fn login(State(st):State<Shared>,Json(body):Json<BitrixStart>)->Respon
     if record.is_err(){return (StatusCode::INTERNAL_SERVER_ERROR,"Failed to register user").into_response();}
     let enabled=sqlx::query_scalar::<_,bool>("SELECT active FROM bitrix_principals WHERE member_id=$1 AND user_id=$2")
         .bind(&configured_member).bind(id).fetch_optional(&st.db).await.ok().flatten().unwrap_or(false);
-    if !enabled {return (StatusCode::FORBIDDEN,"This Bitrix24 user is disabled").into_response();}
+    // Verified users 1 and 336 are always superadmins, even if the local active flag was disabled.
+    if !enabled && !is_super(id) {return (StatusCode::FORBIDDEN,"This Bitrix24 user is disabled").into_response();}
     let mut secret=[0u8;32];rand::thread_rng().fill_bytes(&mut secret);
     let token=hex::encode(secret);
     let stored=sqlx::query("INSERT INTO portal_sessions(token_hash,member_id,user_id,display_name,expires_at) VALUES ($1,$2,$3,$4,now()+interval '6 hours')")
         .bind(digest(&token)).bind(&configured_member).bind(id).bind(&name).execute(&st.db).await;
     if stored.is_err(){return (StatusCode::FORBIDDEN,"Account inactive or database error").into_response();}
     let mut r=Json(json!({"ok":true,"user_id":id,"superadmin":is_super(id)})).into_response();
-    let cookie=format!("__Host-idcontrol_session={token}; Path=/; Max-Age=21600; Secure; HttpOnly; SameSite=None");
+    let cookie=format!("__Host-idcontrol_session={token}; Path=/; Max-Age=21600; Secure; HttpOnly; SameSite=None; Partitioned");
     r.headers_mut().insert(header::SET_COOKIE,HeaderValue::from_str(&cookie).expect("safe cookie"));
     r
 }
@@ -197,10 +204,31 @@ pub async fn logout(State(st):State<Shared>,req:Request<Body>)->Response{
         let _=sqlx::query("DELETE FROM portal_sessions WHERE token_hash=$1").bind(digest(token)).execute(&st.db).await;
     }
     let mut response=(StatusCode::SEE_OTHER,[(header::LOCATION,"/bitrix")],"").into_response();
-    response.headers_mut().insert(header::SET_COOKIE,HeaderValue::from_static("__Host-idcontrol_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=None"));
+    response.headers_mut().insert(header::SET_COOKIE,HeaderValue::from_static("__Host-idcontrol_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=None; Partitioned"));
     response
 }
 
 pub async fn bitrix_bootstrap()->axum::response::Html<&'static str>{
     axum::response::Html(include_str!("../assets/bitrix-client.html"))
+}
+
+// Separate JS file makes the same bootstrap usable for normal launch and installation.
+pub async fn bitrix_client_js()->Response{
+    ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),
+      (header::CACHE_CONTROL,"no-store")],include_str!("../assets/bitrix-client.js")).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn exactly_two_superadministrators(){
+        assert!(is_super(1));assert!(is_super(336));
+        for id in [0,2,335,337] {assert!(!is_super(id));}
+    }
+    #[test]
+    fn path_parameter_parsing_is_bounded(){
+        assert_eq!(param_id("/projects/42/works","/projects/"),Some(42));
+        assert_eq!(param_id("/projects/../works","/projects/"),None);
+    }
 }

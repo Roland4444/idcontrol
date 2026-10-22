@@ -1,60 +1,7 @@
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Контроль ИД — вход через Битрикс24</title>
-<style>
-body{font:16px system-ui;background:#f3f7fc;color:#183454;margin:0;display:grid;place-items:center;min-height:100vh}
-main{background:white;border-radius:18px;padding:32px;max-width:540px;box-shadow:0 12px 40px #12345a15}
-h1{margin-top:0}p{line-height:1.5}
-</style>
-<script src="https://api.bitrix24.com/api/v1/"></script></head>
-<body><main><h1>Контроль ИД</h1><p id="status">Подключаемся к Битрикс24…</p><p id="help"></p></main>
-<script>
-(function () {
-  'use strict';
-  var status = document.getElementById('status');
-  var help = document.getElementById('help');
-  var finished = false;
-  function fail(message) {
-    if (finished) return;
-    finished = true;
-    status.textContent = message;
-    help.textContent = 'Откройте приложение внутри Битрикс24. При блокировке cookies разрешите сторонние cookies для сайта приложения.';
-  }
-  if (window.self === window.top) { fail('Вход доступен только из Битрикс24.'); return; }
-  if (typeof BX24 === 'undefined') { fail('Не загрузилась библиотека Битрикс24.'); return; }
-  var timer = setTimeout(function () { fail('Нет ответа от Битрикс24.'); }, 15000);
-  // Finish installation when Bitrix24 enters installation mode, not on every launch.
-  BX24.install(function () { BX24.installFinish(); });
-  BX24.init(function () {
-    if (finished) return;
-    BX24.callMethod('user.current', {}, function (result) {
-      if (finished) return;
-      clearTimeout(timer);
-      if (result.error()) { fail('Битрикс24 не определил текущего сотрудника.'); return; }
-      var user = result.data();
-      status.textContent = 'Вход: ' + (user.NAME || user.ID) + '…';
-      // getAuth() is supplied automatically by the BX24 SDK; the operator
-      // does not obtain, copy, store, or refresh these credentials manually.
-      var auth = BX24.getAuth();
-      if (!auth || !auth.access_token || !auth.domain) {
-        fail('Нет действующей сессии Битрикс24. Переоткройте приложение.');
-        return;
-      }
-      fetch('/auth/bitrix', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {'Content-Type': 'application/json'},
-        // Do NOT transmit user.ID: Rust calls Bitrix24 user.current itself.
-        body: JSON.stringify({domain: auth.domain, access_token: auth.access_token})
-      }).then(function (reply) {
-        if (!reply.ok) throw new Error('HTTP ' + reply.status);
-        return reply.json();
-      }).then(function (data) {
-        if (!data.ok) throw new Error('Сервер отклонил авторизацию');
-        finished = true;
-        window.location.replace('/');
-      }).catch(function (err) { fail('Ошибка входа: ' + err.message); });
-    });
-  });
-})();
-</script></body></html>
+<title>ID-Control — вход через Bitrix24</title>
+<style>body{font:16px system-ui;background:#f3f7fc;color:#183454;margin:0;display:grid;place-items:center;min-height:100vh}main{background:#fff;border-radius:18px;padding:32px;max-width:540px;box-shadow:0 12px 40px #12345a15}h1{margin-top:0}p{line-height:1.5}</style>
+<script src="https://api.bitrix24.com/api/v1/"></script>
+<script defer src="/assets/bitrix-client.js"></script></head>
+<body><main><h1>Контроль исполнительной документации</h1><p id="status">Подключаемся к Bitrix24…</p><p id="help"></p></main></body></html>

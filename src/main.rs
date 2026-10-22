@@ -175,6 +175,7 @@ async fn main()->Result<()> {
         }
     });
     let addr=cfg.listen.parse::<std::net::SocketAddr>()?;
+    // `--debug-login` is an explicit operator choice; honor configured LISTEN on any interface.
     let listener=TcpListener::bind(addr).await?;
     info!("Listening at http://{addr}; put HTTPS reverse proxy in front of Basic authentication");
     axum::serve(listener,web::router(st)).with_graceful_shutdown(async{let _=signal::ctrl_c().await;}).await?;

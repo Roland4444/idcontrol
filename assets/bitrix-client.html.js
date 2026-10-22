@@ -1,48 +1,62 @@
+// Client bootstrap for Bitrix24. Inspired by BX24.init + user.current example.
+// The login/email obtained in JavaScript is ONLY for display. Authentication
+// is completed by the Rust server calling user.current independently.
 (function () {
   'use strict';
   var status = document.getElementById('status');
   var help = document.getElementById('help');
-  var finished = false;
+  var stopped = false;
+  var timeout = null;
+
   function fail(message) {
-    if (finished) return;
-    finished = true;
+    if (stopped) return;
+    stopped = true;
+    if (timeout) clearTimeout(timeout);
     status.textContent = message;
-    help.textContent = 'Откройте приложение внутри Битрикс24. При блокировке cookies разрешите сторонние cookies для сайта приложения.';
+    help.textContent = 'Откройте приложение в Bitrix24. Если вход не завершается, проверьте настройки iframe и cookie для сайта приложения.';
   }
-  if (window.self === window.top) { fail('Вход доступен только из Битрикс24.'); return; }
-  if (typeof BX24 === 'undefined') { fail('Не загрузилась библиотека Битрикс24.'); return; }
-  var timer = setTimeout(function () { fail('Нет ответа от Битрикс24.'); }, 15000);
-  // Finish installation when Bitrix24 enters installation mode, not on every launch.
+
+  function redirectToIDControl(auth) {
+    // Never trust a user ID, email or login supplied by browser JavaScript.
+    // Rust checks the OAuth token against the configured Bitrix24 portal.
+    fetch('/auth/bitrix', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain: auth.domain, access_token: auth.access_token })
+    }).then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.json();
+    }).then(function (data) {
+      if (!data.ok) throw new Error('Bitrix24 не подтвердил личность');
+      if (stopped) return;
+      stopped = true;
+      clearTimeout(timeout);
+      // Stay inside the Bitrix24 iframe, now backed by a verified server cookie.
+      window.location.replace('/');
+    }).catch(function (err) { fail('Ошибка входа: ' + err.message); });
+  }
+
+  if (window.self === window.top) { fail('Запустите приложение из меню Bitrix24.'); return; }
+  if (typeof BX24 === 'undefined') { fail('Библиотека Bitrix24 не загрузилась.'); return; }
+  timeout = setTimeout(function () { fail('Нет ответа от Bitrix24.'); }, 15000);
+
+  // Bitrix24 install handler runs before BX24.init on first launch.
+  // Calling installFinish unconditionally from every BX24.init is incorrect.
   BX24.install(function () { BX24.installFinish(); });
   BX24.init(function () {
-    if (finished) return;
+    if (stopped) return;
     BX24.callMethod('user.current', {}, function (result) {
-      if (finished) return;
-      clearTimeout(timer);
-      if (result.error()) { fail('Битрикс24 не определил текущего сотрудника.'); return; }
-      var user = result.data();
-      status.textContent = 'Вход: ' + (user.NAME || user.ID) + '…';
-      // getAuth() is supplied automatically by the BX24 SDK; the operator
-      // does not obtain, copy, store, or refresh these credentials manually.
+      if (stopped) return;
+      if (result.error()) { fail('Bitrix24 не вернул текущего сотрудника.'); return; }
+      var user = result.data() || {};
+      var login = user.EMAIL || user.PERSONAL_PHONE || user.PHONE || user.LOGIN || user.ID;
+      status.textContent = 'Проверяем доступ сотрудника: ' + (user.NAME || login || 'Bitrix24') + '…';
       var auth = BX24.getAuth();
       if (!auth || !auth.access_token || !auth.domain) {
-        fail('Нет действующей сессии Битрикс24. Переоткройте приложение.');
+        fail('Нет действующих данных авторизации Bitrix24. Переоткройте приложение.');
         return;
       }
-      fetch('/auth/bitrix', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {'Content-Type': 'application/json'},
-        // Do NOT transmit user.ID: Rust calls Bitrix24 user.current itself.
-        body: JSON.stringify({domain: auth.domain, access_token: auth.access_token})
-      }).then(function (reply) {
-        if (!reply.ok) throw new Error('HTTP ' + reply.status);
-        return reply.json();
-      }).then(function (data) {
-        if (!data.ok) throw new Error('Сервер отклонил авторизацию');
-        finished = true;
-        window.location.replace('/');
-      }).catch(function (err) { fail('Ошибка входа: ' + err.message); });
+      redirectToIDControl(auth);
     });
   });
 })();

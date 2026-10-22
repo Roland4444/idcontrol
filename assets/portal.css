@@ -58,3 +58,41 @@ main{max-width:1460px;margin:25px auto 70px;padding:0 clamp(16px,2.7vw,32px)}
 .ocr-status-choice { cursor:pointer; text-decoration:none; }
 .ocr-status-choice.active { border-color:#2677a9; background:#dceefa; color:#163c59; font-weight:700; }
 #global-ocr-jobs { scroll-margin-top:90px; }
+
+/* v0.9.5: selected project card + bottom selection strip, matching reference screens. */
+.project-card.is-selected{border:2px solid #1684ed;box-shadow:0 4px 18px #0879ed22}
+.project-card.is-selected .card-arrow{background:#0879ed;color:#fff}
+.project-card.is-selected:after{content:"✓";position:absolute;top:8px;right:8px;background:#0879ed;color:#fff;width:24px;height:24px;border-radius:50%;display:grid;place-items:center}
+.project-card{position:relative}.project-card:focus-visible{outline:3px solid #0879ed;outline-offset:3px}
+.selection-panel{gap:22px;justify-content:flex-start}
+.selection-panel>img{width:114px;height:70px;object-fit:cover;border-radius:8px}
+.selection-panel .selection-note{flex:1}
+.selection-panel .selection-note strong{color:var(--ink);font-size:16px}
+.selection-panel .selection-note #selected-name{color:#0879ed}
+.selection-action{display:flex;gap:16px;align-items:center;border-left:1px solid #d5e7f8;padding-left:24px}
+.selection-action span{font-size:12px;color:#60748e;max-width:210px}
+.open-project{border-radius:24px;text-decoration:none!important;white-space:nowrap;padding:12px 18px}
+@media(max-width:860px){.selection-panel{flex-wrap:wrap}.selection-action{flex-basis:100%;padding-left:0;border-left:0}.selection-action span{flex:1}}
+@media(max-width:540px){.selection-action{display:flex;flex-wrap:wrap}.open-project{width:100%;text-align:center}}
+
+/* v0.9.5: make the permission-limited interface match backend ACLs. */
+.package-content.role-viewer form{display:none!important}
+.package-content.role-uploader form:not([action$="/upload"]){display:none!important}
+.package-content.role-viewer .privacy,.package-content.role-uploader .privacy{display:none}
+.package-tabs{position:sticky;top:0;z-index:5;box-shadow:0 2px 8px #1834540b}
+.package-tabs a:focus-visible,.package-tabs a.is-active{color:#0879ed;border-bottom:3px solid #0879ed}
+#upload,#documents,#checks,#remarks,#history{scroll-margin-top:100px}
+
+.work-symbol .work-svg{width:30px;height:30px;display:block}
+.assigned-users{display:block;margin-top:7px;font-size:11px;color:#60748e;line-height:1.5}
+
+.recent-documents{background:#fff;border:1px solid #e0e8f1;border-radius:12px;box-shadow:var(--shadow);padding:17px;margin:16px 0}
+.recent-heading{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.recent-heading h2{margin:0;font-size:17px}
+.recent-heading a{font-weight:600;text-decoration:none;font-size:12px}
+.recent-documents table{width:100%;border-collapse:collapse}
+.recent-documents td,.recent-documents th{padding:10px;text-align:left;overflow-wrap:anywhere}
+.recent-documents tbody tr:nth-child(even){background:#f7faff}
+.role-viewer .main-upload-panel{display:none}
+
+.package-tabs a.active{color:#0879ed;border-bottom:3px solid #0879ed;font-weight:700}

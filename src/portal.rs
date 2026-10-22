@@ -17,34 +17,80 @@ pub fn project_info(name:&str)->Option<(&'static str,&'static str)>{
     PROJECTS.iter().find(|p|p.0==name).map(|p|(p.1,p.2))
 }
 fn photo(slug:&str)->String {format!("/assets/projects/{slug}.webp")}
-fn work_icon(index:usize)->(&'static str,&'static str){
-    const ICONS:[(&str,&str);14]=[
-      ("⚒","blue"),("▦","coral"),("◉","purple"),("♧","cyan"),("◎","mint"),
-      ("♧","blue"),("◌","green"),("ϟ","orange"),("⚡","violet"),
-      ("♨","red"),("⬡","red"),("▣","cyan"),("▤","amber"),("♧","green")
-    ]; ICONS[index.min(13)]
+// Individual, fixed SVG glyphs: no repeated or emoji-dependent icons.
+fn work_icon(index:usize)->(String,&'static str){
+    const PATHS:[&str;14]=[
+      "<path d='M3 19h18M6 16l4-9 4 2-3 7M4 11l4 2M14 7l3-2 4 4-2 3-5-5M12 17l6 2'/>",
+      "<rect x='3' y='5' width='18' height='14' rx='1'/><path d='M3 10h18M3 15h18M9 5v5m6 0v5M9 15v4m6-4v4'/>",
+      "<circle cx='12' cy='12' r='9'/><circle cx='12' cy='12' r='2'/><path d='M12 10c-4-5-7-4-7-1s3 4 5 4M14 12c4-1 6 2 4 5s-5 1-6-3M11 14c-3 4-1 7 2 6s3-4 1-6'/>",
+      "<path d='M12 3C9 7 5 11 5 15a7 7 0 0 0 14 0c0-4-4-8-7-12Z'/><path d='M9 17a3 3 0 0 0 3 2'/>",
+      "<circle cx='12' cy='12' r='8'/><circle cx='12' cy='12' r='3'/><path d='M12 4v5m0 6v5m-8-8h5m6 0h5'/>",
+      "<path d='M3 18h6V7h6m-3-3h6v6h3v4h-7v-4H9M3 18v3m6-3v3'/><path d='M11 7h7'/>",
+      "<path d='M3 6h7v4H7v5h10v4h4M3 10h4m10 9v-4h4M3 6v4M14 4h7v4h-7z'/>",
+      "<path d='m13 2-9 12h7l-1 8 10-13h-7l1-7Z'/>",
+      "<path d='M12 3v18M7 8h10M5 13h14M3 19h18M7 8 3 19m14-11 4 11M9 13l-4 6m10-6 4 6'/>",
+      "<path d='M12 22a8 8 0 0 0 8-8c0-5-4-9-5-11-1 4-3 5-4 6-1-2-1-4-3-6-1 4-4 7-4 11a8 8 0 0 0 8 8Z'/><path d='M12 20a3 3 0 0 0 3-3c0-2-1-3-3-5-1 2-3 3-3 5a3 3 0 0 0 3 3Z'/>",
+      "<path d='M12 2 4 5v6c0 5 3 9 8 11 5-2 8-6 8-11V5L12 2Z'/><path d='m8 12 3 3 5-6'/>",
+      "<rect x='3' y='10' width='18' height='10' rx='2'/><path d='M8 10V7m8 3V7M7 15h.01M12 15h.01M17 15h.01M5 7a10 10 0 0 1 14 0M8 4a6 6 0 0 1 8 0'/>",
+      "<rect x='3' y='4' width='14' height='6' rx='2'/><path d='M17 7h4v5h-9v9M12 21h3M5 7h.01'/>",
+      "<path d='M12 3c-2 3-5 4-5 7a5 5 0 0 0 10 0c0-3-3-4-5-7Z'/><path d='M12 15v7m-5 0h10M7 18l5-3 5 3'/>",
+    ];
+    const TONES:[&str;14]=["blue","coral","purple","cyan","mint","blue","green","orange","violet","red","red","cyan","amber","green"];
+    let idx=index.min(13);
+    (format!("<svg class='work-svg' xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'>{}</svg>",PATHS[idx]),TONES[idx])
 }
+
 fn employee_picker()->&'static str {include_str!("../assets/employee-picker.html")}
 
 pub async fn projects(State(st):State<Shared>,Extension(user):Extension<Principal>)->Result<Html<String>,WebError>{
-    let mut cards=String::new();let mut available=0usize;
+    let mut cards=String::new();
+    let mut available=0usize;
+    let mut selection:Option<(i64,&str,&str,&str)>=None;
     for (name,address,slug) in PROJECTS {
         let project=sqlx::query("SELECT id FROM projects WHERE name=$1").bind(name).fetch_optional(&st.db).await?;
         let Some(project)=project else {continue};
         let id:i64=project.try_get("id")?;
         if !access::project_visible(&st,&user,id).await {continue;}
         available+=1;
-        cards.push_str(&format!(r#"<a href="/projects/{id}" class="project-card" aria-label="Открыть объект {name}">
+        if selection.is_none() || name=="TETRIS" {selection=Some((id,name,address,slug));}
+        cards.push_str(&format!(r#"<a href="/projects/{id}" class="project-card" data-name="{}" data-address="{}" data-photo="{}" aria-label="Выбрать объект {}">
           <img src="{}" alt="Визуализация ЖК {}" loading="lazy">
           <div class="project-desc"><strong>{}</strong><small>⌖ {}</small><span class="card-arrow">➜</span></div>
-        </a>"#,photo(slug),h(name),h(name),h(address)));
+        </a>"#,h(name),h(address),photo(slug),h(name),photo(slug),h(name),h(name),h(address)));
     }
     let empty=if available==0 {"<p class='empty-work'>Вам пока не назначены объекты строительства. Обратитесь к администратору проекта.</p>"}else{""};
+    let selection_panel=if let Some((id,name,address,slug))=selection {
+        format!(r#"<section class="selection-panel" id="selected-project" aria-live="polite">
+          <img id="selected-photo" src="{}" alt="Выбранный жилой комплекс">
+          <div class="selection-note"><strong>Выбран объект: <span id="selected-name">{}</span></strong><small>⌖ <span id="selected-address">{}</span></small></div>
+          <div class="selection-action"><span>Перейти к комплектам исполнительной документации</span><a id="selected-open" class="primary open-project" href="/projects/{id}">Открыть комплекты ИД →</a></div>
+        </section>"#,photo(slug),h(name),h(address))
+    }else{String::new()};
     let body=format!(r#"<div class="page-title"><h1>Исполнительная документация</h1><p>Выберите объект строительства и перейдите к комплектам исполнительной документации.</p></div>
       <section class="white-panel" id="projects"><div class="panel-heading"><h2><span class="section-icon">▤</span> Выбор объекта строительства</h2><div class="panel-tools"><input type="search" id="project-search" placeholder="⌕  Поиск по объектам…" aria-label="Поиск по объектам"><span class="pill">{available} объектов</span></div></div>
-      <div class="projects-grid">{cards}</div>{empty}</section>
-      <section class="selection-panel"><div class="selection-note"><strong>Выберите жилой комплекс</strong><small>Откроются доступные для вас виды работ и комплекты ИД.</small></div><span>→</span></section>
-      <script>document.getElementById('project-search')?.addEventListener('input',e=>{{const q=e.target.value.toLocaleLowerCase('ru');document.querySelectorAll('.project-card').forEach(c=>c.hidden=!c.textContent.toLocaleLowerCase('ru').includes(q));}});</script>"#);
+      <div class="projects-grid">{cards}</div>{empty}</section>{selection_panel}
+      <script>(function(){{
+        const cards=Array.from(document.querySelectorAll('.project-card'));
+        const selected=document.getElementById('selected-project');
+        const pick=function(card){{
+          cards.forEach(c=>{{c.classList.toggle('is-selected',c===card);c.setAttribute('aria-current',c===card?'true':'false');}});
+          if(!selected)return;
+          document.getElementById('selected-photo').src=card.dataset.photo;
+          document.getElementById('selected-name').textContent=card.dataset.name;
+          document.getElementById('selected-address').textContent=card.dataset.address;
+          document.getElementById('selected-open').href=card.getAttribute('href');
+        }};
+        cards.forEach(card=>{{card.addEventListener('click',event=>{{event.preventDefault();pick(card);}});
+            card.addEventListener('dblclick',()=>window.location.assign(card.href));}});
+        const preferred=cards.find(c=>c.dataset.name==='TETRIS')||cards[0];if(preferred)pick(preferred);
+        document.getElementById('project-search')?.addEventListener('input',e=>{{
+          const q=e.target.value.toLocaleLowerCase('ru');
+          cards.forEach(card=>card.hidden=!card.textContent.toLocaleLowerCase('ru').includes(q));
+          const current=cards.find(c=>c.classList.contains('is-selected'));
+          if(current?.hidden){{const first=cards.find(c=>!c.hidden);if(first)pick(first);}}
+          if(selected)selected.hidden=!cards.some(c=>!c.hidden);
+        }});
+      }})();</script>"#);
     Ok(web::layout("Объекты строительства",body))
 }
 
@@ -56,6 +102,10 @@ pub async fn project(State(st):State<Shared>,Extension(user):Extension<Principal
     let pkgs:Vec<Package>=sqlx::query_as("SELECT id,project_id,name,catalog_name,required_codes_json FROM packages WHERE project_id=$1 ORDER BY name")
         .bind(id).fetch_all(&st.db).await?;
     let mut works=String::new();let mut active=0usize;let mut assigned_table=String::new();
+    let assignments:Vec<(i64,i64,String)>=if manager {
+        sqlx::query_as("SELECT acl.package_id,acl.user_id,acl.role FROM bitrix_package_acl acl JOIN packages pk ON pk.id=acl.package_id WHERE pk.project_id=$1 AND acl.member_id=$2 ORDER BY acl.user_id")
+            .bind(id).bind(&user.member).fetch_all(&st.db).await?
+    }else{Vec::new()};
     for (idx,wt) in st.catalog.work_types.iter().enumerate(){
         let existing=pkgs.iter().find(|p|p.name==wt.name);
         let allowed=if let Some(p)=existing {access::package_role(&st,&user,p.id).await.is_some()}else{false};
@@ -66,7 +116,13 @@ pub async fn project(State(st):State<Shared>,Extension(user):Extension<Principal
             let files:(i64,)=sqlx::query_as("SELECT count(*) FROM documents WHERE package_id=$1 AND is_present=true")
                 .bind(pkg.id).fetch_one(&st.db).await?;
             works.push_str(&format!(r#"<a class="work-card" href="/packages/{}"><span class="work-symbol {}">{}</span><div><strong>{}</strong><small>Комплект ИД · {} файлов</small></div><span class="work-arrow">›</span></a>"#,pkg.id,tone,symbol,h(&wt.name),files.0));
-            if manager {assigned_table.push_str(&format!(r#"<tr><td><strong>{}</strong></td><td><form class="assign-form" method="post" action="/projects/{id}/assign">{}<input type="hidden" name="package_id" value="{}"><input type="number" min="1" name="user_id" required placeholder="ID сотрудника" class="employee-id" aria-label="ID сотрудника"><select class="employee-picker" aria-label="Выбрать сотрудника"><option value="">Из списка Bitrix24…</option></select><select name="role"><option value="uploader">Пользователь (загрузка)</option><option value="engineer">Инженер ПТО</option><option value="viewer">Просмотр</option><option value="remove">Снять доступ</option></select><button>Применить</button></form></td></tr>"#,h(&wt.name),web::hidden(&st.csrf),pkg.id));}
+            if manager {
+                let names=assignments.iter().filter(|(pid,_,_)|*pid==pkg.id)
+                    .map(|(_,uid,role)|format!("ID {} — {}",uid,h(role)))
+                    .collect::<Vec<_>>();
+                let members=if names.is_empty(){"Пока никто не назначен".to_owned()}else{names.join("; ")};
+                assigned_table.push_str(&format!(r#"<tr><td><strong>{}</strong><small class="assigned-users">{}</small></td><td><form class="assign-form" method="post" action="/projects/{id}/assign">{}<input type="hidden" name="package_id" value="{}"><input type="number" min="1" name="user_id" required placeholder="ID сотрудника" class="employee-id" aria-label="ID сотрудника"><select class="employee-picker" aria-label="Выбрать сотрудника"><option value="">Из списка Bitrix24…</option></select><select name="role"><option value="uploader">Пользователь (загрузка)</option><option value="engineer">Инженер ПТО</option><option value="viewer">Просмотр</option><option value="remove">Снять доступ</option></select><button>Применить</button></form></td></tr>"#,h(&wt.name),h(&members),web::hidden(&st.csrf),pkg.id));
+            }
         } else if manager {
             works.push_str(&format!(r#"<form method="post" action="/projects/{id}/works" class="work-card work-add">{}<input type="hidden" name="work_type" value="{}"><span class="work-symbol {}">{}</span><div><strong>{}</strong><small>Ещё не создан · нажмите для добавления</small></div><button title="Создать комплект">＋</button></form>"#,web::hidden(&st.csrf),h(&wt.name),tone,symbol,h(&wt.name)));
         }
@@ -85,6 +141,7 @@ pub async fn project(State(st):State<Shared>,Extension(user):Extension<Principal
 #[derive(Deserialize)]pub struct CsrfForm{pub csrf:String}
 #[derive(Deserialize)]pub struct AssignmentForm{pub csrf:String,pub package_id:i64,pub user_id:i64,pub role:String}
 #[derive(Deserialize)]pub struct ManagerForm{pub csrf:String,pub project_id:i64,pub user_id:i64,pub action:String}
+#[derive(Deserialize)]pub struct ProjectAccessForm{pub csrf:String,pub project_id:i64,pub user_id:i64,pub action:String}
 #[derive(Deserialize)]pub struct NasMappingForm{pub csrf:String,pub source_name:String,pub project_id:i64,pub default_work:String,pub action:String}
 
 pub async fn create_work(State(st):State<Shared>,Extension(actor):Extension<Principal>,Path(id):Path<i64>,Form(form):Form<WorkForm>)->Result<Redirect,WebError>{
@@ -139,6 +196,13 @@ pub async fn administration(State(st):State<Shared>,Extension(actor):Extension<P
     let managers=sqlx::query("SELECT m.user_id,p.name FROM bitrix_project_managers m JOIN projects p ON p.id=m.project_id WHERE m.member_id=$1 ORDER BY p.name,m.user_id")
         .bind(&actor.member).fetch_all(&st.db).await?;
     let mut trs=String::new();for r in managers{let user_id:i64=r.try_get("user_id")?;let name:String=r.try_get("name")?;trs.push_str(&format!("<tr><td>{}</td><td>{user_id}</td></tr>",h(&name)));}
+    let project_members:Vec<(i64,String)>=sqlx::query_as("SELECT a.user_id,p.name FROM bitrix_project_access a JOIN projects p ON p.id=a.project_id WHERE a.member_id=$1 ORDER BY p.name,a.user_id")
+        .bind(&actor.member).fetch_all(&st.db).await?;
+    let mut member_rows=String::new();
+    for (uid,project_name) in project_members {
+        member_rows.push_str(&format!("<tr><td>{}</td><td>{uid}</td><td>Доступ к проекту (без автоматического доступа к комплектам)</td></tr>",h(&project_name)));
+    }
+    if member_rows.is_empty(){member_rows.push_str("<tr><td colspan='3'>Пользователи проектов пока не назначены</td></tr>");}
     let mut options=String::new();for (name,_,_) in PROJECTS {
         let row=sqlx::query("SELECT id FROM projects WHERE name=$1").bind(name).fetch_one(&st.db).await?;
         let id:i64=row.try_get("id")?;
@@ -156,14 +220,50 @@ pub async fn administration(State(st):State<Shared>,Extension(actor):Extension<P
     <section class="white-panel"><h2>Администраторы проектов</h2><p>Назначенный администратор создаёт виды работ и распределяет доступ сотрудников только внутри своего ЖК.</p>
     <form class="admin-form" method="post" action="/administration/managers">{}<label>Проект<select name="project_id">{options}</select></label><label>ID сотрудника<input name="user_id" class="employee-id" type="number" min="1" required placeholder="ID сотрудника"></label><label>Сотрудник из Bitrix24<select class="employee-picker"><option value="">Из списка Bitrix24…</option></select></label><label>Действие<select name="action"><option value="grant">Назначить</option><option value="revoke">Снять назначение</option></select></label><button>Сохранить</button></form>
     <table><thead><tr><th>Жилой комплекс</th><th>ID администратора проекта</th></tr></thead><tbody>{trs}</tbody></table>{}</section>
+    <section class="white-panel"><h2>Доступ обычных сотрудников к проектам</h2>
+    <p>Выдача доступа к ЖК показывает сотруднику карточку проекта, но не открывает файлы и виды работ. Отдельные виды работ назначает администратор проекта в карточке ЖК.</p>
+    <form class="admin-form" method="post" action="/administration/projects/access">{}<label>Жилой комплекс<select name="project_id">{options}</select></label><label>ID сотрудника<input name="user_id" class="employee-id" type="number" min="1" required placeholder="ID сотрудника"></label><label>Сотрудник Bitrix24<select class="employee-picker"><option value="">Из списка Bitrix24…</option></select></label><label>Действие<select name="action"><option value="grant">Предоставить доступ</option><option value="revoke">Убрать доступ к проекту</option></select></label><button>Сохранить</button></form>
+    <table><thead><tr><th>Проект</th><th>ID сотрудника</th><th>Права</th></tr></thead><tbody>{member_rows}</tbody></table>
+    <p class="section-copy">При снятии доступа к проекту также удаляются все разрешения сотрудника на виды работ этого проекта. Если он назначен администратором проекта, отдельно снимите это назначение выше.</p></section>
     <section class="white-panel" id="synology-mapping"><h2>Synology → жилые комплексы</h2>
     <p>Исходная папка — имя первой папки под SYNOLOGY_ROOT. Если корень содержит сразу ИД/ и ПД/, используется SYNOLOGY_PROJECT_NAME. Файлы, не сопоставленные с одним из шести ЖК, не импортируются в скрытые проекты.</p>
     <p>Текущий корень: <code>{}</code>; имя по умолчанию: <code>{}</code>. После изменения используйте <a href="/diagnostics">«Сканировать Synology сейчас»</a>. Старые файлы в базе не удаляются.</p>
     <form method="post" action="/administration/synology-map">{}<label>Исходная папка NAS<input name="source_name" required maxlength="200" value="{}"></label><label>Сопоставить с ЖК<select name="project_id">{options}</select></label><label>Вид работ для плоского корня<select name="default_work">{work_options}</select></label><label>Действие<select name="action"><option value="save">Сохранить сопоставление</option><option value="remove">Удалить сопоставление</option></select></label><button>Применить</button></form>
     <table><thead><tr><th>Папка NAS</th><th>Жилой комплекс</th><th>Вид работ для плоского корня</th></tr></thead><tbody>{mapping_rows}</tbody></table></section>
-    <section class="white-panel"><h2>Роли и ограничения</h2><p><strong>Супер-администратор</strong>: Bitrix24 ID 1 и 336. <strong>Администратор проекта</strong>: назначается на выбранный ЖК. <strong>Пользователь</strong>: видит только назначенные комплекты ИД.</p><p>Все права проверяются на сервере, включая скачивание файлов, OCR и отправку форм.</p></section>"#,web::hidden(&st.csrf),employee_picker(),h(&st.cfg.synology_root),h(&st.cfg.synology_project_name),web::hidden(&st.csrf),h(&st.cfg.synology_project_name));
+    <section class="white-panel"><h2>Роли и ограничения</h2><p><strong>Супер-администратор</strong>: Bitrix24 ID 1 и 336, все проекты и комплекты. <strong>Администратор проекта</strong>: назначается на выбранный ЖК и управляет его видами работ. <strong>Пользователь</strong>: видит назначенные проекты, а файлы — только по выданным разрешениям на виды работ.</p><p>Все права проверяются на сервере, включая скачивание файлов, OCR и отправку форм.</p></section>"#,web::hidden(&st.csrf),web::hidden(&st.csrf),employee_picker(),h(&st.cfg.synology_root),h(&st.cfg.synology_project_name),web::hidden(&st.csrf),h(&st.cfg.synology_project_name));
     Ok(web::layout("Администрирование",body))
 }
+pub async fn assign_project_access(State(st):State<Shared>,Extension(actor):Extension<Principal>,Form(form):Form<ProjectAccessForm>)->Result<Redirect,WebError>{
+    web::verify(&form.csrf,&st)?;
+    if !actor.superuser{return Err(WebError::forbidden());}
+    if form.user_id<1{return Err(WebError::bad("Некорректный ID сотрудника"));}
+    let project_name=sqlx::query_scalar::<_,String>("SELECT name FROM projects WHERE id=$1")
+        .bind(form.project_id).fetch_optional(&st.db).await?.ok_or_else(WebError::not_found)?;
+    if project_info(&project_name).is_none(){return Err(WebError::not_found());}
+    match form.action.as_str(){
+        "grant"=>{
+            sqlx::query("INSERT INTO bitrix_principals(member_id,user_id) VALUES ($1,$2) ON CONFLICT(member_id,user_id) DO NOTHING")
+                .bind(&actor.member).bind(form.user_id).execute(&st.db).await?;
+            sqlx::query("INSERT INTO bitrix_project_access(member_id,user_id,project_id,granted_by) VALUES ($1,$2,$3,$4) ON CONFLICT(member_id,user_id,project_id) DO UPDATE SET granted_by=EXCLUDED.granted_by,granted_at=now()")
+                .bind(&actor.member).bind(form.user_id).bind(form.project_id).bind(actor.user_id).execute(&st.db).await?;
+        },
+        "revoke"=>{
+            // A project-level revoke also removes package grants; otherwise a former
+            // member could still see this project through their old work ACLs.
+            let mut tx=st.db.begin().await?;
+            sqlx::query("DELETE FROM bitrix_project_access WHERE member_id=$1 AND user_id=$2 AND project_id=$3")
+                .bind(&actor.member).bind(form.user_id).bind(form.project_id).execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM bitrix_package_acl a USING packages p WHERE a.package_id=p.id AND a.member_id=$1 AND a.user_id=$2 AND p.project_id=$3")
+                .bind(&actor.member).bind(form.user_id).bind(form.project_id).execute(&mut *tx).await?;
+            tx.commit().await?;
+        },
+        _=>return Err(WebError::bad("Недопустимая операция")),
+    }
+    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"project_user_access",
+        &format!("project={} user={} action={}",form.project_id,form.user_id,form.action)).await?;
+    Ok(Redirect::to("/administration"))
+}
+
 pub async fn assign_manager(State(st):State<Shared>,Extension(actor):Extension<Principal>,Form(form):Form<ManagerForm>)->Result<Redirect,WebError>{
     web::verify(&form.csrf,&st)?;
     if !actor.superuser || form.user_id<1{return Err(WebError::forbidden());}
