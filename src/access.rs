@@ -101,7 +101,7 @@ pub async fn package_role(st:&Shared,a:&Principal,package:i64)->Option<String>{
 async fn may_access(st:&Shared,a:&Principal,path:&str,method:&Method,query:Option<&str>)->bool{
     if path=="/" || path=="/auth/logout" || path=="/api/me" {return true;}
     if path=="/administration" || path.starts_with("/administration/"){return a.superuser;}
-    if path=="/health" || path=="/diagnostics" || path.starts_with("/norms") || path=="/catalog/errors" || path=="/api/ocr/status" {return a.superuser;}
+    if path=="/health" || path=="/diagnostics" || path.starts_with("/diagnostics/") || path.starts_with("/norms") || path=="/catalog/errors" || path=="/api/ocr/status" {return a.superuser;}
     if path=="/projects" {return false;} // Projects are fixed; no manual names.
     if let Some(project)=param_id(path,"/projects/") {
         let admin_action=path.ends_with("/works") || path.ends_with("/works/all") || path.ends_with("/assign");

@@ -20,6 +20,7 @@ pub struct ScanStatus {
     pub running:bool,
     pub last_at:Option<chrono::DateTime<chrono::Utc>>,
     pub message:String,
+    pub detail:String,
 }
 
 pub struct AppState {
@@ -167,7 +168,7 @@ fetch('/api/me',{{credentials:'same-origin'}}).then(r=>r.ok?r.json():null).then(
 pub fn router(state:Shared)->Router{
     Router::new()
         .route("/",get(portal::projects))
-        .route("/bitrix",get(access::bitrix_bootstrap))
+        .route("/bitrix",get(access::bitrix_bootstrap).post(access::bitrix_bootstrap))
         .route("/auth/bitrix",post(access::login))
         .route("/auth/logout",post(access::logout))
         .route("/api/me",get(whoami))
@@ -178,8 +179,11 @@ pub fn router(state:Shared)->Router{
         .route("/projects/{id}/assign",post(portal::assign_work))
         .route("/administration",get(portal::administration))
         .route("/administration/managers",post(portal::assign_manager))
+        .route("/administration/synology-map",post(portal::save_synology_mapping))
         .route("/health",get(health))
         .route("/diagnostics",get(diagnostics))
+        .route("/diagnostics/scan",post(diagnostics_scan))
+        .route("/diagnostics/reprocess-errors",post(diagnostics_reprocess_errors))
         .route("/api/ocr/jobs",get(ocr_jobs_json))
         .route("/api/ocr/status",get(ocr_status_json))
         .route("/ocr/jobs/fragment",get(ocr_jobs_fragment))
@@ -281,6 +285,9 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     body.push_str(&format!("<div class=attention-item><strong>{unresolved} замечаний</strong><span>Ожидают решения или подтверждены инженером</span><br><a href=#checks>Открыть замечания ↓</a></div>"));
     body.push_str(&format!("<div class=attention-item><strong>{nonclassified} не привязаны</strong><span>Файлы ИД без позиции чек-листа</span><br><a href=#documents>Перейти к документам ↓</a></div>"));
     body.push_str("</div></section>");
+    if actor_role=="manager" || actor_role=="engineer" {
+        body.push_str(&format!("<section class=attention-panel aria-label='Действия OCR'><h3>Повторное распознавание</h3><div class=toolbox><form method=post action='/packages/{id}/reprocess-errors'>{}<button class=primary>Распознать документы с ошибками</button></form><a class=buttonlink href='#ocr'>Подробнее: очередь и журнал OCR ↓</a></div></section>",hidden(&st.csrf)));
+    }
     // Build detail panels separately; they are emitted only at the BOTTOM of the page.
     let mut panels:HashMap<&'static str,String>=HashMap::new();
     let mut panel_html=String::new();
@@ -663,7 +670,10 @@ async fn manual_scan(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<
     let _=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
     let _guard=st.scan_lock.lock().await;
     match scanner::scan_once(&st.db,&st.cfg,&st.catalog,&st.nas).await {
-        Ok(_)=>st.synology_connected.store(true,Ordering::Relaxed),
+        Ok(result)=>{
+            st.synology_connected.store(true,Ordering::Relaxed);
+            if let Ok(mut s)=st.scan_status.write(){s.running=false;s.last_at=Some(chrono::Utc::now());s.message=format!("Synology: {} новых/обновлённых документов",result.new_documents);s.detail=result.summary();}
+        },
         Err(e)=>{st.synology_connected.store(false,Ordering::Relaxed);return Err(e.into());}
     }
     engine::analyze(&st.db,&st.catalog,id,"manual").await?;
@@ -904,7 +914,7 @@ async fn report(State(st):State<Shared>,Path((id,fmt)):Path<(i64,String)>,Query(
 }
 
 #[derive(Deserialize,Default)]
-struct OcrJobQuery {package_id:Option<i64>}
+struct OcrJobQuery {package_id:Option<i64>,status:Option<String>}
 
 fn status_ru(status:&str)->&'static str {
     match status {
@@ -917,8 +927,8 @@ fn status_ru(status:&str)->&'static str {
         _=>"Неизвестно"
     }
 }
-async fn jobs_markup(st:&Shared,package_id:Option<i64>)->WebResult<String>{
-    let jobs=ocr_jobs::jobs(&st.db,package_id,15).await?;
+async fn jobs_markup(st:&Shared,package_id:Option<i64>,status:Option<&str>)->WebResult<String>{
+    let jobs=ocr_jobs::jobs_filtered(&st.db,package_id,status,150).await?;
     if jobs.is_empty(){return Ok("<p class=muted>Заданий пока нет. Выбери документ и нажми «Повторить OCR».</p>".into());}
     let mut html=String::new();
     for job in jobs {
@@ -934,6 +944,10 @@ async fn jobs_markup(st:&Shared,package_id:Option<i64>)->WebResult<String>{
         if !job.error_message.is_empty(){html.push_str(&format!("<p class=warn>Ошибка: {}</p>",h(&job.error_message)));}
         if job.status=="pending" {
             html.push_str(&format!("<form method=post action='/ocr/jobs/{}/cancel'>{}<button class=warnbutton>Отменить ожидание</button></form>",job.id,hidden(&st.csrf)));
+        } else if job.status!="running" {
+            let current:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM documents d WHERE d.id=$1 AND d.is_present=true AND NOT EXISTS (SELECT 1 FROM documents newer WHERE newer.package_id=d.package_id AND newer.relative_path=d.relative_path AND newer.version>d.version))")
+                .bind(job.document_id).fetch_one(&st.db).await?;
+            if current {html.push_str(&format!("<form method=post action='/documents/{}/reprocess'>{}<button class=secondary>Повторить OCR документа</button></form>",job.document_id,hidden(&st.csrf)));}
         }
         let events=ocr_jobs::recent_events(&st.db,job.id,15).await?;
         if !events.is_empty(){
@@ -951,7 +965,7 @@ async fn jobs_markup(st:&Shared,package_id:Option<i64>)->WebResult<String>{
 }
 
 async fn ocr_jobs_fragment(State(st):State<Shared>,Query(q):Query<OcrJobQuery>)->WebResult<Html<String>>{
-    Ok(Html(jobs_markup(&st,q.package_id).await?))
+    Ok(Html(jobs_markup(&st,q.package_id,q.status.as_deref()).await?))
 }
 async fn ocr_jobs_json(State(st):State<Shared>,Query(q):Query<OcrJobQuery>)->WebResult<Json<Vec<ocr_jobs::OcrJob>>>{
     Ok(Json(ocr_jobs::jobs(&st.db,q.package_id,100).await?))
@@ -962,7 +976,7 @@ async fn ocr_status_json(State(st):State<Shared>)->WebResult<Json<serde_json::Va
     let scanning=st.scan_status.read().map(|state|state.running).unwrap_or(false);
     let scan_message=st.scan_status.read().map(|state|state.message.clone()).unwrap_or_default();
     Ok(Json(serde_json::json!({
-        "app_version":"0.9.0","ocr_mode":st.cfg.ocr_mode,
+        "app_version":"0.9.4","ocr_mode":st.cfg.ocr_mode,
         "data_root":st.cfg.data_root.to_string_lossy(),
         "temp_root":st.cfg.temp_root.to_string_lossy(),
         "local_ocr_model_dir":st.cfg.local_ocr_model_dir.to_string_lossy(),
@@ -972,7 +986,8 @@ async fn ocr_status_json(State(st):State<Shared>)->WebResult<Json<serde_json::Va
         "vibe_timeout_seconds":st.cfg.vibe_ocr_timeout,
         "ocr_max_pages":st.cfg.ocr_max_pages,"ocr_page_workers":st.cfg.ocr_page_workers,"job_counts":counts,
         "synology_connected":st.synology_connected.load(Ordering::Relaxed),
-        "scan_running":scanning,"scan_message":scan_message
+        "scan_running":scanning,"scan_message":scan_message,
+        "scan_detail":st.scan_status.read().map(|state|state.detail.clone()).unwrap_or_default()
     })))
 }
 
@@ -992,14 +1007,17 @@ async fn diagnostics(State(st):State<Shared>)->WebResult<Html<String>>{
     let scan=st.scan_status.read().map(|s|s.clone()).unwrap_or_default();
     let mut body=String::from("<h1>Диагностика системы и OCR</h1><p>Здесь отображаются фактические настройки запуска, очередь и события. API-ключ и содержимое документов в журнал не записываются.</p>");
     body.push_str("<article><h2>Компоненты</h2><table><tr><th>Компонент</th><th>Состояние</th></tr>");
-    body.push_str(&format!("<tr><td>Приложение</td><td>v0.9.0 · порт {}</td></tr>",h(&st.cfg.listen)));
+    body.push_str(&format!("<tr><td>Приложение</td><td>v0.9.4 · порт {}</td></tr>",h(&st.cfg.listen)));
     body.push_str(&format!("<tr><td>Локальный архив DATA_ROOT</td><td>{}</td></tr><tr><td>Временные файлы TEMP_ROOT</td><td>{}</td></tr>",
         h(&st.cfg.data_root.to_string_lossy()),h(&st.cfg.temp_root.to_string_lossy())));
     body.push_str(&format!("<tr><td>PostgreSQL</td><td>Подключена (данные получены)</td></tr><tr><td>Synology</td><td>{}</td></tr>",
         if st.synology_connected.load(Ordering::Relaxed){"Связь при последней проверке была успешна"}else{"Нет подтверждения успешной связи"}));
-    body.push_str(&format!("<tr><td>Сканирование</td><td>{} · {} · последний запуск {}</td></tr>",
-        if scan.running{"Выполняется"}else{"Не выполняется"},h(&scan.message),
-        scan.last_at.map(|t|t.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_else(||"нет данных".into())));
+    body.push_str(&format!("<tr><td>Сканирование</td><td>{} · {} · последний запуск {}<p><small>{}</small></p></td></tr>",
+        if scan.running{"Выполняется"}else{"Между запусками"},h(&scan.message),
+        scan.last_at.map(|t|t.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_else(||"нет данных".into()),h(&scan.detail)));
+    body.push_str(&format!("<tr><td>Источник Synology</td><td>Корень: <code>{}</code><br>Папка без вложенного имени ЖК: <code>{}</code><br>Вид работ по умолчанию: <code>{}</code><p><a href='/administration'>Настроить привязку папок к ЖК</a></p></td></tr>",
+        h(&st.cfg.synology_root),h(&st.cfg.synology_project_name),h(&st.cfg.synology_default_work)));
+    // The manual scan action appears after the component status table.
     let model_check=crate::local_ocr::ensure_models(&st.cfg.local_ocr_model_dir);
     body.push_str(&format!("<tr><td>OCR режим</td><td><b>{}</b> · локальные ONNX-модели: {} · путь {}</td></tr>",
         h(&st.cfg.ocr_mode),if model_check.is_ok(){"НАЙДЕНЫ"}else{"НЕ УСТАНОВЛЕНЫ"},h(&st.cfg.local_ocr_model_dir.to_string_lossy())));
@@ -1018,19 +1036,63 @@ async fn diagnostics(State(st):State<Shared>)->WebResult<Html<String>>{
         if classification::configured(&st.cfg,"gigacowork") {"настроен"} else {"не настроен"},
         h(&classifier_status)));
     body.push_str(&format!("<tr><td>Synology TLS</td><td>{}</td></tr>",if st.cfg.synology_verify_tls{"Проверка сертификата включена"}else{"ВНИМАНИЕ: проверка сертификата отключена"}));
-    body.push_str("</table></article><article><h2>Документы: результат извлечения</h2><table><tr><th>Статус</th><th>Количество</th></tr>");
+    body.push_str(&format!("</table><form method=post action='/diagnostics/scan'>{}<button class=secondary>Сканировать Synology сейчас</button></form></article><article><h2>Документы: результат извлечения</h2><table><tr><th>Статус</th><th>Количество</th></tr>",hidden(&st.csrf)));
     for (status,count) in stats {body.push_str(&format!("<tr><td>{}</td><td>{count}</td></tr>",h(&status)));}
-    body.push_str("</table><h3>Последние ошибки</h3><table><tr><th>Документ</th><th>Ошибка</th><th>Действие</th></tr>");
+    body.push_str("</table><p class=muted>Статистика документов показывает текущие версии. Счётчики очереди ниже — все исторические задания, включая повторные запуски.</p><h3>Последние ошибки</h3><table><tr><th>Документ</th><th>Ошибка</th><th>Действие</th></tr>");
     for (id,name,status) in last_errors {
         body.push_str(&format!("<tr><td>{}</td><td>{}</td><td><form method=post action='/documents/{id}/reprocess'>{}<button>Повторить OCR</button></form></td></tr>",h(&name),h(&status),hidden(&st.csrf)));
     }
-    body.push_str("</table></article><article><h2>Очередь OCR</h2><p>");
-    for (state,count) in queue_counts {body.push_str(&format!("<span class=chip>{}: {count}</span> ",status_ru(&state)));}
-    body.push_str("</p><small id=ocr-poll-state></small><div class='ocr-live' data-url='/ocr/jobs/fragment'>Загрузка журнала...</div></article>");
+    body.push_str("</table></article><article id=ocr-queue><h2>Очередь OCR</h2><p>Нажмите на статус, чтобы открыть список заданий и их ошибки:</p><div class=chips>");
+    body.push_str("<a class='chip ocr-status-choice active' data-ocr-status='' href='#ocr-queue'>Все последние задания</a>");
+    for (state,count) in queue_counts {body.push_str(&format!("<a class='chip ocr-status-choice' data-ocr-status='{}' href='#ocr-queue'>{}: {count}</a> ",h(&state),status_ru(&state)));}
+    body.push_str(&format!("</div><div class=toolbox><form method=post action='/diagnostics/reprocess-errors'>{}<button class=warnbutton onclick=\"return confirm('Повторить OCR для всех текущих файлов с ошибкой, частичным результатом или ручной проверкой?')\">Повторить OCR всех проблемных документов</button></form></div><small id=ocr-poll-state></small><div id=global-ocr-jobs class='ocr-live' data-url='/ocr/jobs/fragment'>Загрузка журнала...</div></article>",hidden(&st.csrf)));
+    body.push_str(r#"<script>const queued=new URLSearchParams(location.search).get('queued');if(queued!==null){const box=document.querySelector('#ocr-queue');if(box)box.insertAdjacentHTML('afterbegin','<p class=notice>Добавлено заданий OCR: '+Number(queued)+'</p>');}document.addEventListener('click',function(ev){let a=ev.target.closest('[data-ocr-status]');if(!a)return;ev.preventDefault();let q=a.dataset.ocrStatus||'';let list=document.getElementById('global-ocr-jobs');if(!list)return;document.querySelectorAll('.ocr-status-choice').forEach(el=>el.classList.toggle('active',el===a));list.dataset.url='/ocr/jobs/fragment'+(q?'?status='+encodeURIComponent(q):'');list.innerHTML='Загрузка...';fetch(list.dataset.url,{credentials:'same-origin',cache:'no-store'}).then(r=>{if(!r.ok)throw Error('HTTP '+r.status);return r.text()}).then(html=>{list.innerHTML=html}).catch(e=>{list.textContent='Не удалось загрузить задания: '+e.message});list.scrollIntoView({behavior:'smooth',block:'start'});});</script>"#);
     body.push_str("<article><h2>Команды диагностики</h2><pre>cargo run -- --ocr-status\ncargo run -- --check-vibe-ocr tests\\fixtures\\sample.tif\n$env:RUST_LOG='id_control_axum=debug,info'\ncargo run</pre><p>При работающем сервере: <a href='/api/ocr/status'>JSON состояния</a> · <a href='/api/ocr/jobs'>JSON заданий</a>. Пароли и ключи в отчёт не включаются.</p></article>");
     Ok(layout("Диагностика",body))
 }
 
+
+async fn diagnostics_scan(State(st):State<Shared>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
+    verify(&form.csrf,&st)?;
+    // A full DSM scan performs OCR of new files and may run much longer than
+    // an HTTPS proxy timeout. Acknowledge the command, then scan in background.
+    let worker=st.clone();
+    tokio::spawn(async move {
+        let _guard=worker.scan_lock.lock().await;
+        if let Ok(mut s)=worker.scan_status.write(){s.running=true;s.message="Ручное сканирование Synology".into();}
+        let result=scanner::scan_once(&worker.db,&worker.cfg,&worker.catalog,&worker.nas).await;
+        match result {
+            Ok(r)=>{
+                worker.synology_connected.store(true,Ordering::Relaxed);
+                if let Ok(mut s)=worker.scan_status.write(){
+                    s.running=false;s.last_at=Some(chrono::Utc::now());
+                    s.message=format!("Synology: {} новых/обновлённых документов",r.new_documents);
+                    s.detail=r.summary();
+                }
+            },
+            Err(e)=>{
+                error!("Manual Synology scan failed: {e:#}");
+                worker.synology_connected.store(false,Ordering::Relaxed);
+                if let Ok(mut s)=worker.scan_status.write(){
+                    s.running=false;s.last_at=Some(chrono::Utc::now());
+                    s.message=format!("Ошибка сканирования: {e}");s.detail=String::new();
+                }
+            },
+        }
+    });
+    Ok(Redirect::to("/diagnostics"))
+}
+async fn diagnostics_reprocess_errors(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
+    verify(&form.csrf,&st)?;
+    if !actor.superuser {return Err(WebError::forbidden());}
+    let packages:Vec<(i64,)>=sqlx::query_as("SELECT DISTINCT d.package_id FROM documents d WHERE d.is_present=true AND (d.recognition_status LIKE 'error:%' OR d.recognition_status IN ('partial','manual')) AND NOT EXISTS (SELECT 1 FROM documents newer WHERE newer.package_id=d.package_id AND newer.relative_path=d.relative_path AND newer.version>d.version) ORDER BY d.package_id")
+        .fetch_all(&st.db).await?;
+    let mut queued=0usize;
+    let actor_name=format!("bitrix:{}:{}",actor.member,actor.user_id);
+    for (pkg,) in packages{queued+=ocr_jobs::enqueue_package(&st.db,pkg,false,&actor_name).await?;}
+    repo::audit(&st.db,&actor_name,"ocr_global_errors_queued",&format!("queued={queued}")).await?;
+    Ok(Redirect::to(&format!("/diagnostics?queued={queued}#ocr-queue")))
+}
 async fn reprocess_document(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
     verify(&form.csrf,&st)?;
     let doc=repo::document(&st.db,id).await.map_err(|_|WebError::not_found())?;
@@ -1065,5 +1127,5 @@ async fn health(State(st):State<Shared>)->WebResult<Json<serde_json::Value>>{
         .fetch_one(&st.db).await?;
     Ok(Json(serde_json::json!({"synology_connected":st.synology_connected.load(Ordering::Relaxed),
         "approved_normative_rules":approved.0,"normative_rules_configured":approved.0>0,
-        "app_version":"0.9.0"})))
+        "app_version":"0.9.4"})))
 }

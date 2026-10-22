@@ -82,6 +82,12 @@ pub async fn jobs(db:&PgPool,package_id:Option<i64>,limit:i64)->Result<Vec<OcrJo
     Ok(sqlx::query_as::<_,OcrJob>(&sql).bind(package_id).bind(limit.clamp(1,100)).fetch_all(db).await?)
 }
 
+pub async fn jobs_filtered(db:&PgPool,package_id:Option<i64>,status:Option<&str>,limit:i64)->Result<Vec<OcrJob>>{
+    let status=status.filter(|s|matches!(*s,"pending"|"running"|"done"|"partial"|"failed"|"cancelled"));
+    let sql=format!("SELECT {JOB_COLUMNS} FROM ocr_jobs WHERE ($1::bigint IS NULL OR package_id=$1) AND ($2::text IS NULL OR status=$2) ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, id DESC LIMIT $3");
+    Ok(sqlx::query_as::<_,OcrJob>(&sql).bind(package_id).bind(status).bind(limit.clamp(1,200)).fetch_all(db).await?)
+}
+
 pub async fn recent_events(db:&PgPool,job_id:i64,limit:i64)->Result<Vec<OcrEvent>>{
     Ok(sqlx::query_as::<_,OcrEvent>(
         "SELECT id,job_id,created_at,stage,current_step,total_steps,message

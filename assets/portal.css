@@ -53,3 +53,8 @@ main{max-width:1460px;margin:25px auto 70px;padding:0 clamp(16px,2.7vw,32px)}
 .drop-zone h3{font-size:15px;color:#173d66;margin:12px 0 5px}.drop-zone p{font-size:12px;margin:7px 0 14px}.drop-zone input[type=file]{max-width:300px;display:block;margin:12px auto;color:#235b9a}.drop-zone small{display:block;color:#5b7894}
 .role-viewer .package-content form,.package-content.role-viewer form{display:none!important}
 .package-content.role-uploader form:not([enctype]){display:none!important}
+
+/* 0.9.4 Synology/OCR operator controls */
+.ocr-status-choice { cursor:pointer; text-decoration:none; }
+.ocr-status-choice.active { border-color:#2677a9; background:#dceefa; color:#163c59; font-weight:700; }
+#global-ocr-jobs { scroll-margin-top:90px; }

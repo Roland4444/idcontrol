@@ -125,6 +125,7 @@ async fn main()->Result<()> {
                         scan.running=false;
                         scan.last_at=Some(chrono::Utc::now());
                         scan.message=format!("Synology: {} новых/обновлённых документов",result.new_documents);
+                        scan.detail=result.summary();
                     }
                 },
                 Err(e)=>{
@@ -134,6 +135,7 @@ async fn main()->Result<()> {
                         scan.running=false;
                         scan.last_at=Some(chrono::Utc::now());
                         scan.message=format!("Ошибка сканирования: {}",e.to_string().chars().take(230).collect::<String>());
+                        scan.detail=String::new();
                     }
                 },
             }

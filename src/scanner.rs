@@ -2,7 +2,7 @@ use crate::{catalog::Catalog, config::Config, docs, engine, repo, synology::Syno
 use anyhow::{bail, Context, Result};
 use sha2::{Digest,Sha256};
 use sqlx::PgPool;
-use std::{collections::HashSet,fs::{self,File},io::Read,path::Path,sync::Arc,time::{SystemTime,UNIX_EPOCH}};
+use std::{collections::{HashMap,HashSet},fs::{self,File},io::Read,path::Path,sync::Arc,time::{SystemTime,UNIX_EPOCH}};
 use tracing::{info,warn};
 
 fn source_details(root:&Path,path:&Path)->Option<(String,String,String,String)>{
@@ -139,7 +139,17 @@ pub async fn ingest(db:&PgPool,cfg:&Config,catalog:&Catalog,root:&Path,path:&Pat
 }
 
 #[derive(serde::Serialize)]
-pub struct ScanResult {pub synology_connected:bool,pub new_documents:usize,pub affected_packages:usize}
+pub struct ScanResult {
+    pub synology_connected:bool,pub new_documents:usize,pub affected_packages:usize,
+    pub files_reported:usize,pub supported:usize,pub skipped_unmapped:usize,
+    pub ignored_layout:usize,pub ignored_extension:usize,pub unchanged:usize,
+}
+impl ScanResult {
+    pub fn summary(&self)->String {
+        format!("Synology: {} файлов найдено; {} подходящих; {} новых/обновлённых; {} без изменений; {} не сопоставлено с ЖК или видом работ; {} неподдерживаемая структура; {} неподдерживаемый формат",
+            self.files_reported,self.supported,self.new_documents,self.unchanged,self.skipped_unmapped,self.ignored_layout,self.ignored_extension)
+    }
+}
 
 /// A complete successful remote traversal is required before disappearance reconciliation.
 /// Errors in listing, paging, login or decoding never mark documents deleted.
@@ -176,8 +186,14 @@ async fn scan_session(
 )->Result<ScanResult>{
     let entries=session.list_files().await?;
     let files_reported=entries.len();
+    // Only the six approved projects can receive new Synology documents. All
+    // non-matching folders need an explicit superadmin mapping in PostgreSQL.
+    let approved:HashSet<String>=crate::portal::PROJECTS.iter().map(|(n,_,_)|(*n).to_owned()).collect();
+    let mappings:HashMap<String,(String,String)>=sqlx::query_as::<_,(String,String,String)>(
+        "SELECT m.source_name,p.name,m.default_work FROM synology_project_mappings m JOIN projects p ON p.id=m.project_id")
+        .fetch_all(db).await?.into_iter().map(|(s,p,w)|(s,(p,w))).collect();
     let mut seen=HashSet::new();let mut affected=HashSet::new();let mut ingested=0;
-    let mut supported=0usize;
+    let mut supported=0usize;let mut skipped_unmapped=0usize;let mut unchanged=0usize;
     let mut ignored_layout=0usize;
     let mut ignored_extension=0usize;
     for e in entries {
@@ -187,10 +203,21 @@ async fn scan_session(
             ignored_extension+=1;
             continue;
         }
-        let Some(layout)=normalize_remote_file(rel,&cfg.synology_project_name,&cfg.synology_default_work) else {
+        let Some(mut layout)=normalize_remote_file(rel,&cfg.synology_project_name,&cfg.synology_default_work) else {
             ignored_layout+=1;
             continue;
         };
+        // Preserve explicit work subfolders; default work can be chosen in
+        // the mapping for a flat NAS folder with only ИД/ and ПД/.
+        if let Some((target,default_work))=mappings.get(&layout.project) {
+            layout.project=target.clone();
+            if layout.work==cfg.synology_default_work && !default_work.is_empty(){layout.work=default_work.clone();}
+            layout.mirror_relative=format!("{}/{}/{}",layout.project,layout.work,layout.db_relative);
+        }
+        if !approved.contains(&layout.project) || catalog.work_type(&layout.work).is_none() {
+            skipped_unmapped+=1;
+            continue;
+        }
         supported+=1;
         seen.insert((layout.project.clone(),layout.work.clone(),layout.db_relative.clone()));
         if e.size>cfg.max_file_mb*1024*1024 {warn!("Ignoring oversized NAS file: {}",e.path);continue;}
@@ -204,7 +231,7 @@ async fn scan_session(
         let pkg=repo::get_or_create_package(db,pr.id,&layout.work).await?;
         let latest=repo::latest_document(db,pkg.id,&layout.db_relative).await?;
         if meta.is_some_and(|(s,m)|s==e.size as i64 && m==e.mtime) &&
-           latest.is_some_and(|d|d.is_present && d.origin=="synology") {continue;}
+           latest.is_some_and(|d|d.is_present && d.origin=="synology") {unchanged+=1;continue;}
         // Isolated tempdir prevents read-only NAS files from being modified and leaves no
         // half-completed temporary scans after the current operation finishes.
         let tmp=tempfile::tempdir_in(&cfg.temp_root)?;
@@ -227,9 +254,13 @@ async fn scan_session(
         }
     }
     // Never interpret an empty NAS folder or unsupported folder layout as deletion.
-    let allow_removals=files_reported>0 && supported>0;
+    // Missing mapping/unsupported layouts do not imply deletion. Never mass-mark
+    // documents absent during a partial or incomplete reconciliation.
+    // Mapping changes are additive: do not silently mark old imported paths absent.
+    // Deletion reconciliation remains active for direct, unmapped fixed-project trees.
+    let allow_removals=files_reported>0 && supported>0 && mappings.is_empty() && skipped_unmapped==0 && ignored_layout==0;
     if files_reported==0 {warn!("No files reported by DSM: bulk disappearance reconciliation skipped");}
-    info!("DSM scan detail: {files_reported} files returned, {supported} matched layout/extension, {ignored_layout} skipped by folder layout, {ignored_extension} skipped by extension/temp filename");
+    info!("DSM scan detail: {files_reported} files returned, {supported} matched approved projects, {skipped_unmapped} missing approved ЖК/work mapping, {unchanged} unchanged, {ignored_layout} skipped by folder layout, {ignored_extension} skipped by extension/temp filename");
     if files_reported>0 && supported==0 {
         warn!("DSM found files but none matched supported folder structures; check SYNOLOGY_ROOT and the ПД/ИД hierarchy");
     }
@@ -247,7 +278,8 @@ async fn scan_session(
     }
     for id in &affected {engine::analyze(db,catalog,*id,"synology").await?;}
     info!("Synology scan: {ingested} new/updated docs, {} affected packages",affected.len());
-    Ok(ScanResult{synology_connected:true,new_documents:ingested,affected_packages:affected.len()})
+    Ok(ScanResult{synology_connected:true,new_documents:ingested,affected_packages:affected.len(),
+        files_reported,supported,skipped_unmapped,ignored_layout,ignored_extension,unchanged})
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 [package]
 name = "id-control-axum"
-version = "0.9.2"
+version = "0.9.4"
 edition = "2021"
 description = "Executive documentation control with local rules and optional AI review"
 
@@ -8,7 +8,9 @@ description = "Executive documentation control with local rules and optional AI 
 anyhow = "1"
 axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22"
-calamine = "0.26"
+# calamine 0.26.x permits zip ^2; zip 2.6.x changes ZipFile API and breaks its build.
+# calamine 0.27.0 pins zip ~2.5.0 and keeps open_workbook_auto/Reader API used in src/docs.rs.
+calamine = "=0.27.0"
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 hex = "0.4"

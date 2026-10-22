@@ -85,6 +85,7 @@ pub async fn project(State(st):State<Shared>,Extension(user):Extension<Principal
 #[derive(Deserialize)]pub struct CsrfForm{pub csrf:String}
 #[derive(Deserialize)]pub struct AssignmentForm{pub csrf:String,pub package_id:i64,pub user_id:i64,pub role:String}
 #[derive(Deserialize)]pub struct ManagerForm{pub csrf:String,pub project_id:i64,pub user_id:i64,pub action:String}
+#[derive(Deserialize)]pub struct NasMappingForm{pub csrf:String,pub source_name:String,pub project_id:i64,pub default_work:String,pub action:String}
 
 pub async fn create_work(State(st):State<Shared>,Extension(actor):Extension<Principal>,Path(id):Path<i64>,Form(form):Form<WorkForm>)->Result<Redirect,WebError>{
     web::verify(&form.csrf,&st)?;
@@ -143,11 +144,24 @@ pub async fn administration(State(st):State<Shared>,Extension(actor):Extension<P
         let id:i64=row.try_get("id")?;
         options.push_str(&format!("<option value='{id}'>{}</option>",h(name)));
     }
+    let links:Vec<(String,String,String)>=sqlx::query_as("SELECT m.source_name,p.name,m.default_work FROM synology_project_mappings m JOIN projects p ON p.id=m.project_id ORDER BY m.source_name")
+        .fetch_all(&st.db).await?;
+    let mut mapping_rows=String::new();
+    for (source,target,work) in links {
+        mapping_rows.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td></tr>",h(&source),h(&target),if work.is_empty(){"Из папки на NAS".to_owned()}else{h(&work)}));
+    }
+    let mut work_options=String::from("<option value=''>Из структуры NAS (по умолчанию — из .env)</option>");
+    for wt in &st.catalog.work_types{work_options.push_str(&format!("<option value='{}'>{}</option>",h(&wt.name),h(&wt.name)));}
     let body=format!(r#"<div class="page-title"><h1>Администрирование</h1><p>Только для супер-администраторов Bitrix24 с ID 1 и 336.</p></div>
     <section class="white-panel"><h2>Администраторы проектов</h2><p>Назначенный администратор создаёт виды работ и распределяет доступ сотрудников только внутри своего ЖК.</p>
     <form class="admin-form" method="post" action="/administration/managers">{}<label>Проект<select name="project_id">{options}</select></label><label>ID сотрудника<input name="user_id" class="employee-id" type="number" min="1" required placeholder="ID сотрудника"></label><label>Сотрудник из Bitrix24<select class="employee-picker"><option value="">Из списка Bitrix24…</option></select></label><label>Действие<select name="action"><option value="grant">Назначить</option><option value="revoke">Снять назначение</option></select></label><button>Сохранить</button></form>
     <table><thead><tr><th>Жилой комплекс</th><th>ID администратора проекта</th></tr></thead><tbody>{trs}</tbody></table>{}</section>
-    <section class="white-panel"><h2>Роли и ограничения</h2><p><strong>Супер-администратор</strong>: Bitrix24 ID 1 и 336. <strong>Администратор проекта</strong>: назначается на выбранный ЖК. <strong>Пользователь</strong>: видит только назначенные комплекты ИД.</p><p>Все права проверяются на сервере, включая скачивание файлов, OCR и отправку форм.</p></section>"#,web::hidden(&st.csrf),employee_picker());
+    <section class="white-panel" id="synology-mapping"><h2>Synology → жилые комплексы</h2>
+    <p>Исходная папка — имя первой папки под SYNOLOGY_ROOT. Если корень содержит сразу ИД/ и ПД/, используется SYNOLOGY_PROJECT_NAME. Файлы, не сопоставленные с одним из шести ЖК, не импортируются в скрытые проекты.</p>
+    <p>Текущий корень: <code>{}</code>; имя по умолчанию: <code>{}</code>. После изменения используйте <a href="/diagnostics">«Сканировать Synology сейчас»</a>. Старые файлы в базе не удаляются.</p>
+    <form method="post" action="/administration/synology-map">{}<label>Исходная папка NAS<input name="source_name" required maxlength="200" value="{}"></label><label>Сопоставить с ЖК<select name="project_id">{options}</select></label><label>Вид работ для плоского корня<select name="default_work">{work_options}</select></label><label>Действие<select name="action"><option value="save">Сохранить сопоставление</option><option value="remove">Удалить сопоставление</option></select></label><button>Применить</button></form>
+    <table><thead><tr><th>Папка NAS</th><th>Жилой комплекс</th><th>Вид работ для плоского корня</th></tr></thead><tbody>{mapping_rows}</tbody></table></section>
+    <section class="white-panel"><h2>Роли и ограничения</h2><p><strong>Супер-администратор</strong>: Bitrix24 ID 1 и 336. <strong>Администратор проекта</strong>: назначается на выбранный ЖК. <strong>Пользователь</strong>: видит только назначенные комплекты ИД.</p><p>Все права проверяются на сервере, включая скачивание файлов, OCR и отправку форм.</p></section>"#,web::hidden(&st.csrf),employee_picker(),h(&st.cfg.synology_root),h(&st.cfg.synology_project_name),web::hidden(&st.csrf),h(&st.cfg.synology_project_name));
     Ok(web::layout("Администрирование",body))
 }
 pub async fn assign_manager(State(st):State<Shared>,Extension(actor):Extension<Principal>,Form(form):Form<ManagerForm>)->Result<Redirect,WebError>{
@@ -168,6 +182,30 @@ pub async fn assign_manager(State(st):State<Shared>,Extension(actor):Extension<P
     Ok(Redirect::to("/administration"))
 }
 
+
+pub async fn save_synology_mapping(State(st):State<Shared>,Extension(actor):Extension<Principal>,Form(form):Form<NasMappingForm>)->Result<Redirect,WebError>{
+    web::verify(&form.csrf,&st)?;
+    if !actor.superuser{return Err(WebError::forbidden());}
+    let source=form.source_name.trim();
+    repo::validate_segment(source).map_err(|_|WebError::bad("Неверное имя папки Synology"))?;
+    if source.len()>200{return Err(WebError::bad("Слишком длинное имя папки"));}
+    let by=format!("bitrix:{}:{}",actor.member,actor.user_id);
+    match form.action.as_str(){
+        "save"=>{
+            let project_name=sqlx::query_scalar::<_,String>("SELECT name FROM projects WHERE id=$1")
+                .bind(form.project_id).fetch_optional(&st.db).await?.ok_or_else(WebError::not_found)?;
+            if project_info(&project_name).is_none(){return Err(WebError::bad("Выберите один из шести ЖК"));}
+            if !form.default_work.is_empty() && st.catalog.work_type(&form.default_work).is_none(){return Err(WebError::bad("Выберите вид работ из справочника"));}
+            sqlx::query("INSERT INTO synology_project_mappings(source_name,project_id,default_work,changed_by) VALUES ($1,$2,$3,$4) ON CONFLICT(source_name) DO UPDATE SET project_id=EXCLUDED.project_id,default_work=EXCLUDED.default_work,changed_by=EXCLUDED.changed_by,changed_at=now()")
+                .bind(source).bind(form.project_id).bind(&form.default_work).bind(&by).execute(&st.db).await?;
+        },
+        "remove"=>{sqlx::query("DELETE FROM synology_project_mappings WHERE source_name=$1")
+            .bind(source).execute(&st.db).await?;},
+        _=>return Err(WebError::bad("Неверная операция")),
+    }
+    repo::audit(&st.db,&by,"synology_mapping_changed",&format!("source={source} action={}",form.action)).await?;
+    Ok(Redirect::to("/administration#synology-mapping"))
+}
 pub async fn project_image(Path(filename):Path<String>)->Response{
     let bytes:Option<&'static [u8]>=match filename.as_str(){
         "federation.webp"=>Some(include_bytes!("../assets/projects/federation.webp")),
