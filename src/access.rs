@@ -1,4 +1,5 @@
 //! Bitrix24 identities are validated server-side using user.current.
+//! BX24 JS obtains short-lived access credentials automatically; no manual tokens.
 //! Only an opaque cookie (SHA-256 hash persisted in PostgreSQL) authorizes requests.
 use crate::web::Shared;
 use axum::{body::Body,extract::State,http::{header,HeaderValue,Method,Request,StatusCode},middleware::Next,response::{IntoResponse,Response},Json};
@@ -18,7 +19,7 @@ pub fn is_super(id:i64)->bool { id==1 || id==336 }
 fn digest(token:&str)->String {hex::encode(Sha256::digest(token.as_bytes()))}
 fn bad_auth()->Response {(StatusCode::UNAUTHORIZED,"Войдите через приложение в Bitrix24").into_response()}
 fn allowed_public(path:&str,method:&Method)->bool {
-    (path=="/bitrix" && method==Method::GET) ||
+    (path=="/bitrix" && (method==Method::GET || method==Method::POST)) ||
     (path=="/auth/bitrix" && method==Method::POST) ||
     (path.starts_with("/assets/projects/") && method==Method::GET)
 }
@@ -133,18 +134,33 @@ async fn may_access(st:&Shared,a:&Principal,path:&str,method:&Method,query:Optio
 }
 
 #[derive(Deserialize)]
-pub struct BitrixStart {pub access_token:String,pub domain:String,pub member_id:String}
+pub struct BitrixStart {pub access_token:String,pub domain:String}
+
+// The portal is pinned server-side by BITRIX_DOMAIN; the browser cannot select
+// an RBAC namespace by sending an arbitrary member_id. For installations that
+// have already assigned roles in v0.9.1, BITRIX_MEMBER_ID remains OPTIONAL:
+// when set by the operator, it preserves the existing PostgreSQL ACL namespace.
+// New installations derive a stable namespace from the trusted configured domain.
+fn rbac_namespace(configured_domain:&str)->String{
+    std::env::var("BITRIX_MEMBER_ID")
+        .ok()
+        .map(|v|v.trim().to_owned())
+        .filter(|v|!v.is_empty() && !v.starts_with("REPLACE") && !v.starts_with("CHANGE"))
+        .unwrap_or_else(||format!("portal:{configured_domain}"))
+}
 
 pub async fn login(State(st):State<Shared>,Json(body):Json<BitrixStart>)->Response{
     if st.debug_login {return (StatusCode::FORBIDDEN,"Bitrix24 login disabled in debug mode").into_response();}
     let configured_domain=std::env::var("BITRIX_DOMAIN").unwrap_or_default().trim().trim_start_matches("https://").trim_end_matches('/').to_lowercase();
-    let configured_member=std::env::var("BITRIX_MEMBER_ID").unwrap_or_default();
-    if configured_domain.is_empty() || configured_member.is_empty() {
-        return (StatusCode::SERVICE_UNAVAILABLE,"Set BITRIX_DOMAIN and BITRIX_MEMBER_ID").into_response();
+    if configured_domain.is_empty() || !configured_domain.bytes().all(|c|c.is_ascii_alphanumeric()||c==b'.'||c==b'-') {
+        return (StatusCode::SERVICE_UNAVAILABLE,"Set BITRIX_DOMAIN to your Bitrix24 portal hostname").into_response();
     }
-    if body.domain.to_lowercase()!=configured_domain || body.member_id!=configured_member || body.access_token.len()<12 || body.access_token.len()>4096 {
+    // user_id and member_id are deliberately NOT accepted from the browser.
+    // user.current on the configured portal is the source of verified identity.
+    if body.domain.trim().to_lowercase()!=configured_domain || body.access_token.len()<12 || body.access_token.len()>4096 {
         return bad_auth();
     }
+    let configured_member=rbac_namespace(&configured_domain);
     // Fixed admin-configured origin prevents SSRF. Never construct a URL from caller input.
     let url=format!("https://{configured_domain}/rest/user.current.json");
     let client=match reqwest::Client::builder().timeout(Duration::from_secs(12)).build(){Ok(v)=>v,Err(_)=>return bad_auth()};

@@ -1,25 +1,48 @@
-
-
-(function(){
- const status=document.getElementById('status');const help=document.getElementById('help');
- function fail(message){status.textContent=message;help.textContent='Откройте приложение внутри Битрикс24. Если сессия заблокирована браузером, проверьте разрешение сторонних cookies для этого сайта.';}
- if(window.self===window.top){fail('Вход возможен только из Битрикс24.');return;}
- if(typeof BX24==='undefined'){fail('Не загружена библиотека Битрикс24.');return;}
- const timer=setTimeout(()=>fail('Не удалось инициализировать Битрикс24.'),15000);
- // installFinish вызывается лишь во время установки, а не при каждом открытии.
- BX24.install(function(){BX24.installFinish();});
- BX24.init(function(){
-   clearTimeout(timer);
-   const a=BX24.getAuth();
-   if(!a||!a.access_token||!a.member_id||!a.domain){fail('Не получены OAuth-данные Битрикс24.');return;}
-   BX24.callMethod('user.current',{},async function(result){
-     if(result.error()){fail('Битрикс24 не подтвердил текущего сотрудника.');return;}
-     status.textContent='Авторизация сотрудника '+(result.data().NAME||result.data().ID)+'…';
-     try {
-       const resp=await fetch('/auth/bitrix',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({access_token:a.access_token,member_id:a.member_id,domain:a.domain})});
-       if(!resp.ok){throw new Error('HTTP '+resp.status);}
-       window.location.replace('/');
-     }catch(err){fail('Ошибка серверной авторизации: '+String(err));}
-   });
- });
+(function () {
+  'use strict';
+  var status = document.getElementById('status');
+  var help = document.getElementById('help');
+  var finished = false;
+  function fail(message) {
+    if (finished) return;
+    finished = true;
+    status.textContent = message;
+    help.textContent = 'Откройте приложение внутри Битрикс24. При блокировке cookies разрешите сторонние cookies для сайта приложения.';
+  }
+  if (window.self === window.top) { fail('Вход доступен только из Битрикс24.'); return; }
+  if (typeof BX24 === 'undefined') { fail('Не загрузилась библиотека Битрикс24.'); return; }
+  var timer = setTimeout(function () { fail('Нет ответа от Битрикс24.'); }, 15000);
+  // Finish installation when Bitrix24 enters installation mode, not on every launch.
+  BX24.install(function () { BX24.installFinish(); });
+  BX24.init(function () {
+    if (finished) return;
+    BX24.callMethod('user.current', {}, function (result) {
+      if (finished) return;
+      clearTimeout(timer);
+      if (result.error()) { fail('Битрикс24 не определил текущего сотрудника.'); return; }
+      var user = result.data();
+      status.textContent = 'Вход: ' + (user.NAME || user.ID) + '…';
+      // getAuth() is supplied automatically by the BX24 SDK; the operator
+      // does not obtain, copy, store, or refresh these credentials manually.
+      var auth = BX24.getAuth();
+      if (!auth || !auth.access_token || !auth.domain) {
+        fail('Нет действующей сессии Битрикс24. Переоткройте приложение.');
+        return;
+      }
+      fetch('/auth/bitrix', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {'Content-Type': 'application/json'},
+        // Do NOT transmit user.ID: Rust calls Bitrix24 user.current itself.
+        body: JSON.stringify({domain: auth.domain, access_token: auth.access_token})
+      }).then(function (reply) {
+        if (!reply.ok) throw new Error('HTTP ' + reply.status);
+        return reply.json();
+      }).then(function (data) {
+        if (!data.ok) throw new Error('Сервер отклонил авторизацию');
+        finished = true;
+        window.location.replace('/');
+      }).catch(function (err) { fail('Ошибка входа: ' + err.message); });
+    });
+  });
 })();
