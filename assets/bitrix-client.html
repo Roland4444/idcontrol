@@ -1,0 +1,26 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Контроль ИД — вход через Битрикс24</title><style>body{font:16px system-ui;background:#f3f7fc;color:#183454;margin:0;display:grid;place-items:center;min-height:100vh}main{background:white;border-radius:18px;padding:32px;max-width:520px;box-shadow:0 12px 40px #12345a15}h1{margin-top:0}</style><script src="https://api.bitrix24.com/api/v1/"></script></head><body><main><h1>Контроль ИД</h1><p id="status">Подключаемся к Битрикс24…</p><p id="help"></p></main>
+<script>
+(function(){
+ const status=document.getElementById('status');const help=document.getElementById('help');
+ function fail(message){status.textContent=message;help.textContent='Откройте приложение внутри Битрикс24. Если сессия заблокирована браузером, проверьте разрешение сторонних cookies для этого сайта.';}
+ if(window.self===window.top){fail('Вход возможен только из Битрикс24.');return;}
+ if(typeof BX24==='undefined'){fail('Не загружена библиотека Битрикс24.');return;}
+ const timer=setTimeout(()=>fail('Не удалось инициализировать Битрикс24.'),15000);
+ // installFinish вызывается лишь во время установки, а не при каждом открытии.
+ BX24.install(function(){BX24.installFinish();});
+ BX24.init(function(){
+   clearTimeout(timer);
+   const a=BX24.getAuth();
+   if(!a||!a.access_token||!a.member_id||!a.domain){fail('Не получены OAuth-данные Битрикс24.');return;}
+   BX24.callMethod('user.current',{},async function(result){
+     if(result.error()){fail('Битрикс24 не подтвердил текущего сотрудника.');return;}
+     status.textContent='Авторизация сотрудника '+(result.data().NAME||result.data().ID)+'…';
+     try {
+       const resp=await fetch('/auth/bitrix',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({access_token:a.access_token,member_id:a.member_id,domain:a.domain})});
+       if(!resp.ok){throw new Error('HTTP '+resp.status);}
+       window.location.replace('/');
+     }catch(err){fail('Ошибка серверной авторизации: '+String(err));}
+   });
+ });
+})();
+</script></body></html>
