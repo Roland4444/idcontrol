@@ -1,24 +1,38 @@
 <script src="https://api.bitrix24.com/api/v1/"></script>
 <script>
 (function(){
-  const nodes=[...document.querySelectorAll('.employee-picker')];
-  if(!nodes.length||typeof BX24==='undefined'||window.self===window.top)return;
-  function load(){
-    BX24.callMethod('user.get',{FILTER:{ACTIVE:true}},function(result){
-      if(result.error())return;
-      const users=result.data()||[];
-      users.forEach(u=>{
-        const name=[u.NAME,u.LAST_NAME].filter(Boolean).join(' ')||u.EMAIL||'Сотрудник';
-        nodes.forEach(el=>{if(el.querySelector('option[value="'+u.ID+'"]'))return;
-          const opt=document.createElement('option');opt.value=String(u.ID);opt.textContent=name+' · ID '+u.ID;el.appendChild(opt);
-        });
-      });
-      if(result.more())result.next();
+  const selects=[...document.querySelectorAll('select.employee-picker')];
+  if(!selects.length)return;
+  const known=new Map();
+  function add(userId,name){
+    const id=String(userId||'');
+    if(!/^\d+$/.test(id)||Number(id)<1)return;
+    const safeName=(name||'').trim()||'Сотрудник Bitrix24';
+    known.set(id,safeName);
+    selects.forEach(select=>{
+      let opt=Array.from(select.options).find(x=>x.value===id);
+      if(!opt){opt=document.createElement('option');opt.value=id;select.appendChild(opt);}
+      opt.textContent=safeName;
+    });
+    document.querySelectorAll('[data-employee-id]').forEach(el=>{
+      if(el.dataset.employeeId===id)el.textContent=safeName;
     });
   }
-  BX24.init(load);
-  nodes.forEach(select=>select.addEventListener('change',()=>{
-    const input=select.closest('form')?.querySelector('input.employee-id');if(input&&select.value)input.value=select.value;
-  }));
+  fetch('/api/employees/known',{credentials:'same-origin'})
+    .then(r=>r.ok?r.json():[])
+    .then(users=>users.forEach(u=>add(u.user_id,u.name)))
+    .catch(()=>{});
+  if(typeof BX24!=='undefined' && window.self!==window.top){
+    BX24.init(function(){
+      BX24.callMethod('user.get',{FILTER:{ACTIVE:true}},function(result){
+        if(result.error())return;
+        (result.data()||[]).forEach(u=>{
+          const name=[u.NAME,u.LAST_NAME].filter(Boolean).join(' ')||u.EMAIL||'Сотрудник Bitrix24';
+          add(u.ID,name);
+        });
+        if(result.more())result.next();
+      });
+    });
+  }
 })();
 </script>

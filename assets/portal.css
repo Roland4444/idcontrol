@@ -124,3 +124,7 @@ main{max-width:1460px;margin:25px auto 70px;padding:0 clamp(16px,2.7vw,32px)}
 @media(max-width:650px){.check-control{flex-direction:column;align-items:stretch}.check-control form button{width:100%}}
 
 .card-check-summary{margin-top:10px!important;color:#a06d2c!important;font-size:11px!important;font-weight:650}.card-check-summary.is-checked{color:#17805c!important}
+
+/* Account management: show names, not internal account identifiers. */
+.admin-form select.employee-picker,.assign-form select.employee-picker{min-width:260px;max-width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:#fff}
+.btn-subtle{padding:8px 12px;background:#f2f6fc;color:#3e5978;border:1px solid #dbe6f2;border-radius:8px;cursor:pointer}.btn-subtle:hover{background:#e7f1ff}

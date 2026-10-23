@@ -16,6 +16,7 @@ use subtle::ConstantTimeEq;
 pub struct Principal {pub member:String,pub user_id:i64,pub name:String,pub superuser:bool,pub debug:bool}
 
 pub fn is_super(id:i64)->bool { id==1 || id==336 }
+pub fn has_super_role(id:i64,role:&str)->bool { is_super(id) || role=="admin" }
 fn digest(token:&str)->String {hex::encode(Sha256::digest(token.as_bytes()))}
 fn bad_auth()->Response {(StatusCode::UNAUTHORIZED,"Войдите через приложение в Bitrix24").into_response()}
 fn allowed_public(path:&str,method:&Method)->bool {
@@ -35,7 +36,7 @@ async fn actor_from_headers(st:&Shared, auth_header:Option<&str>, cookies:Option
         let cred=String::from_utf8(decoded).ok()?;
         let (user,pass)=cred.split_once(':')?;
         if bool::from(user.as_bytes().ct_eq(b"admin")) && bool::from(pass.as_bytes().ct_eq(b"super123")) {
-            return Some(Principal{member:"debug".into(),user_id:1,name:"Администратор (отладка)".into(),superuser:true,debug:true});
+            return Some(Principal{member:debug_rbac_namespace(),user_id:1,name:"Администратор (отладка)".into(),superuser:true,debug:true});
         }
         return None;
     }
@@ -43,10 +44,10 @@ async fn actor_from_headers(st:&Shared, auth_header:Option<&str>, cookies:Option
     let session=cookie.split(';').filter_map(|p|p.trim().split_once('='))
         .find(|(k,_)|*k=="__Host-idcontrol_session").map(|(_,v)|v)?;
     if session.len()!=64 || !session.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'-'||b==b'_'){return None;}
-    let row=sqlx::query("SELECT s.member_id,s.user_id,s.display_name FROM portal_sessions s JOIN bitrix_principals p ON p.member_id=s.member_id AND p.user_id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND (p.active=true OR s.user_id IN (1,336))")
+    let row=sqlx::query("SELECT s.member_id,s.user_id,s.display_name,p.global_role FROM portal_sessions s JOIN bitrix_principals p ON p.member_id=s.member_id AND p.user_id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND (p.active=true OR s.user_id IN (1,336))")
         .bind(digest(session)).fetch_optional(&st.db).await.ok()??;
     let user_id:i64=row.try_get("user_id").ok()?;
-    Some(Principal{member:row.try_get("member_id").ok()?,user_id,name:row.try_get("display_name").ok()?,superuser:is_super(user_id),debug:false})
+    Some(Principal{member:row.try_get("member_id").ok()?,user_id,name:row.try_get("display_name").ok()?,superuser:has_super_role(user_id,&row.try_get::<String,_>("global_role").unwrap_or_default()),debug:false})
 }
 
 pub async fn authorize(State(st):State<Shared>,mut request:Request<Body>,next:Next)->Response{
@@ -106,6 +107,11 @@ pub async fn package_role(st:&Shared,a:&Principal,package:i64)->Option<String>{
 }
 async fn may_access(st:&Shared,a:&Principal,path:&str,method:&Method,query:Option<&str>)->bool{
     if path=="/" || path=="/auth/logout" || path=="/api/me" {return true;}
+    if path=="/api/employees/known" {
+        if a.superuser {return true;}
+        return sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM bitrix_project_managers WHERE member_id=$1 AND user_id=$2)")
+            .bind(&a.member).bind(a.user_id).fetch_one(&st.db).await.unwrap_or(false);
+    }
     if path=="/administration" || path.starts_with("/administration/"){return a.superuser;}
     if path=="/health" || path=="/diagnostics" || path.starts_with("/diagnostics/") || path.starts_with("/norms") || path=="/catalog/errors" || path=="/api/ocr/status" {return a.superuser;}
     if path=="/projects" {return false;} // Projects are fixed; no manual names.
@@ -147,6 +153,14 @@ pub struct BitrixStart {pub access_token:String,pub domain:String}
 // have already assigned roles in v0.9.1, BITRIX_MEMBER_ID remains OPTIONAL:
 // when set by the operator, it preserves the existing PostgreSQL ACL namespace.
 // New installations derive a stable namespace from the trusted configured domain.
+fn debug_rbac_namespace()->String {
+    // Debug administration works in the same portal ACL namespace as Bitrix SSO.
+    let domain=std::env::var("BITRIX_DOMAIN").unwrap_or_default()
+        .trim().trim_start_matches("https://").trim_end_matches('/').to_lowercase();
+    if domain.is_empty() && std::env::var("BITRIX_MEMBER_ID").is_err() {"debug".to_owned()}
+    else {rbac_namespace(&domain)}
+}
+
 fn rbac_namespace(configured_domain:&str)->String{
     std::env::var("BITRIX_MEMBER_ID")
         .ok()
@@ -178,12 +192,13 @@ pub async fn login(State(st):State<Shared>,Json(body):Json<BitrixStart>)->Respon
     let Some(id)=user.get("ID").and_then(|v|v.as_i64().or_else(||v.as_str()?.parse().ok())) else{return bad_auth();};
     if id<=0 {return bad_auth();}
     let name=[user.get("NAME"),user.get("LAST_NAME")].iter().filter_map(|v|v.and_then(|v|v.as_str())).collect::<Vec<_>>().join(" ");
-    let name=if name.trim().is_empty(){format!("Сотрудник #{id}")}else{name.chars().take(150).collect()};
+    let name=if name.trim().is_empty(){"Сотрудник Bitrix24".to_string()}else{name.chars().take(150).collect()};
     let record=sqlx::query("INSERT INTO bitrix_principals(member_id,user_id,global_role) VALUES ($1,$2,'user') ON CONFLICT(member_id,user_id) DO NOTHING")
         .bind(&configured_member).bind(id).execute(&st.db).await;
     if record.is_err(){return (StatusCode::INTERNAL_SERVER_ERROR,"Failed to register user").into_response();}
-    let enabled=sqlx::query_scalar::<_,bool>("SELECT active FROM bitrix_principals WHERE member_id=$1 AND user_id=$2")
-        .bind(&configured_member).bind(id).fetch_optional(&st.db).await.ok().flatten().unwrap_or(false);
+    let flags=sqlx::query_as::<_,(bool,String)>("SELECT active,global_role FROM bitrix_principals WHERE member_id=$1 AND user_id=$2")
+        .bind(&configured_member).bind(id).fetch_optional(&st.db).await.ok().flatten();
+    let (enabled,global_role)=flags.unwrap_or((false,"user".to_owned()));
     // Verified users 1 and 336 are always superadmins, even if the local active flag was disabled.
     if !enabled && !is_super(id) {return (StatusCode::FORBIDDEN,"This Bitrix24 user is disabled").into_response();}
     let mut secret=[0u8;32];rand::thread_rng().fill_bytes(&mut secret);
@@ -191,7 +206,7 @@ pub async fn login(State(st):State<Shared>,Json(body):Json<BitrixStart>)->Respon
     let stored=sqlx::query("INSERT INTO portal_sessions(token_hash,member_id,user_id,display_name,expires_at) VALUES ($1,$2,$3,$4,now()+interval '6 hours')")
         .bind(digest(&token)).bind(&configured_member).bind(id).bind(&name).execute(&st.db).await;
     if stored.is_err(){return (StatusCode::FORBIDDEN,"Account inactive or database error").into_response();}
-    let mut r=Json(json!({"ok":true,"user_id":id,"superadmin":is_super(id)})).into_response();
+    let mut r=Json(json!({"ok":true,"user_id":id,"superadmin":has_super_role(id,&global_role)})).into_response();
     let cookie=format!("__Host-idcontrol_session={token}; Path=/; Max-Age=21600; Secure; HttpOnly; SameSite=None; Partitioned");
     r.headers_mut().insert(header::SET_COOKIE,HeaderValue::from_str(&cookie).expect("safe cookie"));
     r
@@ -222,9 +237,17 @@ pub async fn bitrix_client_js()->Response{
 mod tests {
     use super::*;
     #[test]
-    fn exactly_two_superadministrators(){
+    fn built_in_superadministrators(){
         assert!(is_super(1));assert!(is_super(336));
-        for id in [0,2,335,337] {assert!(!is_super(id));}
+        for id in [0,2,335,337] {assert!(!is_super(id));} // More admins come from PostgreSQL.
+    }
+    #[test]
+    fn assignable_superadministrators(){
+        assert!(has_super_role(1,"user"));
+        assert!(has_super_role(336,"user"));
+        assert!(has_super_role(102,"admin"));
+        assert!(!has_super_role(102,"user"));
+        assert!(!has_super_role(102,""));
     }
     #[test]
     fn path_parameter_parsing_is_bounded(){

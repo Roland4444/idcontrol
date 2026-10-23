@@ -190,6 +190,8 @@ pub fn router(state:Shared)->Router{
         .route("/projects/{id}/works/all",post(portal::create_all))
         .route("/projects/{id}/assign",post(portal::assign_work))
         .route("/administration",get(portal::administration))
+        .route("/administration/superadmins",post(portal::assign_superadmin))
+        .route("/api/employees/known",get(portal::known_employees))
         .route("/administration/managers",post(portal::assign_manager))
         .route("/administration/projects/access",post(portal::assign_project_access))
         .route("/administration/synology-map",post(portal::save_synology_mapping))

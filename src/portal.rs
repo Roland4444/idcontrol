@@ -1,7 +1,7 @@
 //! Single-app project and work-type UX. All role decisions are in access.rs.
 use crate::{access::{self,Principal},models::Package,repo,web::{self,Shared,WebError}};
-use axum::{extract::{Path,State},Extension,Form,response::{Html,Redirect,Response,IntoResponse},http::{header,StatusCode}};
-use serde::Deserialize;
+use axum::{extract::{Path,State},Extension,Form,Json,response::{Html,Redirect,Response,IntoResponse},http::{header,StatusCode}};
+use serde::{Deserialize,Serialize};
 use sqlx::Row;
 
 pub const PROJECTS:[(&str,&str,&str);6]=[
@@ -114,17 +114,17 @@ pub async fn project(State(st):State<Shared>,Extension(user):Extension<Principal
             works.push_str(&format!(r#"<a class="work-card" href="/packages/{}"><span class="work-symbol {}">{}</span><div><strong>{}</strong><small>Комплект ИД · {} файлов</small><small class="work-check {}">{}</small></div><span class="work-arrow">›</span></a>"#,pkg.id,tone,symbol,h(&wt.name),files.0,check_class,h(&check_status)));
             if manager {
                 let names=assignments.iter().filter(|(pid,_,_)|*pid==pkg.id)
-                    .map(|(_,uid,role)|format!("ID {} — {}",uid,h(role)))
+                    .map(|(_,uid,role)|format!("<span data-employee-id=\"{}\">Сотрудник Bitrix24</span> — {}",uid,h(role)))
                     .collect::<Vec<_>>();
                 let members=if names.is_empty(){"Пока никто не назначен".to_owned()}else{names.join("; ")};
-                assigned_table.push_str(&format!(r#"<tr><td><strong>{}</strong><small class="assigned-users">{}</small></td><td><form class="assign-form" method="post" action="/projects/{id}/assign">{}<input type="hidden" name="package_id" value="{}"><input type="number" min="1" name="user_id" required placeholder="ID сотрудника" class="employee-id" aria-label="ID сотрудника"><select class="employee-picker" aria-label="Выбрать сотрудника"><option value="">Из списка Bitrix24…</option></select><select name="role"><option value="uploader">Пользователь (загрузка)</option><option value="engineer">Инженер ПТО</option><option value="viewer">Просмотр</option><option value="remove">Снять доступ</option></select><button>Применить</button></form></td></tr>"#,h(&wt.name),h(&members),web::hidden(&st.csrf),pkg.id));
+                assigned_table.push_str(&format!(r#"<tr><td><strong>{}</strong><small class="assigned-users">{}</small></td><td><form class="assign-form" method="post" action="/projects/{id}/assign">{}<input type="hidden" name="package_id" value="{}"><select class="employee-picker" name="user_id" required aria-label="Выбрать сотрудника"><option value="">Выберите сотрудника</option></select><select name="role"><option value="uploader">Пользователь (загрузка)</option><option value="engineer">Инженер ПТО</option><option value="viewer">Просмотр</option><option value="remove">Снять доступ</option></select><button>Применить</button></form></td></tr>"#,h(&wt.name),h(&members),web::hidden(&st.csrf),pkg.id));
             }
         } else if manager {
             works.push_str(&format!(r#"<form method="post" action="/projects/{id}/works" class="work-card work-add">{}<input type="hidden" name="work_type" value="{}"><span class="work-symbol {}">{}</span><div><strong>{}</strong><small>Ещё не создан · нажмите для добавления</small></div><button title="Создать комплект">＋</button></form>"#,web::hidden(&st.csrf),h(&wt.name),tone,symbol,h(&wt.name)));
         }
     }
     let bulk=if manager {format!(r#"<form method="post" action="/projects/{id}/works/all" class="inline">{}<button class="primary">＋ Создать все 14 видов работ</button></form>"#,web::hidden(&st.csrf))} else {String::new()};
-    let assignment=if manager {format!(r#"<details class="admin-management"><summary>Управление доступом сотрудников к видам работ</summary><div class="section-copy">Выберите сотрудника из списка Bitrix24 или введите его числовой ID. Назначение влияет на серверные права, а не только на отображение карточек.</div><table><thead><tr><th>Вид работ</th><th>Назначить сотрудника</th></tr></thead><tbody>{assigned_table}</tbody></table>{}</details>"#,employee_picker())}else{String::new()};
+    let assignment=if manager {format!(r#"<details class="admin-management"><summary>Управление доступом сотрудников к видам работ</summary><div class="section-copy">Выберите сотрудника по имени. Права назначаются на сервере и действуют для документов и проверок.</div><table><thead><tr><th>Вид работ</th><th>Назначить сотрудника</th></tr></thead><tbody>{assigned_table}</tbody></table>{}</details>"#,employee_picker())}else{String::new()};
     let empty=if works.is_empty() {"<p class='empty-work'>Доступных видов работ пока нет. Администратор проекта должен создать комплект и назначить вам доступ.</p>"}else{""};
     let body=format!(r#"<div class="crumb"><a href="/">← К выбору объектов</a> <span>›</span> {}</div>
       <section class="project-hero" style="--hero-image:url('{}')"><div class="project-hero-content"><h1>{}</h1><p>⌖ {}, Астрахань</p><div class="hero-stats"><span>▤ Жилой комплекс</span><span>▥ Исполнительная документация</span><span>◫ {active} из 14 разделов</span></div></div></section>
@@ -139,6 +139,7 @@ pub async fn project(State(st):State<Shared>,Extension(user):Extension<Principal
 #[derive(Deserialize)]pub struct AssignmentForm{pub csrf:String,pub package_id:i64,pub user_id:i64,pub role:String}
 #[derive(Deserialize)]pub struct ManagerForm{pub csrf:String,pub project_id:i64,pub user_id:i64,pub action:String}
 #[derive(Deserialize)]pub struct ProjectAccessForm{pub csrf:String,pub project_id:i64,pub user_id:i64,pub action:String}
+#[derive(Deserialize)]pub struct SuperadminForm{pub csrf:String,pub user_id:i64,pub action:String}
 #[derive(Deserialize)]pub struct NasMappingForm{pub csrf:String,pub source_name:String,pub project_id:i64,pub default_work:String,pub action:String}
 
 pub async fn create_work(State(st):State<Shared>,Extension(actor):Extension<Principal>,Path(id):Path<i64>,Form(form):Form<WorkForm>)->Result<Redirect,WebError>{
@@ -170,7 +171,7 @@ pub async fn create_all(State(st):State<Shared>,Extension(actor):Extension<Princ
 pub async fn assign_work(State(st):State<Shared>,Extension(actor):Extension<Principal>,Path(id):Path<i64>,Form(form):Form<AssignmentForm>)->Result<Redirect,WebError>{
     web::verify(&form.csrf,&st)?;
     if !access::is_manager(&st,&actor,id).await{return Err(WebError::forbidden());}
-    if form.user_id<1{return Err(WebError::bad("Некорректный ID сотрудника"));}
+    if form.user_id<1{return Err(WebError::bad("Выберите сотрудника Bitrix24"));}
     let belongs=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM packages WHERE id=$1 AND project_id=$2)")
         .bind(form.package_id).bind(id).fetch_one(&st.db).await?;
     if !belongs{return Err(WebError::bad("Комплект не относится к этому объекту"));}
@@ -188,16 +189,63 @@ pub async fn assign_work(State(st):State<Shared>,Extension(actor):Extension<Prin
     Ok(Redirect::to(&format!("/projects/{id}")))
 }
 
+// The employee directory contains only staff previously authenticated in this
+// portal namespace. Bitrix24's user.get adds all active staff when embedded.
+#[derive(Serialize)]
+pub struct KnownEmployee {user_id:i64,name:String}
+
+pub async fn known_employees(State(st):State<Shared>,Extension(actor):Extension<Principal>)->Result<Json<Vec<KnownEmployee>>,WebError>{
+    let rows:Vec<(i64,String)>=sqlx::query_as(r#"
+        SELECT p.user_id,COALESCE(NULLIF((SELECT s.display_name FROM portal_sessions s
+          WHERE s.member_id=p.member_id AND s.user_id=p.user_id
+          ORDER BY s.created_at DESC LIMIT 1),''),'Сотрудник Bitrix24')
+        FROM bitrix_principals p WHERE p.member_id=$1 ORDER BY p.user_id"#)
+        .bind(&actor.member).fetch_all(&st.db).await?;
+    Ok(Json(rows.into_iter().map(|(user_id,name)|KnownEmployee{user_id,name}).collect()))
+}
+
 pub async fn administration(State(st):State<Shared>,Extension(actor):Extension<Principal>)->Result<Html<String>,WebError>{
     if !actor.superuser{return Err(WebError::forbidden());}
-    let managers=sqlx::query("SELECT m.user_id,p.name FROM bitrix_project_managers m JOIN projects p ON p.id=m.project_id WHERE m.member_id=$1 ORDER BY p.name,m.user_id")
-        .bind(&actor.member).fetch_all(&st.db).await?;
-    let mut trs=String::new();for r in managers{let user_id:i64=r.try_get("user_id")?;let name:String=r.try_get("name")?;trs.push_str(&format!("<tr><td>{}</td><td>{user_id}</td></tr>",h(&name)));}
-    let project_members:Vec<(i64,String)>=sqlx::query_as("SELECT a.user_id,p.name FROM bitrix_project_access a JOIN projects p ON p.id=a.project_id WHERE a.member_id=$1 ORDER BY p.name,a.user_id")
-        .bind(&actor.member).fetch_all(&st.db).await?;
+    let super_rows:Vec<(i64,String,String)>=sqlx::query_as(r#"
+        SELECT p.user_id,p.global_role,COALESCE(NULLIF((SELECT s.display_name
+          FROM portal_sessions s WHERE s.member_id=p.member_id AND s.user_id=p.user_id
+          ORDER BY s.created_at DESC LIMIT 1),''),'Сотрудник Bitrix24')
+        FROM bitrix_principals p
+        WHERE p.member_id=$1 AND (p.global_role='admin' OR p.user_id IN (1,336))
+        ORDER BY p.user_id"#).bind(&actor.member).fetch_all(&st.db).await?;
+    let mut super_table=String::new();
+    let mut builtin_names=std::collections::HashSet::new();
+    for (uid,_,name) in &super_rows {
+        if access::is_super(*uid){builtin_names.insert(*uid);}
+        let builtin=access::is_super(*uid);
+        let action=if builtin {"Постоянный доступ".to_owned()} else {
+            format!(r#"<form method="post" action="/administration/superadmins" class="inline">{}<input type="hidden" name="user_id" value="{}"><input type="hidden" name="action" value="revoke"><button class="btn-subtle" type="submit">Отозвать права</button></form>"#,web::hidden(&st.csrf),uid)
+        };
+        super_table.push_str(&format!("<tr><td><strong data-employee-id=\"{uid}\">{}</strong></td><td>{}</td><td>{action}</td></tr>",h(name),if builtin{"Базовый суперадминистратор"}else{"Назначенный суперадминистратор"}));
+    }
+    // The two built-in accounts keep their privileges even before their first login.
+    for (uid,label) in [(1,"Основной администратор"),(336,"Резервный администратор")] {
+        if !builtin_names.contains(&uid) {
+            super_table.push_str(&format!("<tr><td><strong data-employee-id=\"{uid}\">{label}</strong></td><td>Базовый суперадминистратор</td><td>Постоянный доступ</td></tr>"));
+        }
+    }
+    let managers:Vec<(i64,String,String)>=sqlx::query_as(r#"
+        SELECT m.user_id,p.name,COALESCE(NULLIF((SELECT s.display_name FROM portal_sessions s
+        WHERE s.member_id=m.member_id AND s.user_id=m.user_id ORDER BY s.created_at DESC LIMIT 1),''),'Сотрудник Bitrix24')
+        FROM bitrix_project_managers m JOIN projects p ON p.id=m.project_id
+        WHERE m.member_id=$1 ORDER BY p.name,m.user_id"#).bind(&actor.member).fetch_all(&st.db).await?;
+    let mut trs=String::new();for (user_id,name,person) in managers {
+        trs.push_str(&format!("<tr><td>{}</td><td data-employee-id=\"{user_id}\">{}</td></tr>",h(&name),h(&person)));
+    }
+    if trs.is_empty(){trs.push_str("<tr><td colspan='2'>Администраторы проектов пока не назначены</td></tr>");}
+    let project_members:Vec<(i64,String,String)>=sqlx::query_as(r#"
+        SELECT a.user_id,p.name,COALESCE(NULLIF((SELECT s.display_name FROM portal_sessions s
+        WHERE s.member_id=a.member_id AND s.user_id=a.user_id ORDER BY s.created_at DESC LIMIT 1),''),'Сотрудник Bitrix24')
+        FROM bitrix_project_access a JOIN projects p ON p.id=a.project_id
+        WHERE a.member_id=$1 ORDER BY p.name,a.user_id"#).bind(&actor.member).fetch_all(&st.db).await?;
     let mut member_rows=String::new();
-    for (uid,project_name) in project_members {
-        member_rows.push_str(&format!("<tr><td>{}</td><td>{uid}</td><td>Доступ к проекту (без автоматического доступа к комплектам)</td></tr>",h(&project_name)));
+    for (uid,project_name,person) in project_members {
+        member_rows.push_str(&format!("<tr><td>{}</td><td data-employee-id=\"{uid}\">{}</td><td>Доступ к проекту (без доступа к комплектам)</td></tr>",h(&project_name),h(&person)));
     }
     if member_rows.is_empty(){member_rows.push_str("<tr><td colspan='3'>Пользователи проектов пока не назначены</td></tr>");}
     let mut options=String::new();for (name,_,_) in PROJECTS {
@@ -213,27 +261,54 @@ pub async fn administration(State(st):State<Shared>,Extension(actor):Extension<P
     }
     let mut work_options=String::from("<option value=''>Из структуры NAS (по умолчанию — из .env)</option>");
     for wt in &st.catalog.work_types{work_options.push_str(&format!("<option value='{}'>{}</option>",h(&wt.name),h(&wt.name)));}
-    let body=format!(r#"<div class="page-title"><h1>Администрирование</h1><p>Только для супер-администраторов Bitrix24 с ID 1 и 336.</p></div>
-    <section class="white-panel"><h2>Администраторы проектов</h2><p>Назначенный администратор создаёт виды работ и распределяет доступ сотрудников только внутри своего ЖК.</p>
-    <form class="admin-form" method="post" action="/administration/managers">{}<label>Проект<select name="project_id">{options}</select></label><label>ID сотрудника<input name="user_id" class="employee-id" type="number" min="1" required placeholder="ID сотрудника"></label><label>Сотрудник из Bitrix24<select class="employee-picker"><option value="">Из списка Bitrix24…</option></select></label><label>Действие<select name="action"><option value="grant">Назначить</option><option value="revoke">Снять назначение</option></select></label><button>Сохранить</button></form>
-    <table><thead><tr><th>Жилой комплекс</th><th>ID администратора проекта</th></tr></thead><tbody>{trs}</tbody></table>{}</section>
+    let body=format!(r#"<div class="page-title"><h1>Администрирование</h1><p>Сотрудники, роли, проекты и подключённые папки Synology.</p></div>
+    <section class="white-panel" id="superadmins"><h2>Суперадминистраторы</h2><p>Полный доступ ко всем проектам, проверкам и настройкам. Можно назначать дополнительных суперадминистраторов из сотрудников Bitrix24.</p>
+    <form class="admin-form" method="post" action="/administration/superadmins">{}<label>Сотрудник<select name="user_id" class="employee-picker" required><option value="">Выберите сотрудника</option></select></label><button class="primary" name="action" value="grant">Назначить суперадминистратором</button></form>
+    <table><thead><tr><th>Сотрудник</th><th>Тип доступа</th><th>Действия</th></tr></thead><tbody>{super_table}</tbody></table>
+    <p class="section-copy">Права базовых суперадминистраторов не отзываются. Назначенным сотрудникам права можно отозвать без удаления их проектных назначений.</p></section>
+    <section class="white-panel"><h2>Администраторы проектов</h2><p>Администратор создаёт виды работ и распределяет доступ сотрудников только внутри своего ЖК.</p>
+    <form class="admin-form" method="post" action="/administration/managers">{}<label>Проект<select name="project_id">{options}</select></label><label>Сотрудник<select name="user_id" class="employee-picker" required><option value="">Выберите сотрудника</option></select></label><label>Действие<select name="action"><option value="grant">Назначить</option><option value="revoke">Снять назначение</option></select></label><button>Сохранить</button></form>
+    <table><thead><tr><th>Жилой комплекс</th><th>Администратор проекта</th></tr></thead><tbody>{trs}</tbody></table></section>
     <section class="white-panel"><h2>Доступ обычных сотрудников к проектам</h2>
-    <p>Выдача доступа к ЖК показывает сотруднику карточку проекта, но не открывает файлы и виды работ. Отдельные виды работ назначает администратор проекта в карточке ЖК.</p>
-    <form class="admin-form" method="post" action="/administration/projects/access">{}<label>Жилой комплекс<select name="project_id">{options}</select></label><label>ID сотрудника<input name="user_id" class="employee-id" type="number" min="1" required placeholder="ID сотрудника"></label><label>Сотрудник Bitrix24<select class="employee-picker"><option value="">Из списка Bitrix24…</option></select></label><label>Действие<select name="action"><option value="grant">Предоставить доступ</option><option value="revoke">Убрать доступ к проекту</option></select></label><button>Сохранить</button></form>
-    <table><thead><tr><th>Проект</th><th>ID сотрудника</th><th>Права</th></tr></thead><tbody>{member_rows}</tbody></table>
-    <p class="section-copy">При снятии доступа к проекту также удаляются все разрешения сотрудника на виды работ этого проекта. Если он назначен администратором проекта, отдельно снимите это назначение выше.</p></section>
+    <p>Доступ к ЖК позволяет увидеть проект, но не открывает документы. На конкретные виды работ назначает администратор проекта.</p>
+    <form class="admin-form" method="post" action="/administration/projects/access">{}<label>Жилой комплекс<select name="project_id">{options}</select></label><label>Сотрудник<select name="user_id" class="employee-picker" required><option value="">Выберите сотрудника</option></select></label><label>Действие<select name="action"><option value="grant">Предоставить доступ</option><option value="revoke">Убрать доступ к проекту</option></select></label><button>Сохранить</button></form>
+    <table><thead><tr><th>Проект</th><th>Сотрудник</th><th>Права</th></tr></thead><tbody>{member_rows}</tbody></table>
+    <p class="section-copy">При отзыве доступа к проекту удаляются назначения на виды работ этого проекта. Назначение администратором проекта снимается отдельно.</p></section>
     <section class="white-panel" id="synology-mapping"><h2>Synology → жилые комплексы</h2>
-    <p>Исходная папка — имя первой папки под SYNOLOGY_ROOT. Если корень содержит сразу ИД/ и ПД/, используется SYNOLOGY_PROJECT_NAME. Файлы, не сопоставленные с одним из шести ЖК, не импортируются в скрытые проекты.</p>
-    <p>Текущий корень: <code>{}</code>; имя по умолчанию: <code>{}</code>. После изменения используйте <a href="/diagnostics">«Сканировать Synology сейчас»</a>. Старые файлы в базе не удаляются.</p>
+    <p>Исходная папка — первая папка под SYNOLOGY_ROOT. Если корень содержит сразу ИД/ и ПД/, используется SYNOLOGY_PROJECT_NAME. Несопоставленные документы не импортируются.</p>
+    <p>Текущий корень: <code>{}</code>; имя по умолчанию: <code>{}</code>. После изменения выполните <a href="/diagnostics">сканирование Synology</a>. Старые файлы в базе не удаляются.</p>
     <form method="post" action="/administration/synology-map">{}<label>Исходная папка NAS<input name="source_name" required maxlength="200" value="{}"></label><label>Сопоставить с ЖК<select name="project_id">{options}</select></label><label>Вид работ для плоского корня<select name="default_work">{work_options}</select></label><label>Действие<select name="action"><option value="save">Сохранить сопоставление</option><option value="remove">Удалить сопоставление</option></select></label><button>Применить</button></form>
     <table><thead><tr><th>Папка NAS</th><th>Жилой комплекс</th><th>Вид работ для плоского корня</th></tr></thead><tbody>{mapping_rows}</tbody></table></section>
-    <section class="white-panel"><h2>Роли и ограничения</h2><p><strong>Супер-администратор</strong>: Bitrix24 ID 1 и 336, все проекты и комплекты. <strong>Администратор проекта</strong>: назначается на выбранный ЖК и управляет его видами работ. <strong>Пользователь</strong>: видит назначенные проекты, а файлы — только по выданным разрешениям на виды работ.</p><p>Все права проверяются на сервере, включая скачивание файлов, OCR и отправку форм.</p></section>"#,web::hidden(&st.csrf),web::hidden(&st.csrf),employee_picker(),h(&st.cfg.synology_root),h(&st.cfg.synology_project_name),web::hidden(&st.csrf),h(&st.cfg.synology_project_name));
+    <section class="white-panel"><h2>Роли и ограничения</h2><p><strong>Суперадминистратор</strong> управляет всей системой и назначает роли. <strong>Администратор проекта</strong> отвечает за виды работ своего ЖК. <strong>Пользователь</strong> видит только назначенные проекты и комплекты.</p><p>Права проверяются сервером при каждом обращении, включая скачивание документов и запуск OCR.</p></section>
+    {}"#,web::hidden(&st.csrf),web::hidden(&st.csrf),web::hidden(&st.csrf),h(&st.cfg.synology_root),h(&st.cfg.synology_project_name),web::hidden(&st.csrf),h(&st.cfg.synology_project_name),employee_picker());
     Ok(web::layout("Администрирование",body))
 }
+
+pub async fn assign_superadmin(State(st):State<Shared>,Extension(actor):Extension<Principal>,Form(form):Form<SuperadminForm>)->Result<Redirect,WebError>{
+    web::verify(&form.csrf,&st)?;
+    if !actor.superuser{return Err(WebError::forbidden());}
+    if form.user_id<1{return Err(WebError::bad("Выберите сотрудника Bitrix24"));}
+    match form.action.as_str() {
+        "grant"=>{
+            sqlx::query("INSERT INTO bitrix_principals(member_id,user_id,active,global_role) VALUES ($1,$2,true,'admin') ON CONFLICT(member_id,user_id) DO UPDATE SET global_role='admin',active=true")
+                .bind(&actor.member).bind(form.user_id).execute(&st.db).await?;
+        },
+        "revoke"=>{
+            if access::is_super(form.user_id){return Err(WebError::bad("Нельзя отозвать базовые права суперадминистратора"));}
+            sqlx::query("UPDATE bitrix_principals SET global_role='user' WHERE member_id=$1 AND user_id=$2")
+                .bind(&actor.member).bind(form.user_id).execute(&st.db).await?;
+        },
+        _=>return Err(WebError::bad("Недопустимая операция")),
+    }
+    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"superadmin_role_changed",
+        &format!("target={} action={}",form.user_id,form.action)).await?;
+    Ok(Redirect::to("/administration#superadmins"))
+}
+
 pub async fn assign_project_access(State(st):State<Shared>,Extension(actor):Extension<Principal>,Form(form):Form<ProjectAccessForm>)->Result<Redirect,WebError>{
     web::verify(&form.csrf,&st)?;
     if !actor.superuser{return Err(WebError::forbidden());}
-    if form.user_id<1{return Err(WebError::bad("Некорректный ID сотрудника"));}
+    if form.user_id<1{return Err(WebError::bad("Выберите сотрудника Bitrix24"));}
     let project_name=sqlx::query_scalar::<_,String>("SELECT name FROM projects WHERE id=$1")
         .bind(form.project_id).fetch_optional(&st.db).await?.ok_or_else(WebError::not_found)?;
     if project_info(&project_name).is_none(){return Err(WebError::not_found());}
