@@ -128,3 +128,15 @@ main{max-width:1460px;margin:25px auto 70px;padding:0 clamp(16px,2.7vw,32px)}
 /* Account management: show names, not internal account identifiers. */
 .admin-form select.employee-picker,.assign-form select.employee-picker{min-width:260px;max-width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:#fff}
 .btn-subtle{padding:8px 12px;background:#f2f6fc;color:#3e5978;border:1px solid #dbe6f2;border-radius:8px;cursor:pointer}.btn-subtle:hover{background:#e7f1ff}
+
+/* v0.9.9: accessible name-search employee selector; no visible Bitrix IDs. */
+.employee-lookup{position:relative;min-width:250px;width:min(390px,100%);max-width:100%;display:inline-flex;flex-direction:column;vertical-align:middle}
+.employee-lookup .employee-search{width:100%;max-width:100%;padding:10px 13px;margin:3px 0;border-radius:9px;border:1px solid #b7cbe1;background:#fff;color:#19334f;font:inherit}
+.employee-lookup .employee-search:focus{outline:2px solid #3c94ea;outline-offset:1px;border-color:#1778ce}
+.employee-lookup .employee-results{position:absolute;z-index:25;top:calc(100% - 3px);left:0;right:0;background:#fff;max-height:285px;overflow:auto;border:1px solid #c8d9e9;border-radius:9px;box-shadow:0 12px 28px #142d4829;padding:5px}
+.employee-lookup .employee-results[hidden]{display:none!important}
+.employee-lookup .employee-result{display:block;width:100%;margin:0;padding:10px;text-align:left;border:0;border-radius:6px;color:#21456d;background:#fff;font-weight:500;font-size:13px;line-height:1.35;cursor:pointer;white-space:normal}
+.employee-lookup .employee-result:hover,.employee-lookup .employee-result[aria-selected="true"]{background:#e8f3ff;color:#145a9a}
+.employee-lookup .employee-status{display:block;font-size:11px;color:#607b98;padding:3px 4px;max-width:380px;line-height:1.35}
+.admin-form .employee-lookup,.assign-form .employee-lookup{flex-shrink:0}
+@media(max-width:700px){.employee-lookup{width:100%;min-width:0}}

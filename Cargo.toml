@@ -1,6 +1,6 @@
 [package]
 name = "id-control-axum"
-version = "0.9.8"
+version = "0.9.9"
 edition = "2021"
 description = "Executive documentation control with local rules and optional AI review"
 

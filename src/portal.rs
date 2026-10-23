@@ -136,10 +136,10 @@ pub async fn project(State(st):State<Shared>,Extension(user):Extension<Principal
 
 #[derive(Deserialize)]pub struct WorkForm{pub csrf:String,pub work_type:String}
 #[derive(Deserialize)]pub struct CsrfForm{pub csrf:String}
-#[derive(Deserialize)]pub struct AssignmentForm{pub csrf:String,pub package_id:i64,pub user_id:i64,pub role:String}
-#[derive(Deserialize)]pub struct ManagerForm{pub csrf:String,pub project_id:i64,pub user_id:i64,pub action:String}
-#[derive(Deserialize)]pub struct ProjectAccessForm{pub csrf:String,pub project_id:i64,pub user_id:i64,pub action:String}
-#[derive(Deserialize)]pub struct SuperadminForm{pub csrf:String,pub user_id:i64,pub action:String}
+#[derive(Deserialize)]pub struct AssignmentForm{pub csrf:String,pub package_id:i64,pub user_id:i64,pub role:String,#[serde(default)] pub bitrix_token:Option<String>}
+#[derive(Deserialize)]pub struct ManagerForm{pub csrf:String,pub project_id:i64,pub user_id:i64,pub action:String,#[serde(default)] pub bitrix_token:Option<String>}
+#[derive(Deserialize)]pub struct ProjectAccessForm{pub csrf:String,pub project_id:i64,pub user_id:i64,pub action:String,#[serde(default)] pub bitrix_token:Option<String>}
+#[derive(Deserialize)]pub struct SuperadminForm{pub csrf:String,pub user_id:i64,pub action:String,#[serde(default)] pub bitrix_token:Option<String>}
 #[derive(Deserialize)]pub struct NasMappingForm{pub csrf:String,pub source_name:String,pub project_id:i64,pub default_work:String,pub action:String}
 
 pub async fn create_work(State(st):State<Shared>,Extension(actor):Extension<Principal>,Path(id):Path<i64>,Form(form):Form<WorkForm>)->Result<Redirect,WebError>{
@@ -168,6 +168,38 @@ pub async fn create_all(State(st):State<Shared>,Extension(actor):Extension<Princ
     repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"create_all_works",&format!("project={id}")).await?;
     Ok(Redirect::to(&format!("/projects/{id}")))
 }
+// A selected ID from the browser is not proof of employment. Verify each new
+// permission grant against the configured Bitrix24 tenant (not the browser's
+// domain) and require an ACTIVE employee, never an extranet/guest account.
+fn eligible_staff_response(value:&serde_json::Value, user_id:i64)->bool {
+    value.get("result").and_then(|x|x.as_array()).map(|users|users.iter().any(|u| {
+        let id=u.get("ID").and_then(|v|v.as_i64().or_else(||v.as_str()?.parse().ok()));
+        let active=u.get("ACTIVE").map(|v|v.as_bool()==Some(true) || v.as_str()==Some("Y") || v.as_str()==Some("true") || v.as_i64()==Some(1)).unwrap_or(false);
+        id==Some(user_id) && active && u.get("USER_TYPE").and_then(|v|v.as_str())==Some("employee")
+    })).unwrap_or(false)
+}
+async fn require_active_bitrix_employee(actor:&Principal,user_id:i64,token:Option<&str>)->Result<(),WebError>{
+    // Local debug mode retains its established editable-test behavior. Only a
+    // real Bitrix24 session can confirm a user's live employment status.
+    if actor.debug{return Ok(());}
+    let token=token.unwrap_or("").trim();
+    if token.len()<12 || token.len()>4096{return Err(WebError::bad("Для назначения сотрудника откройте приложение в Bitrix24 и обновите страницу"));}
+    let domain=std::env::var("BITRIX_DOMAIN").unwrap_or_default().trim().trim_start_matches("https://").trim_end_matches('/').to_ascii_lowercase();
+    if domain.is_empty() || !domain.bytes().all(|c|c.is_ascii_alphanumeric() || c==b'.' || c==b'-') {
+        return Err(WebError::bad("Не настроен домен портала Bitrix24"));
+    }
+    let url=format!("https://{domain}/rest/user.get.json");
+    let id_string=user_id.to_string();
+    let client=reqwest::Client::builder().timeout(std::time::Duration::from_secs(12))
+        .build().map_err(|_|WebError::bad("Ошибка соединения с Bitrix24"))?;
+    let resp=client.post(&url).form(&[("auth",token),("ID",id_string.as_str())]).send().await
+        .map_err(|_|WebError::bad("Не удалось проверить сотрудника в Bitrix24"))?;
+    if !resp.status().is_success(){return Err(WebError::bad("Bitrix24 не подтвердил сотрудника. Обновите приложение"));}
+    let data:serde_json::Value=resp.json().await.map_err(|_|WebError::bad("Неправильный ответ Bitrix24"))?;
+    if !eligible_staff_response(&data,user_id){return Err(WebError::bad("Права можно назначить только активному сотруднику Bitrix24 (без гостей)"));}
+    Ok(())
+}
+
 pub async fn assign_work(State(st):State<Shared>,Extension(actor):Extension<Principal>,Path(id):Path<i64>,Form(form):Form<AssignmentForm>)->Result<Redirect,WebError>{
     web::verify(&form.csrf,&st)?;
     if !access::is_manager(&st,&actor,id).await{return Err(WebError::forbidden());}
@@ -180,6 +212,7 @@ pub async fn assign_work(State(st):State<Shared>,Extension(actor):Extension<Prin
           .bind(&actor.member).bind(form.user_id).bind(form.package_id).execute(&st.db).await?;
     }else{
         if !["uploader","viewer","engineer"].contains(&form.role.as_str()) {return Err(WebError::bad("Недопустимая роль"));}
+        require_active_bitrix_employee(&actor,form.user_id,form.bitrix_token.as_deref()).await?;
         sqlx::query("INSERT INTO bitrix_principals(member_id,user_id) VALUES ($1,$2) ON CONFLICT(member_id,user_id) DO NOTHING")
             .bind(&actor.member).bind(form.user_id).execute(&st.db).await?;
         sqlx::query("INSERT INTO bitrix_package_acl(member_id,user_id,package_id,role) VALUES ($1,$2,$3,$4) ON CONFLICT(member_id,user_id,package_id) DO UPDATE SET role=EXCLUDED.role")
@@ -189,8 +222,8 @@ pub async fn assign_work(State(st):State<Shared>,Extension(actor):Extension<Prin
     Ok(Redirect::to(&format!("/projects/{id}")))
 }
 
-// The employee directory contains only staff previously authenticated in this
-// portal namespace. Bitrix24's user.get adds all active staff when embedded.
+// Local debug directory: users previously authenticated in this portal.
+// Production dropdowns read live ACTIVE employees directly from Bitrix24.
 #[derive(Serialize)]
 pub struct KnownEmployee {user_id:i64,name:String}
 
@@ -199,36 +232,29 @@ pub async fn known_employees(State(st):State<Shared>,Extension(actor):Extension<
         SELECT p.user_id,COALESCE(NULLIF((SELECT s.display_name FROM portal_sessions s
           WHERE s.member_id=p.member_id AND s.user_id=p.user_id
           ORDER BY s.created_at DESC LIMIT 1),''),'Сотрудник Bitrix24')
-        FROM bitrix_principals p WHERE p.member_id=$1 ORDER BY p.user_id"#)
+        FROM bitrix_principals p WHERE p.member_id=$1 AND p.active=true ORDER BY p.user_id"#)
         .bind(&actor.member).fetch_all(&st.db).await?;
     Ok(Json(rows.into_iter().map(|(user_id,name)|KnownEmployee{user_id,name}).collect()))
 }
 
 pub async fn administration(State(st):State<Shared>,Extension(actor):Extension<Principal>)->Result<Html<String>,WebError>{
     if !actor.superuser{return Err(WebError::forbidden());}
-    let super_rows:Vec<(i64,String,String)>=sqlx::query_as(r#"
-        SELECT p.user_id,p.global_role,COALESCE(NULLIF((SELECT s.display_name
+    // The built-in superadministrators are immutable and intentionally not
+    // exposed as editable rows; their IDs remain only in access::is_super.
+    let super_rows:Vec<(i64,String)>=sqlx::query_as(r#"
+        SELECT p.user_id,COALESCE(NULLIF((SELECT s.display_name
           FROM portal_sessions s WHERE s.member_id=p.member_id AND s.user_id=p.user_id
           ORDER BY s.created_at DESC LIMIT 1),''),'Сотрудник Bitrix24')
         FROM bitrix_principals p
-        WHERE p.member_id=$1 AND (p.global_role='admin' OR p.user_id IN (1,336))
+        WHERE p.member_id=$1 AND p.global_role='admin'
         ORDER BY p.user_id"#).bind(&actor.member).fetch_all(&st.db).await?;
     let mut super_table=String::new();
-    let mut builtin_names=std::collections::HashSet::new();
-    for (uid,_,name) in &super_rows {
-        if access::is_super(*uid){builtin_names.insert(*uid);}
-        let builtin=access::is_super(*uid);
-        let action=if builtin {"Постоянный доступ".to_owned()} else {
-            format!(r#"<form method="post" action="/administration/superadmins" class="inline">{}<input type="hidden" name="user_id" value="{}"><input type="hidden" name="action" value="revoke"><button class="btn-subtle" type="submit">Отозвать права</button></form>"#,web::hidden(&st.csrf),uid)
-        };
-        super_table.push_str(&format!("<tr><td><strong data-employee-id=\"{uid}\">{}</strong></td><td>{}</td><td>{action}</td></tr>",h(name),if builtin{"Базовый суперадминистратор"}else{"Назначенный суперадминистратор"}));
+    for (uid,name) in &super_rows {
+        if access::is_super(*uid) {continue;}
+        let action=format!(r#"<form method="post" action="/administration/superadmins" class="inline">{}<input type="hidden" name="user_id" value="{}"><input type="hidden" name="action" value="revoke"><button class="btn-subtle" type="submit">Отозвать права</button></form>"#,web::hidden(&st.csrf),uid);
+        super_table.push_str(&format!("<tr><td><strong data-employee-id=\"{uid}\">{}</strong></td><td>Дополнительно назначен</td><td>{action}</td></tr>",h(name)));
     }
-    // The two built-in accounts keep their privileges even before their first login.
-    for (uid,label) in [(1,"Основной администратор"),(336,"Резервный администратор")] {
-        if !builtin_names.contains(&uid) {
-            super_table.push_str(&format!("<tr><td><strong data-employee-id=\"{uid}\">{label}</strong></td><td>Базовый суперадминистратор</td><td>Постоянный доступ</td></tr>"));
-        }
-    }
+    if super_table.is_empty(){super_table.push_str("<tr><td colspan='3'>Дополнительные суперадминистраторы пока не назначены</td></tr>");}
     let managers:Vec<(i64,String,String)>=sqlx::query_as(r#"
         SELECT m.user_id,p.name,COALESCE(NULLIF((SELECT s.display_name FROM portal_sessions s
         WHERE s.member_id=m.member_id AND s.user_id=m.user_id ORDER BY s.created_at DESC LIMIT 1),''),'Сотрудник Bitrix24')
@@ -262,10 +288,10 @@ pub async fn administration(State(st):State<Shared>,Extension(actor):Extension<P
     let mut work_options=String::from("<option value=''>Из структуры NAS (по умолчанию — из .env)</option>");
     for wt in &st.catalog.work_types{work_options.push_str(&format!("<option value='{}'>{}</option>",h(&wt.name),h(&wt.name)));}
     let body=format!(r#"<div class="page-title"><h1>Администрирование</h1><p>Сотрудники, роли, проекты и подключённые папки Synology.</p></div>
-    <section class="white-panel" id="superadmins"><h2>Суперадминистраторы</h2><p>Полный доступ ко всем проектам, проверкам и настройкам. Можно назначать дополнительных суперадминистраторов из сотрудников Bitrix24.</p>
+    <section class="white-panel" id="superadmins"><h2>Суперадминистраторы</h2><p>Полный доступ ко всем проектам, проверкам и настройкам. Для назначения доступны только действующие сотрудники Bitrix24 — без гостей и внешних пользователей. Поиск по имени или фамилии.</p>
     <form class="admin-form" method="post" action="/administration/superadmins">{}<label>Сотрудник<select name="user_id" class="employee-picker" required><option value="">Выберите сотрудника</option></select></label><button class="primary" name="action" value="grant">Назначить суперадминистратором</button></form>
     <table><thead><tr><th>Сотрудник</th><th>Тип доступа</th><th>Действия</th></tr></thead><tbody>{super_table}</tbody></table>
-    <p class="section-copy">Права базовых суперадминистраторов не отзываются. Назначенным сотрудникам права можно отозвать без удаления их проектных назначений.</p></section>
+    <p class="section-copy">Системные суперадминистраторы получают доступ автоматически и не отображаются в списке назначений. Дополнительно назначенные права можно отозвать.</p></section>
     <section class="white-panel"><h2>Администраторы проектов</h2><p>Администратор создаёт виды работ и распределяет доступ сотрудников только внутри своего ЖК.</p>
     <form class="admin-form" method="post" action="/administration/managers">{}<label>Проект<select name="project_id">{options}</select></label><label>Сотрудник<select name="user_id" class="employee-picker" required><option value="">Выберите сотрудника</option></select></label><label>Действие<select name="action"><option value="grant">Назначить</option><option value="revoke">Снять назначение</option></select></label><button>Сохранить</button></form>
     <table><thead><tr><th>Жилой комплекс</th><th>Администратор проекта</th></tr></thead><tbody>{trs}</tbody></table></section>
@@ -290,6 +316,7 @@ pub async fn assign_superadmin(State(st):State<Shared>,Extension(actor):Extensio
     if form.user_id<1{return Err(WebError::bad("Выберите сотрудника Bitrix24"));}
     match form.action.as_str() {
         "grant"=>{
+            require_active_bitrix_employee(&actor,form.user_id,form.bitrix_token.as_deref()).await?;
             sqlx::query("INSERT INTO bitrix_principals(member_id,user_id,active,global_role) VALUES ($1,$2,true,'admin') ON CONFLICT(member_id,user_id) DO UPDATE SET global_role='admin',active=true")
                 .bind(&actor.member).bind(form.user_id).execute(&st.db).await?;
         },
@@ -314,6 +341,7 @@ pub async fn assign_project_access(State(st):State<Shared>,Extension(actor):Exte
     if project_info(&project_name).is_none(){return Err(WebError::not_found());}
     match form.action.as_str(){
         "grant"=>{
+            require_active_bitrix_employee(&actor,form.user_id,form.bitrix_token.as_deref()).await?;
             sqlx::query("INSERT INTO bitrix_principals(member_id,user_id) VALUES ($1,$2) ON CONFLICT(member_id,user_id) DO NOTHING")
                 .bind(&actor.member).bind(form.user_id).execute(&st.db).await?;
             sqlx::query("INSERT INTO bitrix_project_access(member_id,user_id,project_id,granted_by) VALUES ($1,$2,$3,$4) ON CONFLICT(member_id,user_id,project_id) DO UPDATE SET granted_by=EXCLUDED.granted_by,granted_at=now()")
@@ -345,6 +373,7 @@ pub async fn assign_manager(State(st):State<Shared>,Extension(actor):Extension<P
         sqlx::query("DELETE FROM bitrix_project_managers WHERE member_id=$1 AND user_id=$2 AND project_id=$3")
             .bind(&actor.member).bind(form.user_id).bind(form.project_id).execute(&st.db).await?;
     }else if form.action=="grant" {
+        require_active_bitrix_employee(&actor,form.user_id,form.bitrix_token.as_deref()).await?;
         sqlx::query("INSERT INTO bitrix_principals(member_id,user_id) VALUES ($1,$2) ON CONFLICT(member_id,user_id) DO NOTHING")
             .bind(&actor.member).bind(form.user_id).execute(&st.db).await?;
         sqlx::query("INSERT INTO bitrix_project_managers(member_id,user_id,project_id,granted_by) VALUES ($1,$2,$3,$4) ON CONFLICT(member_id,user_id,project_id) DO UPDATE SET granted_by=EXCLUDED.granted_by,granted_at=now()")
@@ -390,4 +419,20 @@ pub async fn project_image(Path(filename):Path<String>)->Response{
     };
     if let Some(bytes)=bytes {([(header::CONTENT_TYPE,"image/webp"),(header::CACHE_CONTROL,"public, max-age=86400")],bytes).into_response()}
     else{StatusCode::NOT_FOUND.into_response()}
+}
+
+#[cfg(test)]
+mod employee_assignment_tests {
+    use super::*;
+    #[test]
+    fn grant_requires_employee_active_and_matching_id() {
+        let user=|id,active,kind|serde_json::json!({"result":[{"ID":id,"ACTIVE":active,"USER_TYPE":kind}]});
+        assert!(eligible_staff_response(&user("88",true,"employee"),88));
+        assert!(!eligible_staff_response(&user("88",false,"employee"),88));
+        assert!(!eligible_staff_response(&user("88",true,"extranet"),88));
+        assert!(!eligible_staff_response(&user("88",true,"email"),88));
+        assert!(!eligible_staff_response(&user("88",true,"guest"),88));
+        assert!(!eligible_staff_response(&user("88",true,"employee"),89));
+        assert!(!eligible_staff_response(&serde_json::json!({"error":"ACCESS_DENIED"}),88));
+    }
 }
