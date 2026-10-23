@@ -5,7 +5,7 @@ use serde::Serialize;
 use regex::Regex;
 use sqlx::{FromRow, PgPool};
 
-#[derive(Clone, Debug, FromRow)]
+#[derive(Clone, Debug, FromRow, Serialize)]
 pub struct NormRule {
     pub id: i64,
     pub work_type: String,

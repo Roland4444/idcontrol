@@ -96,3 +96,31 @@ main{max-width:1460px;margin:25px auto 70px;padding:0 clamp(16px,2.7vw,32px)}
 .role-viewer .main-upload-panel{display:none}
 
 .package-tabs a.active{color:#0879ed;border-bottom:3px solid #0879ed;font-weight:700}
+
+/* v0.9.7: one-click navigation, observable check state and visible workflow. */
+.project-card:hover .card-arrow,.project-card:focus-visible .card-arrow{background:#0879ed;color:white}
+.project-card:focus-visible{outline:3px solid #0879ed;outline-offset:3px}
+.project-card::after{content:none!important}
+.workflow-hint{display:flex;flex-direction:column;gap:9px;padding:16px 20px;margin:17px 0;background:#f0f8ff;border:1px solid #c6e2fc;border-radius:12px;line-height:1.6}
+.workflow-hint strong{font-size:16px;color:#103d72}
+.workflow-hint small{color:#54718c}
+.work-check{font-size:11px!important;margin-top:7px!important;font-weight:600}
+.work-check.has-check{color:#167b55}
+.work-check.needs-check{color:#b36e17}
+.work-check.no-files{color:#8b97aa}
+.check-control{border:1px solid #add7f9;border-radius:13px;background:linear-gradient(100deg,#edf7ff,#fff);padding:18px 22px;margin:16px 0;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px}
+.check-control h2{margin:0 0 5px;font-size:19px}
+.check-control p{margin:5px 0;color:#47637b}
+.check-control .primary{font-size:14px;cursor:pointer}
+.check-control .check-meta{font-size:12px;color:#576f87}
+.package-steps{margin-top:14px;display:flex;gap:9px;flex-wrap:wrap}
+.package-steps a{display:inline-flex;padding:9px 13px;background:#f1f7ff;border:1px solid #d5e7fa;border-radius:9px;color:#246398;text-decoration:none;font-weight:650;font-size:12px}
+.package-steps a:hover{background:#dceeff}
+.section-entry-actions{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.section-entry-actions a{display:inline-block;color:#1469b1;font-weight:700}
+.rule-toolbar{background:#f0f7ff;border:1px solid #d7e6f5;border-radius:12px;padding:13px 17px;margin:14px 0;display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.rule-toolbar form{display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0}
+.rule-toolbar input[type=file]{max-width:285px}
+@media(max-width:650px){.check-control{flex-direction:column;align-items:stretch}.check-control form button{width:100%}}
+
+.card-check-summary{margin-top:10px!important;color:#a06d2c!important;font-size:11px!important;font-weight:650}.card-check-summary.is-checked{color:#17805c!important}

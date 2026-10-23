@@ -45,50 +45,39 @@ fn employee_picker()->&'static str {include_str!("../assets/employee-picker.html
 pub async fn projects(State(st):State<Shared>,Extension(user):Extension<Principal>)->Result<Html<String>,WebError>{
     let mut cards=String::new();
     let mut available=0usize;
-    let mut selection:Option<(i64,&str,&str,&str)>=None;
     for (name,address,slug) in PROJECTS {
         let project=sqlx::query("SELECT id FROM projects WHERE name=$1").bind(name).fetch_optional(&st.db).await?;
         let Some(project)=project else {continue};
         let id:i64=project.try_get("id")?;
         if !access::project_visible(&st,&user,id).await {continue;}
         available+=1;
-        if selection.is_none() || name=="TETRIS" {selection=Some((id,name,address,slug));}
-        cards.push_str(&format!(r#"<a href="/projects/{id}" class="project-card" data-name="{}" data-address="{}" data-photo="{}" aria-label="Выбрать объект {}">
+        // Only disclose check runs for accessible work types (superusers/managers see all).
+        let manager=access::is_manager(&st,&user,id).await;
+        let checked:Option<(i64,Option<chrono::DateTime<chrono::Utc>>)>=sqlx::query_as(
+            "SELECT count(DISTINCT r.package_id),max(r.started_at) FROM check_runs r JOIN packages p ON p.id=r.package_id WHERE p.project_id=$1 AND ($2 OR EXISTS (SELECT 1 FROM bitrix_package_acl a WHERE a.package_id=p.id AND a.member_id=$3 AND a.user_id=$4))")
+            .bind(id).bind(manager).bind(&user.member).bind(user.user_id).fetch_optional(&st.db).await?;
+        let check_note=match checked {
+            Some((count,Some(date))) if count>0 => format!("<small class='card-check-summary is-checked'>История проверок: {count} видов работ · {}</small>",date.format("%d.%m.%Y")),
+            _=>"<small class='card-check-summary'>Проверок пока нет</small>".to_string(),
+        };
+        cards.push_str(&format!(r#"<a href="/projects/{id}" class="project-card" aria-label="Открыть жилой комплекс {}">
           <img src="{}" alt="Визуализация ЖК {}" loading="lazy">
-          <div class="project-desc"><strong>{}</strong><small>⌖ {}</small><span class="card-arrow">➜</span></div>
-        </a>"#,h(name),h(address),photo(slug),h(name),photo(slug),h(name),h(name),h(address)));
+          <div class="project-desc"><strong>{}</strong><small>⌖ {}</small>{check_note}<span class="card-arrow" aria-hidden="true">➜</span></div>
+        </a>"#,h(name),photo(slug),h(name),h(name),h(address)));
     }
     let empty=if available==0 {"<p class='empty-work'>Вам пока не назначены объекты строительства. Обратитесь к администратору проекта.</p>"}else{""};
-    let selection_panel=if let Some((id,name,address,slug))=selection {
-        format!(r#"<section class="selection-panel" id="selected-project" aria-live="polite">
-          <img id="selected-photo" src="{}" alt="Выбранный жилой комплекс">
-          <div class="selection-note"><strong>Выбран объект: <span id="selected-name">{}</span></strong><small>⌖ <span id="selected-address">{}</span></small></div>
-          <div class="selection-action"><span>Перейти к комплектам исполнительной документации</span><a id="selected-open" class="primary open-project" href="/projects/{id}">Открыть комплекты ИД →</a></div>
-        </section>"#,photo(slug),h(name),h(address))
-    }else{String::new()};
-    let body=format!(r#"<div class="page-title"><h1>Исполнительная документация</h1><p>Выберите объект строительства и перейдите к комплектам исполнительной документации.</p></div>
-      <section class="white-panel" id="projects"><div class="panel-heading"><h2><span class="section-icon">▤</span> Выбор объекта строительства</h2><div class="panel-tools"><input type="search" id="project-search" placeholder="⌕  Поиск по объектам…" aria-label="Поиск по объектам"><span class="pill">{available} объектов</span></div></div>
-      <div class="projects-grid">{cards}</div>{empty}</section>{selection_panel}
+    // Normal links must navigate on the FIRST click (and remain keyboard accessible).
+    // The old JS cancelled all clicks to show a checkmark and needed a double-click.
+    let body=format!(r#"<div class="page-title"><h1>Исполнительная документация</h1><p>Нажмите на карточку жилого комплекса один раз, чтобы открыть виды работ и документы.</p></div>
+      <section class="white-panel" id="projects"><div class="panel-heading"><h2><span class="section-icon">▤</span> Жилые комплексы</h2><div class="panel-tools"><input type="search" id="project-search" placeholder="⌕  Поиск по объектам…" aria-label="Поиск по объектам"><span class="pill">{available} объектов</span></div></div>
+      <div class="projects-grid">{cards}</div>{empty}<p id="projects-not-found" class="muted" hidden>По запросу жилые комплексы не найдены.</p></section>
       <script>(function(){{
         const cards=Array.from(document.querySelectorAll('.project-card'));
-        const selected=document.getElementById('selected-project');
-        const pick=function(card){{
-          cards.forEach(c=>{{c.classList.toggle('is-selected',c===card);c.setAttribute('aria-current',c===card?'true':'false');}});
-          if(!selected)return;
-          document.getElementById('selected-photo').src=card.dataset.photo;
-          document.getElementById('selected-name').textContent=card.dataset.name;
-          document.getElementById('selected-address').textContent=card.dataset.address;
-          document.getElementById('selected-open').href=card.getAttribute('href');
-        }};
-        cards.forEach(card=>{{card.addEventListener('click',event=>{{event.preventDefault();pick(card);}});
-            card.addEventListener('dblclick',()=>window.location.assign(card.href));}});
-        const preferred=cards.find(c=>c.dataset.name==='TETRIS')||cards[0];if(preferred)pick(preferred);
         document.getElementById('project-search')?.addEventListener('input',e=>{{
-          const q=e.target.value.toLocaleLowerCase('ru');
-          cards.forEach(card=>card.hidden=!card.textContent.toLocaleLowerCase('ru').includes(q));
-          const current=cards.find(c=>c.classList.contains('is-selected'));
-          if(current?.hidden){{const first=cards.find(c=>!c.hidden);if(first)pick(first);}}
-          if(selected)selected.hidden=!cards.some(c=>!c.hidden);
+          const q=e.target.value.trim().toLocaleLowerCase('ru');
+          cards.forEach(card=>{{card.hidden=!card.textContent.toLocaleLowerCase('ru').includes(q);}});
+          const empty=document.getElementById('projects-not-found');
+          if(empty)empty.hidden=cards.some(card=>!card.hidden);
         }});
       }})();</script>"#);
     Ok(web::layout("Объекты строительства",body))
@@ -115,7 +104,14 @@ pub async fn project(State(st):State<Shared>,Extension(user):Extension<Principal
         if let Some(pkg)=existing {
             let files:(i64,)=sqlx::query_as("SELECT count(*) FROM documents WHERE package_id=$1 AND is_present=true")
                 .bind(pkg.id).fetch_one(&st.db).await?;
-            works.push_str(&format!(r#"<a class="work-card" href="/packages/{}"><span class="work-symbol {}">{}</span><div><strong>{}</strong><small>Комплект ИД · {} файлов</small></div><span class="work-arrow">›</span></a>"#,pkg.id,tone,symbol,h(&wt.name),files.0));
+            let latest_check:Option<(i64,chrono::DateTime<chrono::Utc>)>=sqlx::query_as(
+                "SELECT id,started_at FROM check_runs WHERE package_id=$1 ORDER BY id DESC LIMIT 1")
+                .bind(pkg.id).fetch_optional(&st.db).await?;
+            let (check_class,check_status)=if let Some((run,at))=latest_check {
+                ("has-check",format!("Проверка #{} · {}",run,at.format("%d.%m.%Y %H:%M")))
+            }else if files.0>0 {("needs-check","Проверка ещё не запускалась".to_string())}
+            else {("no-files","Документы не загружены".to_string())};
+            works.push_str(&format!(r#"<a class="work-card" href="/packages/{}"><span class="work-symbol {}">{}</span><div><strong>{}</strong><small>Комплект ИД · {} файлов</small><small class="work-check {}">{}</small></div><span class="work-arrow">›</span></a>"#,pkg.id,tone,symbol,h(&wt.name),files.0,check_class,h(&check_status)));
             if manager {
                 let names=assignments.iter().filter(|(pid,_,_)|*pid==pkg.id)
                     .map(|(_,uid,role)|format!("ID {} — {}",uid,h(role)))
@@ -132,7 +128,8 @@ pub async fn project(State(st):State<Shared>,Extension(user):Extension<Principal
     let empty=if works.is_empty() {"<p class='empty-work'>Доступных видов работ пока нет. Администратор проекта должен создать комплект и назначить вам доступ.</p>"}else{""};
     let body=format!(r#"<div class="crumb"><a href="/">← К выбору объектов</a> <span>›</span> {}</div>
       <section class="project-hero" style="--hero-image:url('{}')"><div class="project-hero-content"><h1>{}</h1><p>⌖ {}, Астрахань</p><div class="hero-stats"><span>▤ Жилой комплекс</span><span>▥ Исполнительная документация</span><span>◫ {active} из 14 разделов</span></div></div></section>
-      <div class="section-heading"><div><h2>Комплекты исполнительной документации</h2><p>Выберите раздел для просмотра и проверки документов.</p></div><span class="counter">{active} разделов создано</span>{bulk}</div>
+      <div class="workflow-hint"><strong>Как проверить документы?</strong><span>1. Откройте вид работ → 2. Загрузите ИД и ПД/РД либо запустите сканирование Synology → 3. Нажмите «Запустить проверку» → 4. Откройте результаты и замечания.</span><small>Под каждым видом работ показана последняя проверка. Если данных нет, так и указано.</small></div>
+      <div class="section-heading"><div><h2>Комплекты исполнительной документации</h2><p>Одно нажатие на вид работ открывает загрузку и проверку конкретного комплекта.</p></div><span class="counter">{active} разделов создано</span>{bulk}</div>
       <div class="works-grid">{works}</div>{empty}{assignment}"#,h(&name),photo(slug),h(&name),h(address));
     Ok(web::layout(&name,body))
 }

@@ -206,13 +206,17 @@ pub fn router(state:Shared)->Router{
         .route("/packages/{id}/reprocess-all",post(reprocess_package_all))
         .route("/catalog/errors",get(errors))
         .route("/norms",get(norms_view).post(create_norm_rule))
+        .route("/norms/export",get(export_norm_rules))
+        .route("/norms/import",post(import_norm_rules))
         .route("/norms/{id}/status",post(norm_rule_status))
+        .route("/norms/{id}/delete",post(delete_draft_rule))
 
         .route("/packages/{id}",get(package_view))
         .route("/packages/{id}/catalog",post(set_catalog))
         .route("/packages/{id}/checklist/custom",post(create_custom_checklist))
         .route("/packages/{id}/checklist/custom/{item_id}",post(edit_custom_checklist))
         .route("/packages/{id}/scan",post(manual_scan))
+        .route("/packages/{id}/check",post(run_package_check))
         .route("/packages/{id}/ai-consent",post(set_ai_consent))
         .route("/packages/{id}/ai-check",post(queue_ai_check))
         .route("/ai-suggestions/{id}/review",post(review_ai_suggestion))
@@ -279,8 +283,29 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
       <nav class="package-tabs" aria-label="Разделы проверки"><a href="#upload">Загрузка и проверка</a><a href="#documents">Список документов</a><a href="#checks">Результаты проверки</a><a href="#remarks">Замечания</a><a href="#history">История проверок</a></nav>"##,
       pkg.project_id,h(&projects.name),h(&pkg.name),slug,h(&pkg.name),h(address),h(&projects.name),slug,h(&projects.name),h(address),sidebar,h(&actor_role));
     if let Some(notice)=params.notice.as_deref() {
-        let msg=match notice {"classified"=>"Тип документа сохранён, комплект перепроверен.","uploaded"=>"Файлы загружены. Результаты обработки доступны ниже.","checklist"=>"Изменения чек-листа сохранены, комплект перепроверен.",_=>""};
+        let msg=match notice {"classified"=>"Тип документа сохранён, комплект перепроверен.","uploaded"=>"Файлы загружены. Результаты обработки доступны ниже.","checklist"=>"Изменения чек-листа сохранены, комплект перепроверен.","checked"=>"Проверка завершена. Результат сохранён в истории.",_=>""};
         if !msg.is_empty(){body.push_str(&format!("<p class=notice role=status>{msg} {}</p>",params.doc.map(|d|format!("Документ #{d}")).unwrap_or_default()));}
+    }
+    // A visible start button and explicit result location; engine::analyze
+    // creates a persisted check_runs row and a findings snapshot (not OCR).
+    let approved_rules:i64=sqlx::query_scalar("SELECT count(*) FROM normative_rules WHERE approval_status='approved' AND (work_type='' OR work_type=$1)")
+        .bind(pkg.catalog_name.as_deref().unwrap_or("")).fetch_one(&st.db).await?;
+    let last_check=selected.map(|run|format!("Проверка #{} от {}",run.id,run.started_at.format("%d.%m.%Y %H:%M")))
+        .unwrap_or_else(||"Проверок пока не было".into());
+    let checker=matches!(actor_role.as_str(),"manager"|"engineer");
+    body.push_str(&format!(r#"<section class="check-control" aria-label="Запуск проверки документации">
+      <div><h2>Проверка комплекта «{}»</h2><p>Загружено файлов ИД: <b>{id_docs}</b> · Применимых утверждённых нормативных правил: <b>{approved_rules}</b></p>
+      <p class="check-meta">{}</p><p class="check-meta">Результаты сохраняются в истории этого вида работ, внутри ЖК «{}».</p></div>"#,
+      h(&pkg.name),h(&last_check),h(&projects.name)));
+    if checker {
+        body.push_str(&format!(r##"<div class="section-entry-actions"><form method="post" action="/packages/{id}/check">{}<button class="primary">▶ Запустить проверку комплекта</button></form><a href="#checks">Результаты ↓</a><a href="#history">История ↓</a></div>"##,hidden(&st.csrf)));
+    }else {body.push_str("<p class=muted>Запуск проверки доступен инженеру ПТО и администратору проекта. Вы можете просмотреть результаты.</p>");}
+    if approved_rules==0 {
+        body.push_str("<p class=muted><strong>Внимание:</strong> нет утверждённых правил НТД. Проверка сможет выявить только ошибки комплектности и встроенные формальные несоответствия; нормативное соответствие не подтверждается.</p>");
+    }
+    body.push_str("</section><nav class='package-steps' aria-label='Последовательность проверки'><a href='#upload'>1. Загрузить файлы</a><a href='#checklist'>2. Настроить чек-лист</a><a href='#checks'>3. Результаты</a><a href='#remarks'>4. Замечания</a><a href='#history'>5. История</a></nav>");
+    if actor.superuser {
+        body.push_str("<p><a href='/norms'>⚙ Добавить, отключить или экспортировать нормативные правила →</a> <small class=muted>(только суперадминистратор)</small></p>");
     }
     let coverage=match pct {Some(n)=>format!("{n}%"),None=>"Не настроен".to_string()};
     body.push_str(&format!("<section class=overview id=summary><h2>Результат проверки комплекта</h2><p class=muted>Прогресс показывает покрытие обязательных позиций файлами, <b>не</b> соответствие ГОСТ/СП. Рассматривается только выбранный комплект.</p><div class=metrics><div class=metric>Файлы ИД<strong>{id_docs}</strong><small>ПД/РД: {ref_docs}</small></div><div class=metric>Чек-лист<strong>{completed}/{}</strong><small>Обязательных позиций</small></div><div class=metric>Замечания<strong>{unresolved}</strong><small>Требуют рассмотрения</small></div><div class=metric>Не привязаны<strong>{nonclassified}</strong><small>Файлов ИД</small></div></div>",required_codes.len()));
@@ -472,11 +497,12 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     }
     panel_html.push_str("</tbody></table><p class=muted>История OCR доступна в разделе «Распознавание и ИИ» ниже.</p><a href=#ocr>Перейти к заданиям OCR →</a></div></details></article>");
     panels.insert("history",std::mem::take(&mut panel_html));
-    panel_html.push_str("<article id=norms-check><details class=collapsible><summary>Проверки утверждённых нормативных правил</summary><div><p class=muted>«Найдено подтверждение» означает обнаружение заданного текста, а не полное соответствие ГОСТ/СП. Настроить правила: <a href=/norms>НТД и пункты</a>.</p><table><tr><th>Документ / правило</th><th>Норматив и источник</th><th>Результат</th></tr>");
+    panel_html.push_str("<article id=norms-check><details class=collapsible><summary>Проверки утверждённых нормативных правил</summary><div><p><strong>Правила проверки настраиваются отдельно суперадминистратором.</strong> Здесь показаны только результаты применения утверждённых правил к выбранной проверке.</p><p class=muted>«Найдено подтверждение» означает обнаружение заданного текста, а не полное соответствие ГОСТ/СП. Настроить правила: <a href=/norms>НТД и пункты</a>.</p><table><tr><th>Документ / правило</th><th>Норматив и источник</th><th>Результат</th></tr>");
     for check in &norm_checks{
         let label=match check.result.as_str(){"evidence_found"=>"Найдено подтверждение в тексте","mismatch"=>"Вероятное несоответствие","manual"=>"Требуется проверка инженера",_=>"Неизвестно"};
         panel_html.push_str(&format!("<tr><td>Документ #{} / правило #{}</td><td>{}<br><small>{}</small></td><td><b>{}</b><p>{}</p></td></tr>",check.document_id,check.rule_id,h(&check.normative_basis),h(&check.source_reference),label,h(&check.details)));
     }
+    if norm_checks.is_empty(){panel_html.push_str("<tr><td colspan=3>Нет записей нормативных проверок для выбранного запуска. Проверьте, утверждены ли правила и выполнено ли распознавание.</td></tr>");}
     panel_html.push_str("</table></div></details></article>");
     panels.insert("norms-check",std::mem::take(&mut panel_html));
     // Match the screen mock-up: upload and recent documents immediately below
@@ -495,7 +521,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     if latest.is_empty(){primary.push_str("<tr><td colspan='4'>Документы ещё не загружены.</td></tr>");}
     primary.push_str("</tbody></table></section>");
     if let Some(pos)=body.find("<section class=overview id=summary>") {body.insert_str(pos,&primary);}else{body.push_str(&primary);}
-    body.push_str("<section class=detail-sections id=detail-sections aria-labelledby=details-title><h2 id=details-title>Подробные разделы</h2><p class=detail-intro>Все таблицы и настройки расположены здесь. По умолчанию они свёрнуты. Выбери нужную проверку в сводке наверху — откроется соответствующий раздел ниже.</p>");
+    body.push_str("<section class=detail-sections id=detail-sections aria-labelledby=details-title><h2 id=details-title>Подробные разделы и настройки проверок</h2><p class=detail-intro>Нажмите на название раздела, чтобы открыть таблицы и параметры. Из вкладок выше можно сразу перейти к нужной проверке. Для запуска новой проверки используйте кнопку «Запустить проверку комплекта».</p>");
     for (title,description,ids) in [
         ("Результаты проверок","Отчёты, замечания, история и утверждённые нормативные правила",vec!["checks","remarks","history","norms-check"]),
         ("Документы и комплект","Загруженные файлы, привязка к позициям, редактирование и загрузка",vec!["documents","checklist"]),
@@ -521,6 +547,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
 async fn norms_view(State(st):State<Shared>)->WebResult<Html<String>> {
     let rules=norms::list_rules(&st.db).await?;
     let mut body=String::from("<h1>Нормативные правила (ГОСТ, СП, приказы)</h1><p>Здесь регистрируются <b>проверенные специалистом</b> требования конкретной редакции НТД. Ссылки из исходного ТЗ не считаются автоматически утверждёнными. Пустая база правил означает, что нормативная проверка не пройдена.</p>");
+    body.push_str(&format!(r#"<section class="rule-toolbar"><strong>Импорт / экспорт правил:</strong><a class="buttonlink" href="/norms/export">Скачать каталог JSON ↓</a><form action="/norms/import" method="post" enctype="multipart/form-data">{}<label>Импорт JSON <input type="file" name="rules_file" accept=".json,application/json" required></label><button class="secondary" type="submit">Импортировать черновики</button></form><small>Импортированные правила НЕ утверждаются автоматически; требуется проверка специалиста. Архив действующих проверок сохраняется.</small></section>"#,hidden(&st.csrf)));
     body.push_str(&format!("<article><h2>Добавить правило на утверждение</h2><form method=post action=/norms>{}",hidden(&st.csrf)));
     body.push_str(r#"<p>Вид работ <select name=work_type><option value="">Все виды работ</option>"#);
     for wt in &st.catalog.work_types{body.push_str(&format!("<option value=\"{}\">{}</option>",h(&wt.name),h(&wt.name)));}
@@ -534,14 +561,15 @@ async fn norms_view(State(st):State<Shared>)->WebResult<Html<String>> {
     body.push_str("<article><h2>Каталог правил</h2><table><tr><th>Правило</th><th>НТД и источник</th><th>Условие</th><th>Состояние</th></tr>");
     for rule in &rules {
         body.push_str(&format!("<tr><td><b>#{} v{}</b> {}<p><small>Вид работ: {}, код: {}</small></p></td><td>{}<p><small>Источник: {}</small></p></td><td>{}<p><small>Текст: {}</small></p></td><td>{}",rule.id,rule.version,h(&rule.description),h(if rule.work_type.is_empty(){"все"}else{&rule.work_type}),h(if rule.document_code.is_empty(){"все"}else{&rule.document_code}),h(&norms::basis(rule)),h(&rule.source_reference),h(&rule.check_kind),h(&rule.expected_text),h(&rule.approval_status)));
-        if rule.approval_status!="approved" && rule.approval_status!="revoked" {
+        if rule.approval_status=="draft" {
             body.push_str(&format!("<form method=post action=\"/norms/{}/status\">{}<input type=hidden name=status value=approved><button>Утвердить</button></form>",rule.id,hidden(&st.csrf)));
+            body.push_str(&format!("<form method=post action=\"/norms/{}/delete\" onsubmit=\"return confirm('Удалить черновик правила?')\">{}<button class=warnbutton>Удалить черновик</button></form>",rule.id,hidden(&st.csrf)));
         }else if rule.approval_status=="approved" {
-            body.push_str(&format!("<p><small>Утвердил: {}</small></p><form method=post action=\"/norms/{}/status\">{}<input type=hidden name=status value=revoked><button>Отозвать</button></form>",h(rule.approved_by.as_deref().unwrap_or("неизвестно")),rule.id,hidden(&st.csrf)));
+            body.push_str(&format!("<p><small>Утвердил: {}</small></p><form method=post action=\"/norms/{}/status\">{}<input type=hidden name=status value=revoked><button class=warnbutton>Отключить правило</button></form>",h(rule.approved_by.as_deref().unwrap_or("неизвестно")),rule.id,hidden(&st.csrf)));
         }
         body.push_str("</td></tr>");
     }
-    body.push_str("</table><p>Редактирование утверждённого правила запрещено: создайте новую версию новым правилом и отзовите старую. Проверки прошлых периодов сохраняются.</p></article>");
+    body.push_str("</table><p>Черновик можно удалить. Утверждённое правило отключается, а не удаляется: иначе ссылки на результаты прошлых проверок потеряются. Для изменения утверждённого правила создайте новую версию и отключите старую.</p></article>");
     Ok(layout("Нормативные правила",body))
 }
 #[derive(Deserialize)]
@@ -549,8 +577,7 @@ struct NormForm {
     csrf:String, work_type:String, document_code:String, norm_name:String, norm_edition:String,
     norm_clause:String, source_reference:String, description:String, check_kind:String, expected_text:String,
 }
-async fn create_norm_rule(State(st):State<Shared>,Form(form):Form<NormForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
+fn validate_norm_rule(st:&Shared,form:&NormForm)->WebResult<()> {
     let filled=[(&form.norm_name,250usize),(&form.norm_edition,80),(&form.norm_clause,100),(&form.source_reference,500),(&form.description,500)];
     if filled.iter().any(|(s,max)|s.trim().is_empty() || s.len()>*max || s.chars().any(char::is_control)) {
         return Err(WebError::bad("Укажите нормативный документ, редакцию, пункт, источник и описание (без управляющих символов)."));
@@ -570,6 +597,11 @@ async fn create_norm_rule(State(st):State<Shared>,Form(form):Form<NormForm>)->We
     if !form.document_code.is_empty() && (form.work_type.is_empty() || st.catalog.item(&form.work_type,&form.document_code).is_none()){
         return Err(WebError::bad("Код документа должен существовать в выбранном виде работ"));
     }
+    Ok(())
+}
+async fn create_norm_rule(State(st):State<Shared>,Form(form):Form<NormForm>)->WebResult<Redirect>{
+    verify(&form.csrf,&st)?;
+    validate_norm_rule(&st,&form)?;
     let new:(i64,)=sqlx::query_as("INSERT INTO normative_rules(work_type,document_code,norm_name,norm_edition,norm_clause,source_reference,description,check_kind,expected_text,version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,(SELECT COALESCE(MAX(version),0)+1 FROM normative_rules WHERE work_type=$1 AND document_code=$2 AND norm_name=$3 AND norm_clause=$5)) RETURNING id")
         .bind(&form.work_type).bind(&form.document_code).bind(form.norm_name.trim()).bind(form.norm_edition.trim())
         .bind(form.norm_clause.trim()).bind(form.source_reference.trim()).bind(form.description.trim())
@@ -577,6 +609,82 @@ async fn create_norm_rule(State(st):State<Shared>,Form(form):Form<NormForm>)->We
     repo::audit(&st.db,&st.cfg.app_user,"create_norm_rule",&format!("id={}",new.0)).await?;
     Ok(Redirect::to("/norms"))
 }
+
+/// Transfer format is the array returned by GET /norms/export. Unknown
+/// metadata (id, status, version) is ignored on import; every imported rule
+/// is a DRAFT requiring human approval.
+#[derive(Deserialize)]
+struct ImportedNormRule {
+    #[serde(default)] work_type:String,
+    #[serde(default)] document_code:String,
+    norm_name:String, norm_edition:String, norm_clause:String,
+    source_reference:String, description:String, check_kind:String,
+    #[serde(default)] expected_text:String,
+}
+
+async fn export_norm_rules(State(st):State<Shared>)->WebResult<Response>{
+    let rules=norms::list_rules(&st.db).await?;
+    let body=serde_json::to_vec_pretty(&rules)?;
+    Ok(([
+        (header::CONTENT_TYPE,"application/json; charset=utf-8"),
+        (header::CONTENT_DISPOSITION,"attachment; filename=\"idcontrol-norms.json\""),
+        (header::CACHE_CONTROL,"no-store"),
+    ],body).into_response())
+}
+
+async fn import_norm_rules(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,mut multipart:Multipart)->WebResult<Redirect>{
+    let mut csrf=String::new();
+    let mut data:Option<Vec<u8>>=None;
+    while let Some(mut field)=multipart.next_field().await.map_err(|e|WebError::bad(e.to_string()))? {
+        match field.name().unwrap_or("") {
+            "csrf"=>csrf=field.text().await.map_err(|e|WebError::bad(e.to_string()))?,
+            "rules_file"=>{
+                let mut raw=Vec::new();
+                while let Some(chunk)=field.chunk().await.map_err(|e|WebError::bad(e.to_string()))? {
+                    if raw.len().saturating_add(chunk.len())>2*1024*1024 {return Err(WebError::bad("Файл правил больше 2 МиБ"));}
+                    raw.extend_from_slice(&chunk);
+                }
+                data=Some(raw);
+            },
+            _=>{},
+        }
+    }
+    verify(&csrf,&st)?;
+    let rules:Vec<ImportedNormRule>=serde_json::from_slice(data.as_deref().ok_or_else(||WebError::bad("Файл JSON не выбран"))?)
+        .map_err(|e|WebError::bad(format!("Неверный формат JSON правил: {e}")))?;
+    if rules.is_empty() || rules.len()>200 {return Err(WebError::bad("В JSON должно быть от 1 до 200 правил"));}
+    // Validate ALL rules before touching the database (no partial import).
+    let mut checked=Vec::new();
+    for entry in rules {
+        let f=NormForm{csrf:String::new(),work_type:entry.work_type,document_code:entry.document_code,
+            norm_name:entry.norm_name,norm_edition:entry.norm_edition,norm_clause:entry.norm_clause,
+            source_reference:entry.source_reference,description:entry.description,
+            check_kind:entry.check_kind,expected_text:entry.expected_text};
+        validate_norm_rule(&st,&f)?;
+        checked.push(f);
+    }
+    let mut tx=st.db.begin().await?;
+    for f in &checked {
+        // Import never activates rules, including those exported as approved.
+        sqlx::query("INSERT INTO normative_rules(work_type,document_code,norm_name,norm_edition,norm_clause,source_reference,description,check_kind,expected_text,approval_status,version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'draft',(SELECT COALESCE(MAX(version),0)+1 FROM normative_rules WHERE work_type=$1 AND document_code=$2 AND norm_name=$3 AND norm_clause=$5))")
+            .bind(&f.work_type).bind(&f.document_code).bind(f.norm_name.trim()).bind(f.norm_edition.trim())
+            .bind(f.norm_clause.trim()).bind(f.source_reference.trim()).bind(f.description.trim())
+            .bind(&f.check_kind).bind(f.expected_text.trim()).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"import_norm_rules",&format!("count={}",checked.len())).await?;
+    Ok(Redirect::to("/norms"))
+}
+
+async fn delete_draft_rule(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
+    verify(&form.csrf,&st)?;
+    let changed=sqlx::query("DELETE FROM normative_rules n WHERE n.id=$1 AND n.approval_status='draft' AND NOT EXISTS (SELECT 1 FROM normative_check_results r WHERE r.rule_id=n.id)")
+        .bind(id).execute(&st.db).await?.rows_affected();
+    if changed!=1 {return Err(WebError::bad("Удалять можно только неиспользованные черновики. Утверждённые правила отключайте."));}
+    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"delete_draft_rule",&format!("rule={id}")).await?;
+    Ok(Redirect::to("/norms"))
+}
+
 #[derive(Deserialize)]struct NormStatusForm{csrf:String,status:String}
 async fn norm_rule_status(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<NormStatusForm>)->WebResult<Redirect>{
     verify(&form.csrf,&st)?;
@@ -698,6 +806,16 @@ async fn review_ai_suggestion(State(st):State<Shared>,Path(id):Path<i64>,Form(fo
     Ok(Redirect::to(&format!("/packages/{package_id}")))
 }
 #[derive(Deserialize)]struct CsrfForm{csrf:String}
+/// Explicit manual rules/consistency check. This does not run OCR and does
+/// not alter originals on Synology or locally staged documents.
+async fn run_package_check(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
+    verify(&form.csrf,&st)?;
+    let _pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
+    // Authorization middleware permits only manager/engineer to POST here.
+    let run=engine::analyze(&st.db,&st.catalog,id,"manual_ui").await?;
+    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"manual_check",&format!("package={id} run={run}")).await?;
+    Ok(Redirect::to(&format!("/packages/{id}?run_id={run}&notice=checked#checks")))
+}
 async fn manual_scan(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
     verify(&form.csrf,&st)?;
     let _=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
