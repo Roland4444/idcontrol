@@ -1,7 +1,7 @@
 //! Bitrix24 identities are validated server-side using user.current.
 //! BX24 JS obtains short-lived access credentials automatically; no manual tokens.
 //! Only an opaque cookie (SHA-256 hash persisted in PostgreSQL) authorizes requests.
-use crate::web::Shared;
+use crate::{web::Shared, ui_version};
 use axum::{body::Body,extract::State,http::{header,HeaderValue,Method,Request,StatusCode},middleware::Next,response::{IntoResponse,Response},Json};
 use base64::Engine;
 use rand::RngCore;
@@ -23,6 +23,8 @@ fn allowed_public(path:&str,method:&Method)->bool {
     (path=="/bitrix" && (method==Method::GET || method==Method::POST)) ||
     (path=="/auth/bitrix" && method==Method::POST) ||
     (path=="/assets/bitrix-client.js" && method==Method::GET) ||
+    (path=="/assets/ui-version-watch.js" && method==Method::GET) ||
+    (path=="/api/ui-version" && method==Method::GET) ||
     (path.starts_with("/assets/projects/") && method==Method::GET)
 }
 fn param_id(path:&str,prefix:&str)->Option<i64>{path.strip_prefix(prefix)?.split('/').next()?.parse().ok()}
@@ -223,8 +225,12 @@ pub async fn logout(State(st):State<Shared>,req:Request<Body>)->Response{
     response
 }
 
-pub async fn bitrix_bootstrap()->axum::response::Html<&'static str>{
-    axum::response::Html(include_str!("../assets/bitrix-client.html"))
+pub async fn bitrix_bootstrap()->axum::response::Html<String>{
+    let html=include_str!("../assets/bitrix-client.html");
+    let versioned_js=format!("/assets/bitrix-client.js?v={}",ui_version::js_id());
+    let page=html.replace("/assets/bitrix-client.js",&versioned_js)
+        .replace("</head>",&format!("{}{} </head>",ui_version::meta_tags(),ui_version::watcher_tag()));
+    axum::response::Html(page)
 }
 
 // Separate JS file makes the same bootstrap usable for normal launch and installation.

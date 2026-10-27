@@ -17,7 +17,9 @@ mod scanner;
 mod synology;
 mod vibecode;
 mod web;
+mod ui_version;
 // cargo run -- --debug-login
+
 use anyhow::Result;
 use rand::RngCore;
 use sqlx::postgres::PgPoolOptions;

@@ -1,9 +1,9 @@
-use crate::{access,portal,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
+use crate::{access,portal,ui_version,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
 use anyhow::Result;
 use axum::{
     body::{Body,Bytes},
     extract::{DefaultBodyLimit,Multipart,Path,Query,State},Extension,
-    http::{header,StatusCode},
+    http::{header,StatusCode,Request},
     middleware,
     response::{Html,IntoResponse,Redirect,Response},
     routing::{get,post}, Form,Json,Router,
@@ -55,7 +55,7 @@ pub(crate) fn verify(csrf:&str,state:&Shared)->WebResult<()> {
 }
 pub(crate) fn layout(title:&str,body:String)->Html<String>{
     Html(format!(r#"<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title} — Контроль ИД</title>
-<style>body{{background:#f4f7fa;color:#1d334a;font:15px system-ui,Arial;margin:0}}header{{padding:17px 5%;background:#223851;color:white}}header a{{color:white;margin-right:24px;text-decoration:none}}main{{max-width:1550px;margin:28px auto;padding:0 16px}}article{{background:white;border:1px solid #d8e0e8;border-radius:10px;padding:18px;margin:18px 0;overflow-x:auto}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #dae1e8;text-align:left;vertical-align:top}}th{{background:#eef3f7}}input,select,textarea,button{{padding:8px;border-radius:5px;border:1px solid #bbc7d2;font:inherit;margin:3px}}button{{background:#224a69;color:white;border:0;cursor:pointer}}a{{color:#116caa}}small,.muted{{color:#536778}}.warn{{color:#8b4d17}}.ok{{color:#386e4c}}.row{{display:flex;gap:12px;flex-wrap:wrap;align-items:center}}.chips{{display:flex;gap:8px;flex-wrap:wrap}}.chip{{background:#e8eff5;border-radius:15px;padding:5px 9px}}.status{{font-weight:600}}.job{{padding:12px;margin:10px 0;border:1px solid #dce4ed;border-radius:8px;background:#fafcfe}}.job-running{{border-left:4px solid #2379a1}}.job-failed{{border-left:4px solid #c34d4d}}.job-done{{border-left:4px solid #45936e}}.job-partial{{border-left:4px solid #c99a3a}}progress{{width:220px;max-width:100%;height:14px}}.toolbox{{display:flex;gap:10px;flex-wrap:wrap;align-items:center}}.toolbox form{{display:inline-flex}}.secondary{{background:#e8f0f7;color:#153b56}}.warnbutton{{background:#a0532c}}
+{version_meta}<style>body{{background:#f4f7fa;color:#1d334a;font:15px system-ui,Arial;margin:0}}header{{padding:17px 5%;background:#223851;color:white}}header a{{color:white;margin-right:24px;text-decoration:none}}main{{max-width:1550px;margin:28px auto;padding:0 16px}}article{{background:white;border:1px solid #d8e0e8;border-radius:10px;padding:18px;margin:18px 0;overflow-x:auto}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #dae1e8;text-align:left;vertical-align:top}}th{{background:#eef3f7}}input,select,textarea,button{{padding:8px;border-radius:5px;border:1px solid #bbc7d2;font:inherit;margin:3px}}button{{background:#224a69;color:white;border:0;cursor:pointer}}a{{color:#116caa}}small,.muted{{color:#536778}}.warn{{color:#8b4d17}}.ok{{color:#386e4c}}.row{{display:flex;gap:12px;flex-wrap:wrap;align-items:center}}.chips{{display:flex;gap:8px;flex-wrap:wrap}}.chip{{background:#e8eff5;border-radius:15px;padding:5px 9px}}.status{{font-weight:600}}.job{{padding:12px;margin:10px 0;border:1px solid #dce4ed;border-radius:8px;background:#fafcfe}}.job-running{{border-left:4px solid #2379a1}}.job-failed{{border-left:4px solid #c34d4d}}.job-done{{border-left:4px solid #45936e}}.job-partial{{border-left:4px solid #c99a3a}}progress{{width:220px;max-width:100%;height:14px}}.toolbox{{display:flex;gap:10px;flex-wrap:wrap;align-items:center}}.toolbox form{{display:inline-flex}}.secondary{{background:#e8f0f7;color:#153b56}}.warnbutton{{background:#a0532c}}
 :root{{color-scheme:light}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{line-height:1.45}}main{{max-width:1440px}}article{{scroll-margin-top:76px}}header{{position:sticky;top:0;z-index:10;box-shadow:0 1px 6px #071c2d24}}header a{{display:inline-block;padding:3px 0}}.overview{{background:#fff;border:1px solid #d8e0e8;border-radius:12px;padding:23px;margin:18px 0;scroll-margin-top:74px}}.metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:15px}}.metric{{padding:15px;border:1px solid #dae4ed;border-radius:9px;background:#fbfdff;min-width:0}}.metric strong{{font-size:24px;display:block;color:#123b54}}.jump-links{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px;margin-top:18px}}.jump-links a{{display:block;border:1px solid #d2e0e9;border-radius:9px;padding:13px;text-decoration:none;background:#f8fbfe;font-weight:600}}.jump-links a small{{display:block;font-weight:400;margin-top:4px}}.jump-links a:hover{{background:#eaf4fb}}details.collapsible>summary{{font-size:19px;font-weight:650;cursor:pointer;padding:6px 2px;list-style:revert}}details.collapsible>summary::marker{{color:#28719e}}details.collapsible>div{{padding:12px 0}}details.collapsible:not([open]){{padding-bottom:12px}}.summarybar{{height:10px;background:#e6edf3;border-radius:8px;overflow:hidden;margin-top:12px}}.summarybar span{{background:#28719e;display:block;height:100%}}.notice{{border-left:4px solid #288258;padding:10px 14px;background:#edf8f0;margin:15px 0;border-radius:6px}}.privacy{{border:1px solid #d6ab69;background:#fffbf2;border-radius:8px;padding:14px;margin:12px 0}}.uploadfile{{max-width:100%}}.filefilter{{width:min(480px,100%)}}.filelist td{{max-width:530px;overflow-wrap:anywhere}}.filelist tr:target{{outline:2px solid #2183a5}}.minor{{font-size:13px}}.edit-row{{border:1px solid #e0e7ec;padding:10px;border-radius:6px;margin:8px 0}}.sticky-info{{display:inline-block;font-size:13px;color:#d3e7f4;margin-left:16px}}.resultlink{{text-decoration:none}}.buttonlink{{display:inline-block;background:#e8f0f7;color:#153b56;text-decoration:none;border-radius:6px;padding:9px}}.sr-only{{position:absolute;left:-9999px}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.jump-links{{grid-template-columns:repeat(2,minmax(0,1fr))}}header a{{margin-right:8px}}article{{padding:12px}}td,th{{padding:6px}}}}@media(max-width:480px){{.jump-links{{grid-template-columns:1fr}}}}.attention-panel{{background:#fff;border:1px solid #d7e2eb;border-radius:12px;padding:22px;margin:18px 0 28px}}.attention-list{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}.attention-item{{border:1px solid #d9e3eb;border-radius:9px;padding:16px;background:#fafcfe;min-width:0}}.attention-item strong{{display:block;font-size:21px;margin-bottom:6px}}.attention-item a{{display:inline-block;margin-top:8px}}.detail-sections{{border-top:3px solid #d7e2eb;margin-top:38px;padding-top:22px;scroll-margin-top:90px}}.detail-sections>h2{{margin:8px 0}}.detail-group{{margin:27px 0 36px}}.detail-group>h3{{color:#244965;margin:0 0 6px}}.detail-group>p{{margin:0 0 12px;color:#536778}}.detail-group article{{margin:10px 0}}article.highlight-section{{outline:3px solid #2b82a5;outline-offset:3px;box-shadow:0 8px 22px #2b82a51c}}.jump-links a.active{{border-color:#28719e;background:#dceefa}}.backline{{text-align:right;margin:0 0 14px}}.backline a{{font-weight:600}}.detail-intro{{color:#536778}}@media(max-width:850px){{.attention-list{{grid-template-columns:1fr}}}}
 {portal_style}</style></head>
 <body><header><a class=brand href="/"><strong>RES</strong><span>DEVELOPMENT</span></a><a class="nav-link" href="/">Проверка</a><a class="nav-link super-only" hidden href="/catalog/errors">Типовые ошибки</a><a class="nav-link super-only" hidden href="/norms">Нормативные правила</a><a class="nav-link super-only" hidden href="/diagnostics">Диагностика / OCR</a><div class=nav-spacer></div><a id="admin-tab" class="nav-link nav-right" href="/administration" hidden>⚙ Администрирование</a><span id=user-label class=user-label></span><span class=sticky-info id=top-progress></span></header><main>{body}</main><script>
@@ -172,8 +172,24 @@ fetch('/api/me',{{credentials:'same-origin'}}).then(r=>r.ok?r.json():null).then(
   setInterval(()=>document.querySelectorAll('.ocr-live').forEach(refresh),4000);
   document.querySelectorAll('.ocr-live').forEach(refresh);
 }})();
-</script></body></html>"#,
-        title=h(title),body=body,portal_style=include_str!("../assets/portal.css")))
+</script>{version_watch}</body></html>"#,
+        title=h(title),body=body,portal_style=include_str!("../assets/portal.css"),
+        version_meta=ui_version::meta_tags(),version_watch=ui_version::watcher_tag()))
+}
+
+// Even a cached iframe URL is revalidated. Do not cache dynamically rendered HTML
+// (including the /bitrix bootstrap page), while versioned images remain cacheable.
+async fn ui_no_cache(req:Request<Body>,next:middleware::Next)->Response {
+    let mut response=next.run(req).await;
+    let is_html=response.headers().get(header::CONTENT_TYPE)
+        .and_then(|v|v.to_str().ok()).map(|s|s.starts_with("text/html")).unwrap_or(false);
+    if is_html {
+        response.headers_mut().insert(header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"));
+        response.headers_mut().insert(header::PRAGMA,header::HeaderValue::from_static("no-cache"));
+        response.headers_mut().insert(header::EXPIRES,header::HeaderValue::from_static("0"));
+    }
+    response
 }
 
 pub fn router(state:Shared)->Router{
@@ -182,6 +198,8 @@ pub fn router(state:Shared)->Router{
         .route("/bitrix",get(access::bitrix_bootstrap).post(access::bitrix_bootstrap))
         .route("/auth/bitrix",post(access::login))
         .route("/assets/bitrix-client.js",get(access::bitrix_client_js))
+        .route("/assets/ui-version-watch.js",get(ui_version::watcher_js))
+        .route("/api/ui-version",get(ui_version::version))
         .route("/auth/logout",post(access::logout))
         .route("/api/me",get(whoami))
         .route("/assets/projects/{filename}",get(portal::project_image))
@@ -236,6 +254,7 @@ pub fn router(state:Shared)->Router{
         .route("/packages/{id}/report/{fmt}",get(report))
         .layer(DefaultBodyLimit::max((state.cfg.max_file_mb.saturating_mul(20).saturating_mul(1024*1024).saturating_add(1024*1024)) as usize))
         .layer(middleware::from_fn_with_state(state.clone(),access::authorize))
+        .layer(middleware::from_fn(ui_no_cache))
         .with_state(state)
 }
 
@@ -280,10 +299,10 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     }
     let (address,slug)=portal::project_info(&projects.name).unwrap_or(("Адрес не указан","tetris"));
     let mut body=format!(r##"<div class="crumb"><a href="/">Выбор объектов</a> › <a href="/projects/{}">{}</a> › {}</div>
-      <section class="package-hero" style="--hero-image:url('/assets/projects/{}.webp')"><div><h1>{}</h1><p>⌖ {} · {} · Комплект исполнительной документации</p></div></section>
-      <div class="package-shell"><aside class="package-sidebar"><div class="sidebar-project"><img src="/assets/projects/{}.webp" alt="Объект"><div><strong>{}</strong><small>{}</small></div></div><h3>Комплекты исполнительной документации</h3>{}</aside><div class="package-content role-{}">
+      <section class="package-hero" style="--hero-image:url('/assets/projects/{}.webp?v={}')"><div><h1>{}</h1><p>⌖ {} · {} · Комплект исполнительной документации</p></div></section>
+      <div class="package-shell"><aside class="package-sidebar"><div class="sidebar-project"><img src="/assets/projects/{}.webp?v={}" alt="Объект"><div><strong>{}</strong><small>{}</small></div></div><h3>Комплекты исполнительной документации</h3>{}</aside><div class="package-content role-{}">
       <nav class="package-tabs" aria-label="Разделы проверки"><a href="#upload">Загрузка и проверка</a><a href="#documents">Список документов</a><a href="#checks">Результаты проверки</a><a href="#remarks">Замечания</a><a href="#history">История проверок</a></nav>"##,
-      pkg.project_id,h(&projects.name),h(&pkg.name),slug,h(&pkg.name),h(address),h(&projects.name),slug,h(&projects.name),h(address),sidebar,h(&actor_role));
+      pkg.project_id,h(&projects.name),h(&pkg.name),slug,ui_version::images_id(),h(&pkg.name),h(address),h(&projects.name),slug,ui_version::images_id(),h(&projects.name),h(address),sidebar,h(&actor_role));
     if let Some(notice)=params.notice.as_deref() {
         let msg=match notice {"classified"=>"Тип документа сохранён, комплект перепроверен.","uploaded"=>"Файлы загружены. Результаты обработки доступны ниже.","checklist"=>"Изменения чек-листа сохранены, комплект перепроверен.","checked"=>"Проверка завершена. Результат сохранён в истории.",_=>""};
         if !msg.is_empty(){body.push_str(&format!("<p class=notice role=status>{msg} {}</p>",params.doc.map(|d|format!("Документ #{d}")).unwrap_or_default()));}
@@ -1129,7 +1148,7 @@ async fn ocr_status_json(State(st):State<Shared>)->WebResult<Json<serde_json::Va
     let scanning=st.scan_status.read().map(|state|state.running).unwrap_or(false);
     let scan_message=st.scan_status.read().map(|state|state.message.clone()).unwrap_or_default();
     Ok(Json(serde_json::json!({
-        "app_version":"0.9.4","ocr_mode":st.cfg.ocr_mode,
+        "app_version":env!("CARGO_PKG_VERSION"),"ocr_mode":st.cfg.ocr_mode,
         "data_root":st.cfg.data_root.to_string_lossy(),
         "temp_root":st.cfg.temp_root.to_string_lossy(),
         "local_ocr_model_dir":st.cfg.local_ocr_model_dir.to_string_lossy(),

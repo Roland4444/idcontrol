@@ -1,4 +1,3 @@
-
 //! DOCX/XLSX via local text extraction; PDF/images via offline neural ONNX OCR
 //! or explicit opt-in VibeCode. PDF renders with Hayro, no external tools.
 use crate::{config::Config,vibecode::VibeOcr};
@@ -380,5 +379,5 @@ mod tests {
         assert_eq!(total,2);
         assert_eq!(images.len(),1);
     }
-//  sss
+
 }

@@ -1,6 +1,6 @@
 [package]
 name = "id-control-axum"
-version = "0.9.9"
+version = "0.9.10"
 edition = "2021"
 description = "Executive documentation control with local rules and optional AI review"
 
@@ -43,6 +43,9 @@ url = "2"
 walkdir = "2"
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 rust_xlsxwriter = "0.79"
+
+[build-dependencies]
+sha2 = "0.10"
 
 [profile.release]
 lto = "thin"

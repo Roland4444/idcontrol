@@ -1,5 +1,5 @@
 //! Single-app project and work-type UX. All role decisions are in access.rs.
-use crate::{access::{self,Principal},models::Package,repo,web::{self,Shared,WebError}};
+use crate::{ui_version,access::{self,Principal},models::Package,repo,web::{self,Shared,WebError}};
 use axum::{extract::{Path,State},Extension,Form,Json,response::{Html,Redirect,Response,IntoResponse},http::{header,StatusCode}};
 use serde::{Deserialize,Serialize};
 use sqlx::Row;
@@ -16,7 +16,7 @@ fn h(s:&str)->String{html_escape::encode_safe(s).to_string()}
 pub fn project_info(name:&str)->Option<(&'static str,&'static str)>{
     PROJECTS.iter().find(|p|p.0==name).map(|p|(p.1,p.2))
 }
-fn photo(slug:&str)->String {format!("/assets/projects/{slug}.webp")}
+fn photo(slug:&str)->String {format!("/assets/projects/{slug}.webp?v={}",ui_version::images_id())}
 // Individual, fixed SVG glyphs: no repeated or emoji-dependent icons.
 fn work_icon(index:usize)->(String,&'static str){
     const PATHS:[&str;14]=[
