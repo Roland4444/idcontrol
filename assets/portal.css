@@ -140,3 +140,37 @@ main{max-width:1460px;margin:25px auto 70px;padding:0 clamp(16px,2.7vw,32px)}
 .employee-lookup .employee-status{display:block;font-size:11px;color:#607b98;padding:3px 4px;max-width:380px;line-height:1.35}
 .admin-form .employee-lookup,.assign-form .employee-lookup{flex-shrink:0}
 @media(max-width:700px){.employee-lookup{width:100%;min-width:0}}
+
+/* Stage 2.3: navigable Synology ResData explorer and root selection history. */
+.storage-explorer{max-width:1150px;margin:0 auto}
+.storage-root-summary{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:19px 21px;margin:18px 0;background:#eaf5ff;border:1px solid #cbdff3;border-radius:14px}
+.storage-root-summary>div{display:flex;flex-direction:column;gap:7px;min-width:0}
+.storage-root-summary small{font-weight:650;color:#37658c}
+.storage-root-summary strong code{font-size:15px;overflow-wrap:anywhere}
+.storage-root-summary span{font-size:12px;color:#526b82}
+.storage-root-summary a{flex-shrink:0}
+.storage-success{border:1px solid #b3dec8;background:#edfbf3;color:#1a6746;padding:13px 17px;border-radius:9px}
+.storage-picker,.storage-history{padding:22px!important;margin:17px 0}
+.storage-picker-heading{display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap}
+.storage-picker-heading h2,.storage-history h2{margin:0 0 6px}
+.storage-picker-heading p,.storage-history p{font-size:13px;color:#647993;margin:0 0 12px}
+.storage-home{font-size:13px;font-weight:650;text-decoration:none}
+.storage-breadcrumbs{display:flex;align-items:center;flex-wrap:wrap;gap:9px;background:#f2f7fc;padding:13px 16px;margin:15px 0;border-radius:8px;font-size:13px}
+.storage-breadcrumbs a{text-decoration:none;color:#116bb5}
+.storage-breadcrumbs strong{color:#233951}
+.storage-location{display:flex;flex-wrap:wrap;justify-content:space-between;gap:20px;align-items:center;padding:15px;margin:12px 0 15px;border:1px solid #cfe0ed;border-radius:10px}
+.storage-location>div{display:flex;flex-direction:column;gap:7px;min-width:0}
+.storage-location small{color:#60778e}.storage-location code{font-weight:650;overflow-wrap:anywhere}
+.storage-location form{margin:0}.storage-location button{cursor:pointer}
+.storage-directory-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin-top:15px}
+.storage-directory{display:flex;align-items:center;gap:12px;border:1px solid #d9e6f2;border-radius:9px;text-decoration:none;color:#1d3b56;background:#fff;padding:14px 16px;min-width:0}
+.storage-directory:hover,.storage-directory:focus-visible{background:#eef7ff;border-color:#8bc3f5}
+.storage-directory>span:first-child{font-size:23px;flex-shrink:0}.storage-directory>span:nth-child(2){flex:1;overflow-wrap:anywhere;font-weight:700}
+.storage-directory small{display:block;color:#647d96;font-size:11px;margin-top:5px;font-weight:400}
+.storage-up{background:#f4f8fc}.storage-empty{grid-column:1/-1;color:#718499;font-size:13px}
+.storage-revisions{display:flex;flex-direction:column;gap:8px;margin-top:14px}
+.storage-revision{display:flex;flex-wrap:wrap;align-items:center;gap:15px;border-bottom:1px solid #e6edf4;padding:10px 2px;font-size:12px}
+.storage-revision strong{min-width:105px;color:#276490}.storage-revision code{flex:1;min-width:130px;overflow-wrap:anywhere}
+.storage-revision small{color:#72849a}.storage-revision a{font-weight:650;text-decoration:none}
+.storage-history .storage-version-help{margin-top:16px;color:#3f657e}
+@media(max-width:700px){.storage-root-summary{flex-direction:column;align-items:stretch}.storage-directory-list{grid-template-columns:1fr}.storage-location form,.storage-location button{width:100%}}

@@ -15,6 +15,7 @@ use std::{fs::{self,File},io::{Read,Write},path::{Path as FsPath,PathBuf}};
 use zip::ZipArchive;
 
 fn h(s:&str)->String{html_escape::encode_safe(s).to_string()}
+fn html_attribute(s:&str)->String{html_escape::encode_double_quoted_attribute(s).to_string()}
 /// The catalogue includes work names containing '/': never use these verbatim
 /// as NAS path components. A stable human-readable folder name is sufficient.
 pub fn nas_work_folder(name:&str)->String{name.replace('/'," - ")}
@@ -42,29 +43,93 @@ pub async fn selected_root_db(db:&sqlx::PgPool,fallback:&str)->Result<String>{
         .fetch_optional(db).await?.unwrap_or_else(||fallback.to_owned()))
 }
 
+/// A directory can be opened only if it is an immediate child of the directory
+/// currently displayed. This protects the browser against unexpected DSM paths.
+fn direct_subdirectory(parent:&str,child:&str)->bool {
+    validate_resdata_path(parent).is_ok() && validate_resdata_path(child).is_ok() &&
+    child.rsplit_once('/').map(|(base,name)|base==parent && !name.is_empty()).unwrap_or(false)
+}
+
+/// Build links for each ancestor of a validated path inside the ResData share.
+fn root_breadcrumbs(folder:&str)->Vec<(String,String)> {
+    let mut items=vec![("/ResData".to_string(),"ResData".to_string())];
+    let mut path=String::from("/ResData");
+    if let Some(remainder)=folder.strip_prefix("/ResData/") {
+        for part in remainder.split('/') {
+            path.push('/');path.push_str(part);
+            items.push((path.clone(),part.to_string()));
+        }
+    }
+    items
+}
+
+fn folder_href(path:&str)->String {
+    format!("/administration/storage?folder={}",url::form_urlencoded::byte_serialize(path.as_bytes()).collect::<String>())
+}
+
 #[derive(Deserialize)]pub struct Browse {folder:Option<String>,saved:Option<String>}
 pub async fn storage_view(State(st):State<Shared>,Extension(actor):Extension<Principal>,Query(params):Query<Browse>)->std::result::Result<Html<String>,WebError>{
     if !actor.superuser {return Err(WebError::forbidden());}
     let current=selected_root(&st).await?;
+    // Starting at /ResData makes the whole directory tree discoverable.
     let folder=params.folder.unwrap_or_else(||"/ResData".to_string());
     validate_resdata_path(&folder).map_err(|_|WebError::bad("Разрешены только папки внутри /ResData"))?;
     let session=st.nas.connect().await.map_err(|err|WebError::bad(format!("Нет соединения с Synology: {err:#}")))?;
     let dirs=session.list_directories(&folder).await;
     session.logout().await;
-    let dirs=dirs.map_err(|err|WebError::bad(format!("Не удалось прочитать каталог: {err:#}")))?;
-    let mut body=format!("<h1>Папка проектов на Synology</h1><p>Корневая папка выбирается один раз для всех шести ЖК. Доступны только каталоги внутри <code>/ResData</code>. Имеющиеся данные и папки не удаляются.</p><article><p><b>Текущая папка:</b> <code>{}</code></p><p><b>Просматриваем:</b> <code>{}</code></p>",h(&current),h(&folder));
-    if params.saved.as_deref()==Some("1") {body.push_str("<p class='notice'>Корневая папка сохранена. Новый выбор применяется к следующим сканированиям и загрузкам.</p>");}
-    body.push_str(&format!("<form method='post' action='/administration/storage'>{}<input type='hidden' name='root' value='{}'><button type='submit'>Использовать эту папку для проектов</button></form>",web::hidden(&st.csrf),h(&folder)));
-    body.push_str("<h2>Вложенные папки</h2><ul>");
+    let dirs=dirs.map_err(|err|WebError::bad(format!("Не удалось открыть папку Synology: {err:#}")))?;
+    let latest:Option<(i64,String)>=sqlx::query_as(
+        "SELECT version,root_path FROM synology_root_versions ORDER BY version DESC LIMIT 1"
+    ).fetch_optional(&st.db).await?;
+    let history:Vec<(i64,String,chrono::DateTime<chrono::Utc>)>=sqlx::query_as(
+        "SELECT version,root_path,changed_at FROM synology_root_versions ORDER BY version DESC LIMIT 10"
+    ).fetch_all(&st.db).await?;
+    let rev=latest.map(|(v,_)|format!("v{v}")).unwrap_or_else(||"Из .env".to_string());
+    let mut body=format!(r#"<section class="storage-explorer">
+      <div class="page-title"><h1>Папка проектов на Synology</h1><p>Открывайте папки внутри /ResData одним нажатием. Когда найдёте нужный каталог, нажмите «Выбрать как корень проектов».</p></div>
+      <div class="storage-root-summary"><div><small>Корень для новых поставок · {}</small><strong><code>{}</code></strong><span>Проекты и виды работ создаются внутри этого пути автоматически. Предыдущие поставки и версии документов сохраняются.</span></div><a class="buttonlink" href="{}">Открыть текущий корень</a></div>"#,
+      h(&rev),h(&current),folder_href(if validate_resdata_path(&current).is_ok(){&current}else{"/ResData"}));
+    if params.saved.as_deref()==Some("1") {
+        body.push_str("<p class=\"storage-success\" role=\"status\">Корень сохранён. Следующие ссылки подрядчикам будут использовать новую папку; существующие ссылки и версии не меняются.</p>");
+    } else if params.saved.as_deref()==Some("unchanged") {
+        body.push_str("<p class=\"storage-success\" role=\"status\">Эта папка уже выбрана корнем. Настройки не изменились.</p>");
+    }
+    body.push_str("<section class=\"white-panel storage-picker\"><div class=\"storage-picker-heading\"><div><h2>Проводник ResData</h2><p>Только папки, без файлов. Выбор доступен суперадминистратору.</p></div><a class=\"storage-home\" href=\"/administration/storage?folder=%2FResData\">К началу ResData</a></div>");
+    body.push_str("<nav class=\"storage-breadcrumbs\" aria-label=\"Путь к папке\">");
+    let breadcrumbs=root_breadcrumbs(&folder);
+    for (idx,(path,title)) in breadcrumbs.iter().enumerate() {
+        if idx>0 {body.push_str("<span aria-hidden=\"true\">›</span>");}
+        if idx==breadcrumbs.len()-1 {
+            body.push_str(&format!("<strong aria-current=\"location\">{}</strong>",h(title)));
+        } else {
+            body.push_str(&format!("<a href=\"{}\">{}</a>",folder_href(path),h(title)));
+        }
+    }
+    body.push_str("</nav>");
+    body.push_str(&format!(r#"<div class="storage-location"><div><small>Открытая папка</small><code>{}</code></div><form method="post" action="/administration/storage">{}<input type="hidden" name="root" value="{}"><button class="primary" type="submit">{} Выбрать как корень проектов</button></form></div>"#,
+        h(&folder),web::hidden(&st.csrf),html_attribute(&folder),if folder==current{"✓"}else{"＋"}));
+    body.push_str("<div class=\"storage-directory-list\">");
     if folder!="/ResData" {
         let parent=folder.rsplit_once('/').map(|(p,_)|p).unwrap_or("/ResData");
-        body.push_str(&format!("<li><a href='/administration/storage?folder={}'>← На уровень выше</a></li>",url::form_urlencoded::byte_serialize(parent.as_bytes()).collect::<String>()));
+        body.push_str(&format!("<a class=\"storage-directory storage-up\" href=\"{}\"><span aria-hidden=\"true\">↰</span><span>На уровень выше<small>{}</small></span></a>",folder_href(parent),h(parent)));
     }
-    for child in dirs{
-        let query=url::form_urlencoded::byte_serialize(child.as_bytes()).collect::<String>();
-        body.push_str(&format!("<li><a href='/administration/storage?folder={query}'>📁 {}</a></li>",h(child.rsplit('/').next().unwrap_or(&child))));
+    let mut n=0usize;
+    for child in dirs {
+        if !direct_subdirectory(&folder,&child) {continue;}
+        n+=1;
+        let name=child.rsplit('/').next().unwrap_or(&child);
+        body.push_str(&format!("<a class=\"storage-directory\" href=\"{}\"><span aria-hidden=\"true\">📁</span><span>{}<small>Открыть папку</small></span><span aria-hidden=\"true\">›</span></a>",folder_href(&child),h(name)));
     }
-    body.push_str("</ul><p><a href='/administration'>← Администрирование</a></p></article>");
+    if n==0 {body.push_str("<p class=\"storage-empty\">Вложенных папок нет. Можно выбрать текущую папку для проектов.</p>");}
+    body.push_str("</div></section>");
+    body.push_str("<section class=\"white-panel storage-history\"><h2>История выбора корневой папки</h2><p>Версия настройки сохраняется при смене каталога. История поставок по каждому виду работ остаётся независимой от выбранного пути.</p><div class=\"storage-revisions\">");
+    if history.is_empty() {body.push_str("<p>Корневая папка ещё не выбиралась через приложение.</p>");}
+    for (version,path,date) in history {
+        let note=if path==current {" · текущая"}else{""};
+        body.push_str(&format!("<div class=\"storage-revision\"><strong>v{}{}</strong><code>{}</code><small>{}</small><a href=\"{}\">Посмотреть папку</a></div>",
+            version,note,h(&path),date.format("%d.%m.%Y %H:%M UTC"),folder_href(&path)));
+    }
+    body.push_str("</div><p class=\"storage-version-help\">При загрузке нового ZIP ссылка подрядчика запоминает корень на момент создания. Для каждой следующей поставки увеличивается номер ревизии; предыдущие документы и исходные ZIP сохраняются.</p></section><p><a href=\"/administration\">← К администрированию</a></p></section>");
     Ok(web::layout("Папки Synology",body))
 }
 #[derive(Deserialize)]pub struct RootForm{csrf:String,root:String}
@@ -72,15 +137,31 @@ pub async fn storage_save(State(st):State<Shared>,Extension(actor):Extension<Pri
     web::verify(&form.csrf,&st)?;
     if !actor.superuser{return Err(WebError::forbidden());}
     validate_resdata_path(&form.root).map_err(|_|WebError::bad("Папка должна быть внутри /ResData"))?;
-    // Read the folder itself to verify it exists and DSM grants read access.
+    // Verify that DSM can open the requested folder; never trust the posted path.
     let session=st.nas.connect().await.map_err(|e|WebError::bad(format!("DSM: {e:#}")))?;
     let checked=session.list_directories(&form.root).await;
     session.logout().await;
     checked.map_err(|e|WebError::bad(format!("DSM не подтверждает доступ к папке: {e:#}")))?;
-    sqlx::query("INSERT INTO app_settings(setting_key,setting_value) VALUES('synology_root',$1) ON CONFLICT(setting_key) DO UPDATE SET setting_value=$1,updated_at=now()")
-        .bind(&form.root).execute(&st.db).await?;
-    repo::audit(&st.db,&actor_name(&actor),"synology_root_changed",&form.root).await?;
-    Ok(axum::response::Redirect::to("/administration/storage?saved=1"))
+
+    // One transaction serializes concurrent superadmin updates so root versions
+    // are never duplicated. Old contractor links keep their nas_root snapshots.
+    let mut tx=st.db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(48213422)").execute(&mut *tx).await?;
+    let previous=sqlx::query_scalar::<_,String>("SELECT setting_value FROM app_settings WHERE setting_key='synology_root'")
+        .fetch_optional(&mut *tx).await?;
+    let changed=previous.as_deref()!=Some(form.root.as_str());
+    if changed {
+        sqlx::query("INSERT INTO app_settings(setting_key,setting_value) VALUES('synology_root',$1) ON CONFLICT(setting_key) DO UPDATE SET setting_value=EXCLUDED.setting_value,updated_at=now()")
+            .bind(&form.root).execute(&mut *tx).await?;
+        let version:i64=sqlx::query_scalar("SELECT COALESCE(MAX(version),0)+1 FROM synology_root_versions")
+            .fetch_one(&mut *tx).await?;
+        sqlx::query("INSERT INTO synology_root_versions(version,root_path,changed_by) VALUES($1,$2,$3)")
+            .bind(version).bind(&form.root).bind(actor_name(&actor)).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    if changed {repo::audit(&st.db,&actor_name(&actor),"synology_root_changed",&form.root).await?;}
+    let query=url::form_urlencoded::byte_serialize(form.root.as_bytes()).collect::<String>();
+    Ok(axum::response::Redirect::to(&format!("/administration/storage?folder={query}&saved={}",if changed{"1"}else{"unchanged"})))
 }
 
 #[derive(Deserialize)]pub struct NewLinkForm{csrf:String}
@@ -517,6 +598,19 @@ pub async fn package_controls(st:&Shared,actor:&Principal,package_id:i64)->Resul
 #[cfg(test)]mod tests{
     use super::*;
     #[test]fn token_validation(){assert!(valid_token(&"a".repeat(64)));assert!(!valid_token("../x"));}
+    #[test]fn folder_navigation_is_restricted_to_immediate_children(){
+        assert!(direct_subdirectory("/ResData","/ResData/ПТО"));
+        assert!(direct_subdirectory("/ResData/ПТО","/ResData/ПТО/ИД"));
+        assert!(!direct_subdirectory("/ResData","/ResData/ПТО/ИД"));
+        assert!(!direct_subdirectory("/ResData/ПТО","/ResData/other"));
+        assert!(!direct_subdirectory("/ResData/ПТО","/ResData/ПТО/../secret"));
+    }
+    #[test]fn breadcrumb_preserves_nested_paths(){
+        let crumbs=root_breadcrumbs("/ResData/ПТО/ИД/ЖК");
+        assert_eq!(crumbs.len(),4);
+        assert_eq!(crumbs[2],("/ResData/ПТО/ИД".to_string(),"ИД".to_string()));
+        assert_eq!(crumbs[3].0,"/ResData/ПТО/ИД/ЖК");
+    }
     #[test]fn safe_work_folder(){
         assert_eq!(nas_work_folder("Внутренние сети электроснабжения/электроосвещения"),"Внутренние сети электроснабжения - электроосвещения");
     }
