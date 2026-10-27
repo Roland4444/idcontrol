@@ -7,7 +7,8 @@ use hayro::{render, RenderCache, RenderSettings, PixmapSettings};
 use hayro::{hayro_interpret::InterpreterSettings,hayro_syntax::Pdf};
 use image::{imageops, DynamicImage, ImageFormat, Rgba, RgbaImage};
 use regex::Regex;
-use std::{fs::{self,File}, io::Read, path::Path, sync::{Arc, OnceLock}, time::{Duration, Instant}};
+use std::{fs::{self,File}, io::Read, path::{Path, PathBuf}, sync::{Arc, OnceLock}, time::{Duration, Instant}};
+use tokio::process::Command;
 use tokio::sync::Semaphore;
 use zip::ZipArchive;
 
@@ -48,7 +49,8 @@ fn docx_xml_to_text(xml:&str)->Result<String>{
     Ok(text)
 }
 fn docx_text(path:&Path)->Result<String>{docx_xml_to_text(&unzip_member(path,"word/document.xml")?)}
-fn xlsx_text(path:&Path)->Result<String>{
+/// Calamine automatically selects both OLE2 XLS and modern XLSX formats.
+fn spreadsheet_text(path:&Path)->Result<String>{
     let mut wb=open_workbook_auto(path)?;
     let mut out=String::new();
     for name in wb.sheet_names().to_vec(){
@@ -61,6 +63,89 @@ fn xlsx_text(path:&Path)->Result<String>{
         }
     }
     Ok(out)
+}
+
+/// LibreOffice is invoked by the application (no manual conversion by an operator).
+/// An isolated profile and source copy prevent changes to the original DOC.
+/// The executable can be configured on Windows or Linux with LIBREOFFICE_BIN.
+fn libreoffice_executable() -> PathBuf {
+    if let Ok(path)=std::env::var("LIBREOFFICE_BIN") {
+        if !path.trim().is_empty() { return PathBuf::from(path); }
+    }
+    if cfg!(windows) {
+        for key in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Some(root)=std::env::var_os(key) {
+                let path=PathBuf::from(root).join("LibreOffice").join("program").join("soffice.exe");
+                if path.is_file() { return path; }
+            }
+        }
+    }
+    PathBuf::from("soffice")
+}
+
+/// Converts a staged legacy DOC to either DOCX (text extraction) or PDF
+/// (OCR fallback for image-only content). Uses argument-safe Command, with
+/// no shell and a separate LO user profile for simultaneous uploads.
+async fn convert_legacy_doc(staged:&Path, outdir:&Path, format:&str) -> Result<PathBuf> {
+    let (format_arg,extension)=match format {
+        "docx" => ("docx:Office Open XML Text", "docx"),
+        "pdf" => ("pdf:writer_pdf_Export", "pdf"),
+        _ => bail!("Unsupported DOC conversion format"),
+    };
+    let profile=tempfile::tempdir_in(outdir)?;
+    let profile_url=url::Url::from_directory_path(profile.path())
+        .map_err(|_|anyhow!("Cannot form LibreOffice user profile URI"))?;
+    let executable=libreoffice_executable();
+    let mut cmd=Command::new(&executable);
+    cmd.arg(format!("-env:UserInstallation={profile_url}"))
+        .arg("--headless")
+        .arg("--nologo")
+        .arg("--nodefault")
+        .arg("--norestore")
+        .arg("--convert-to").arg(format_arg)
+        .arg("--outdir").arg(outdir)
+        .arg(staged)
+        .kill_on_drop(true);
+    let result=tokio::time::timeout(Duration::from_secs(120),cmd.output()).await
+        .map_err(|_|anyhow!("LibreOffice DOC conversion exceeded 120 seconds"))?
+        .map_err(|err|anyhow!("Could not start LibreOffice ({}): {err}. Install libreoffice-writer or set LIBREOFFICE_BIN",executable.display()))?;
+    let target=outdir.join(format!("input.{extension}"));
+    if !result.status.success() || !target.is_file() {
+        let diagnostic=String::from_utf8_lossy(&result.stderr);
+        bail!("LibreOffice could not convert old Word DOC to {format}: {}",
+            diagnostic.chars().take(300).collect::<String>());
+    }
+    Ok(target)
+}
+
+// Do not start an unbounded number of LibreOffice processes when many
+// contractor submissions are scanned at the same time.
+static DOC_CONVERSION_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+fn doc_conversion_slots() -> Arc<Semaphore> {
+    Arc::clone(DOC_CONVERSION_SLOTS.get_or_init(|| Arc::new(Semaphore::new(2))))
+}
+
+async fn legacy_doc_extract(path:&Path,max_pages:usize,cfg:&Config,cb:&Option<ProgressCallback>)->Result<Extracted>{
+    let conversion_permit=doc_conversion_slots().acquire_owned().await?;
+    progress(cb,"convert",0,2,"Автоматическая конвертация старого Word DOC для проверки");
+    let temporary=tempfile::tempdir_in(&cfg.temp_root)?;
+    let staged=temporary.path().join("input.doc");
+    // Keep the unmodified original in the immutable archive; only convert a copy.
+    tokio::fs::copy(path,&staged).await?;
+    let converted=convert_legacy_doc(&staged,temporary.path(),"docx").await?;
+    let text=tokio::task::spawn_blocking(move ||docx_text(&converted)).await??;
+    if !text.trim().is_empty() {
+        progress(cb,"extract",2,2,"DOC конвертирован: текст извлечён и передан на нормативную проверку");
+        return Ok(Extracted{text,status:"extracted".into(),confidence:None});
+    }
+    // Some OLE2 documents consist solely of scanned pictures. Render the
+    // source to PDF and pass through the existing OCR pipeline automatically.
+    progress(cb,"convert",1,2,"В DOC нет текстового слоя: подготовка страниц к OCR");
+    let pdf=convert_legacy_doc(&staged,temporary.path(),"pdf").await?;
+    drop(conversion_permit);
+    let parsed=Box::pin(run_extract(&pdf,max_pages,cfg,cb)).await?;
+    progress(cb,"extract",2,2,"Обработка DOC через OCR завершена");
+    Ok(parsed)
 }
 
 /// Convert a rendered PDF page (PNG) to a real JPEG.
@@ -269,17 +354,16 @@ async fn run_extract(path:&Path,max_pages:usize,cfg:&Config,cb:&Option<ProgressC
         progress(cb,"extract",1,1,"Чертёж CAD сохранён; требуется просмотр инженером");
         return Ok(Extracted{text:String::new(),status:"manual".into(),confidence:None});
     }
-    // Binary Word DOC is kept in the original format and included in history.
-    // Parsing old OLE2 documents as DOCX/image is incorrect; require manual review.
+    // A legacy Word file is converted automatically. The original remains
+    // untouched for SHA-256/versioning and audits on Synology.
     if suffix=="doc" {
-        progress(cb,"extract",1,1,"Word DOC сохранён без изменений; автоматическое извлечение не поддерживается, требуется ручная проверка");
-        return Ok(Extracted{text:String::new(),status:"manual".into(),confidence:None});
+        return legacy_doc_extract(path,max_pages,cfg,cb).await;
     }
     if suffix=="docx" || suffix=="xlsx" || suffix=="xls" {
-        progress(cb,"extract",0,1,format!("Извлечение текста из {} без OCR",suffix.to_uppercase()));
+        progress(cb,"extract",0,1,format!("Автоматическое извлечение текста из {}",suffix.to_uppercase()));
         let file=path.to_owned();
         let text=tokio::task::spawn_blocking(move||{
-            if suffix=="docx" {docx_text(&file)} else {xlsx_text(&file)}
+            if suffix=="docx" {docx_text(&file)} else {spreadsheet_text(&file)}
         }).await??;
         progress(cb,"extract",1,1,"Извлечение текста из офисного документа завершено");
         return Ok(Extracted{text:text.clone(),status:if text.trim().is_empty(){"manual"}else{"extracted"}.into(),confidence:None});
@@ -368,6 +452,26 @@ mod tests {
     #[test] fn preserves_requisite_across_bold_run(){
         let xml=r#"<w:p><w:r><w:t>ГО</w:t></w:r><w:r><w:t>СТ</w:t></w:r></w:p>"#;
         assert_eq!(docx_xml_to_text(xml).unwrap(),"ГОСТ\n");
+    }
+    #[test] fn reads_legacy_xls_without_manual_review() {
+        let file=Path::new(concat!(env!("CARGO_MANIFEST_DIR"),"/tests/fixtures/legacy_excel.xls"));
+        let text=spreadsheet_text(file).unwrap();
+        assert!(text.contains("Акт освидетельствования"));
+        assert!(text.contains("Сваи"));
+    }
+    #[tokio::test] async fn converts_legacy_doc_automatically_when_libreoffice_exists() {
+        let executable=libreoffice_executable();
+        if !std::process::Command::new(&executable).arg("--version").output().is_ok_and(|o|o.status.success()) {
+            // CI without LibreOffice can still test XLS and the rest of Rust.
+            return;
+        }
+        let testdir=tempfile::tempdir().unwrap();
+        let input=Path::new(concat!(env!("CARGO_MANIFEST_DIR"),"/tests/fixtures/legacy_word.doc"));
+        let staged=testdir.path().join("input.doc");
+        std::fs::copy(input,&staged).unwrap();
+        let output=convert_legacy_doc(&staged,testdir.path(),"docx").await.unwrap();
+        let text=docx_text(&output).unwrap();
+        assert!(text.contains("Акт освидетельствования"));
     }
     #[test] fn image_formats() {
         assert_eq!(image_extension_mime("tif").unwrap(),"image/tiff");

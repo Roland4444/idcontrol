@@ -69,7 +69,7 @@ async fn analyze_internal(db:&PgPool,catalog:&Catalog,package_id:i64,source:&str
     else if required.is_empty(){findings.push(FindingInput::new(1,"C-UNAPPROVED","Инженер ещё не утвердил обязательные пункты для комплекта."));}
     for doc in &inputs {
         if doc.catalog_code.is_none(){findings.push(FindingInput::new(1,"CLASSIFY","Тип документа не определён достоверно. Требуется ручная классификация.").doc(doc));}
-        if !matches!(doc.recognition_status.as_str(), "extracted"|"ocr"|"ocr_vibe") {
+        if !matches!(doc.recognition_status.as_str(), "extracted"|"ocr"|"ocr_vibe"|"ocr_local") {
             findings.push(FindingInput::new(3,"OCR",format!("Текст распознан не полностью: {}. Соответствие не подтверждено.",doc.recognition_status)).doc(doc));
         }
         if doc.recognition_confidence.is_some_and(|c|c<0.7){
