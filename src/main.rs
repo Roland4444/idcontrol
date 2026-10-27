@@ -18,7 +18,7 @@ mod synology;
 mod vibecode;
 mod web;
 mod ui_version;
-// cargo run -- --debug-login
+mod contractor;
 
 use anyhow::Result;
 use rand::RngCore;
@@ -97,6 +97,10 @@ async fn main()->Result<()> {
         return Ok(());
     }
 
+    // An interrupted HTTP upload cannot be safely retried with an already
+    // consumed public token; preserve the failed receipt for the administrator.
+    sqlx::query("UPDATE contractor_submissions SET status='failed',processing_stage='failed',error_message='Server restarted during delivery; issue a new link' WHERE status='uploading'")
+        .execute(&db).await?;
     ocr_jobs::recover_interrupted(&db).await?;
     classification::recover_interrupted(&db).await?;
     // Resume jobs interrupted by an application restart.

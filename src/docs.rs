@@ -11,7 +11,7 @@ use std::{fs::{self,File}, io::Read, path::Path, sync::{Arc, OnceLock}, time::{D
 use tokio::sync::Semaphore;
 use zip::ZipArchive;
 
-pub const SUPPORTED: &[&str] = &["docx","xlsx","pdf","png","jpg","jpeg","tif","tiff","bmp","gif","webp"];
+pub const SUPPORTED: &[&str] = &["docx","xlsx","pdf","png","jpg","jpeg","tif","tiff","bmp","gif","webp","dwg","dxf"];
 pub fn supported(p:&Path) -> bool { p.extension().and_then(|x|x.to_str()).map(|s|SUPPORTED.contains(&s.to_lowercase().as_str())).unwrap_or(false) }
 
 #[derive(Clone, Default)]
@@ -263,6 +263,12 @@ async fn run_local_extract(path:&Path,max_pages:usize,cfg:&Config,cb:&Option<Pro
 
 async fn run_extract(path:&Path,max_pages:usize,cfg:&Config,cb:&Option<ProgressCallback>)->Result<Extracted>{
     let suffix=path.extension().and_then(|s|s.to_str()).unwrap_or("").to_lowercase();
+    // CAD binaries are preserved and versioned, but text extraction requires
+    // specialist CAD tools. Never submit a DWG/DXF to image OCR as if it were a bitmap.
+    if suffix=="dwg" || suffix=="dxf" {
+        progress(cb,"extract",1,1,"Чертёж CAD сохранён; требуется просмотр инженером");
+        return Ok(Extracted{text:String::new(),status:"manual".into(),confidence:None});
+    }
     if suffix=="docx" || suffix=="xlsx" {
         progress(cb,"extract",0,1,format!("Извлечение текста из {} без OCR",suffix.to_uppercase()));
         let file=path.to_owned();

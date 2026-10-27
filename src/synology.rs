@@ -1,8 +1,11 @@
-//! Read-only Synology File Station API client over HTTPS (DSM port 5001).
-//! The NAS is never mounted, and no mutating File Station APIs are called.
+//! Synology File Station API client over HTTPS (DSM port 5001).
+//! Scanning is read-only; contractor deliveries use narrowly scoped Upload/Rename
+//! operations inside the administrator-selected /ResData folder. No SMB mount.
 use crate::config::Config;
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::{redirect::Policy, Client, Url};
+use futures_util::StreamExt;
+use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
@@ -71,11 +74,21 @@ struct Extra { size: Option<u64>, time: Option<FileTimes> }
 #[derive(Debug, Deserialize)]
 struct FileTimes { mtime: Option<i64> }
 
+pub fn validate_resdata_path(p:&str)->Result<()> {
+    if !(p=="/ResData" || p.starts_with("/ResData/")) || p.ends_with('/') || p.contains('\\') ||
+        p.split('/').skip(1).any(|part|part.is_empty() || part=="." || part==".." || part.chars().any(|c|c.is_control())) {
+        bail!("Папка должна находиться внутри /ResData");
+    }
+    Ok(())
+}
+
 pub struct SynologySession<'a> {
     client: &'a SynologyClient,
     auth: ApiSpec,
     list: ApiSpec,
     download: ApiSpec,
+    upload: Option<ApiSpec>,
+    rename: Option<ApiSpec>,
     sid: String,
     auth_version: u32,
 }
@@ -113,7 +126,7 @@ impl SynologyClient {
         Ok(self.base.join(&format!("webapi/{path}"))?)
     }
     async fn discover(&self) -> Result<HashMap<String, ApiSpec>> {
-        let keys="SYNO.API.Auth,SYNO.FileStation.List,SYNO.FileStation.Download";
+        let keys="SYNO.API.Auth,SYNO.FileStation.List,SYNO.FileStation.Download,SYNO.FileStation.Upload,SYNO.FileStation.Rename";
         // entry.cgi is standard on current DSM. query.cgi is supported on older DSM.
         let mut last_error=None;
         for script in ["entry.cgi","query.cgi"] {
@@ -148,7 +161,9 @@ impl SynologyClient {
         if !reply.success {bail!("DSM login failed (code {:?})",reply.error.map(|e|e.code));}
         let sid=reply.data.context("DSM login returned no session")?.sid;
         if sid.is_empty(){bail!("DSM login returned empty session");}
-        Ok(SynologySession{client:self,auth,list,download,sid,auth_version:version})
+        let upload=info.remove("SYNO.FileStation.Upload");
+        let rename=info.remove("SYNO.FileStation.Rename");
+        Ok(SynologySession{client:self,auth,list,download,upload,rename,sid,auth_version:version})
     }
 }
 impl SynologySession<'_> {
@@ -179,6 +194,83 @@ impl SynologySession<'_> {
             if result.len()>100_000 {bail!("Excessive number of entries in one NAS directory");}
         }
         Ok(result)
+    }
+    /// Browse only the permitted ResData share; never allow a NAS path from the browser
+    /// to escape this share (even before sending the request to DSM).
+    pub async fn list_directories(&self, folder:&str)->Result<Vec<String>> {
+        validate_resdata_path(folder)?;
+        let mut directories=self.list_dir(folder).await?.into_iter()
+            .filter(|e|e.isdir && !e.name.starts_with('.') && e.name!="@eaDir" && e.name!="#recycle")
+            .map(|e|e.path).collect::<Vec<_>>();
+        directories.retain(|p|validate_resdata_path(p).is_ok());
+        directories.sort();
+        Ok(directories)
+    }
+    /// The DSM Upload API receives each binary part *last*. Files are uploaded into
+    /// a hidden staging directory and exposed to the regular scanner by one rename.
+    pub async fn upload_file(&self, folder:&str,filename:&str,local:&Path)->Result<()> {
+        self.upload_file_with_progress(folder,filename,local,None).await
+    }
+    /// Callback is invoked for payload bytes consumed from the local file by reqwest.
+    /// This represents bytes streamed towards DSM, not a guarantee of NAS persistence.
+    pub async fn upload_file_with_progress(
+        &self,folder:&str,filename:&str,local:&Path,
+        on_bytes:Option<Arc<dyn Fn(u64)+Send+Sync>>
+    )->Result<()> {
+        validate_resdata_path(folder)?;
+        crate::repo::validate_segment(filename)?;
+        let api=self.upload.as_ref().context("DSM FileStation Upload API is not available")?;
+        if api.max_version<2 {bail!("DSM Upload API version 2 is required");}
+        let file=File::open(local).await?;
+        let size=file.metadata().await?.len();
+        let stream=tokio_util::io::ReaderStream::new(file).inspect(move |chunk| {
+            if let (Some(callback),Ok(bytes))=(&on_bytes,chunk) {
+                callback(bytes.len() as u64);
+            }
+        });
+        let part=reqwest::multipart::Part::stream_with_length(
+            reqwest::Body::wrap_stream(stream),size)
+            .file_name(filename.to_string())
+            .mime_str("application/octet-stream")?;
+        let form=reqwest::multipart::Form::new()
+            .text("api","SYNO.FileStation.Upload").text("version","2")
+            .text("method","upload").text("path",folder.to_string())
+            .text("create_parents","true").text("overwrite","false")
+            .text("_sid",self.sid.clone())
+            .part("file",part);
+        let response=self.client.client.post(self.client.api_url(&api.path)?)
+            .multipart(form).send().await.context("DSM Upload transport failure")?
+            .error_for_status()?;
+        let reply=response.bytes().await?;
+        if !reply.is_empty() {
+            let value:serde_json::Value=serde_json::from_slice(&reply)
+                .context("Unexpected DSM Upload response")?;
+            if value.get("success").and_then(|v|v.as_bool())!=Some(true) {
+                bail!("DSM Upload refused file (error {:?})",value.get("error").and_then(|e|e.get("code")));
+            }
+        }
+        Ok(())
+    }
+    pub async fn publish_directory(&self,stage:&str,final_name:&str)->Result<()> {
+        validate_resdata_path(stage)?;
+        if !stage.rsplit('/').next().unwrap_or("").starts_with(".incoming-") {
+            bail!("Not a contractor staging directory");
+        }
+        crate::repo::validate_segment(final_name)?;
+        let api=self.rename.as_ref().context("DSM FileStation Rename API is not available")?;
+        if api.max_version<2 {bail!("DSM Rename API version 2 is required");}
+        let fields=vec![
+            ("api","SYNO.FileStation.Rename".to_string()),
+            ("version","2".to_string()),("method","rename".to_string()),
+            ("path",serde_json::json!([stage]).to_string()),
+            ("name",serde_json::json!([final_name]).to_string()),
+            ("_sid",self.sid.clone()),
+        ];
+        let reply:Envelope<serde_json::Value>=self.client.client.post(self.client.api_url(&api.path)?)
+            .form(&fields).send().await.context("DSM Rename transport failure")?
+            .error_for_status()?.json().await.context("Invalid DSM rename response")?;
+        if !reply.success {bail!("DSM failed to publish contractor batch (code {:?})",reply.error.map(|e|e.code));}
+        Ok(())
     }
     pub async fn list_files(&self) -> Result<Vec<RemoteFile>> {
         let mut pending=vec![(self.client.root.clone(),0usize)];
@@ -261,5 +353,12 @@ mod tests {
         assert!(c.api_url("entry.cgi").is_ok());
         assert!(c.api_url("https://evil.test/").is_err());
         assert!(c.api_url("../auth.cgi").is_err());
+    }
+    #[test] fn root_stays_inside_resdata() {
+        assert!(validate_resdata_path("/ResData").is_ok());
+        assert!(validate_resdata_path("/ResData/ПТО/ИД").is_ok());
+        for path in ["/ResData2", "/ResData/../etc", "/ResData//ИД", "/ResData/.", "/volume1/ResData"] {
+            assert!(validate_resdata_path(path).is_err(),"{path}");
+        }
     }
 }

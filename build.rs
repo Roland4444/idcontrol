@@ -5,13 +5,13 @@ use sha2::{Digest, Sha256};
 use std::{env, fs, path::Path};
 
 const HTML_FILES: &[&str] = &[
-    "src/web.rs", "src/portal.rs", "src/access.rs",
+    "src/web.rs", "src/portal.rs", "src/access.rs", "src/contractor.rs",
     "assets/bitrix-client.html", "assets/employee-picker.html",
 ];
 const JS_FILES: &[&str] = &[
-    "src/web.rs", "src/portal.rs", "src/access.rs",
+    "src/web.rs", "src/portal.rs", "src/access.rs", "src/contractor.rs",
     "assets/bitrix-client.js", "assets/employee-picker.js",
-    "assets/ui-version-watch.js",
+    "assets/ui-version-watch.js", "assets/contractor-upload.js",
 ];
 const CSS_FILES: &[&str] = &[
     "assets/portal.css", "assets/bitrix-client.html", "src/web.rs",

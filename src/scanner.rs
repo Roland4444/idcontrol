@@ -67,9 +67,13 @@ fn relative_remote_path<'a>(root:&str, full:&'a str)->Option<&'a str>{
     full.strip_prefix(root)?.strip_prefix('/')
 }
 pub async fn ingest(db:&PgPool,cfg:&Config,catalog:&Catalog,root:&Path,path:&Path,origin:&str)->Result<Option<i64>>{
-    let Some((project,work,kind,relative))=source_details(root,path) else {return Ok(None)};
+    let Some((project,work_folder,kind,relative))=source_details(root,path) else {return Ok(None)};
+    // NAS paths cannot contain '/' inside a single folder name. Restore the
+    // canonical catalog work type before assigning files to a project package.
+    let work=catalog.work_types.iter().find(|w|crate::contractor::nas_work_folder(&w.name)==work_folder)
+        .map(|w|w.name.as_str()).unwrap_or(&work_folder);
     let pr=repo::get_or_create_project(db,&project).await?;
-    let mut pkg=repo::get_or_create_package(db,pr.id,&work).await?;
+    let mut pkg=repo::get_or_create_package(db,pr.id,work).await?;
     if pkg.catalog_name.is_none() {
         if let Some(w)=catalog.closest(&work){
             sqlx::query("UPDATE packages SET catalog_name=$1 WHERE id=$2 AND catalog_name IS NULL")
@@ -153,15 +157,20 @@ impl ScanResult {
 
 /// A complete successful remote traversal is required before disappearance reconciliation.
 /// Errors in listing, paging, login or decoding never mark documents deleted.
-pub async fn scan_once(db:&PgPool,cfg:&Config,catalog:&Catalog,client:&SynologyClient)->Result<ScanResult>{
+pub async fn scan_once(db:&PgPool,cfg:&Config,catalog:&Catalog,_client:&SynologyClient)->Result<ScanResult>{
+    // Read the administrator-selected root at the beginning of each scan. Use
+    // the matching DSM client, never a stale root from the process .env.
+    let mut effective_cfg=cfg.clone();
+    effective_cfg.synology_root=crate::contractor::selected_root_db(db,&cfg.synology_root).await?;
+    let live_client=SynologyClient::new(&effective_cfg)?;
     // DSM may invalidate a File Station SID between login and a directory listing
     // (API codes 106=timeout, 107=interrupted, 119=invalid session).
     // Restart the entire traversal with a fresh SID, never continuing from
     // a partially traversed directory tree or marking unseen files as removed.
     for attempt in 1..=3 {
-        let session=client.connect().await
+        let session=live_client.connect().await
             .with_context(||format!("DSM login/discovery failed on scan attempt {attempt}"))?;
-        let result=scan_session(db,cfg,catalog,&session).await;
+        let result=scan_session(db,&effective_cfg,catalog,&session).await;
         session.logout().await;
         match result {
             Ok(scan) => {
@@ -214,12 +223,15 @@ async fn scan_session(
             if layout.work==cfg.synology_default_work && !default_work.is_empty(){layout.work=default_work.clone();}
             layout.mirror_relative=format!("{}/{}/{}",layout.project,layout.work,layout.db_relative);
         }
-        if !approved.contains(&layout.project) || catalog.work_type(&layout.work).is_none() {
+        let canonical_work=catalog.work_types.iter()
+            .find(|w|crate::contractor::nas_work_folder(&w.name)==layout.work)
+            .map(|w|w.name.as_str()).unwrap_or(layout.work.as_str());
+        if !approved.contains(&layout.project) || catalog.work_type(canonical_work).is_none() {
             skipped_unmapped+=1;
             continue;
         }
         supported+=1;
-        seen.insert((layout.project.clone(),layout.work.clone(),layout.db_relative.clone()));
+        seen.insert((layout.project.clone(),canonical_work.to_string(),layout.db_relative.clone()));
         if e.size>cfg.max_file_mb*1024*1024 {warn!("Ignoring oversized NAS file: {}",e.path);continue;}
         let now=SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
         if e.mtime>now || now-e.mtime<cfg.stable_seconds as i64 {continue;}
@@ -228,7 +240,7 @@ async fn scan_session(
         let meta=sqlx::query_as::<_,(i64,i64)>("SELECT size_bytes,modified_epoch FROM synology_file_index WHERE remote_path=$1")
             .bind(&e.path).fetch_optional(db).await?;
         let pr=repo::get_or_create_project(db,&layout.project).await?;
-        let pkg=repo::get_or_create_package(db,pr.id,&layout.work).await?;
+        let pkg=repo::get_or_create_package(db,pr.id,canonical_work).await?;
         let latest=repo::latest_document(db,pkg.id,&layout.db_relative).await?;
         if meta.is_some_and(|(s,m)|s==e.size as i64 && m==e.mtime) &&
            latest.is_some_and(|d|d.is_present && d.origin=="synology") {unchanged+=1;continue;}
@@ -258,7 +270,9 @@ async fn scan_session(
     // documents absent during a partial or incomplete reconciliation.
     // Mapping changes are additive: do not silently mark old imported paths absent.
     // Deletion reconciliation remains active for direct, unmapped fixed-project trees.
-    let allow_removals=files_reported>0 && supported>0 && mappings.is_empty() && skipped_unmapped==0 && ignored_layout==0;
+    let admin_selected_root=sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM app_settings WHERE setting_key='synology_root')")
+        .fetch_one(db).await.unwrap_or(false);
+    let allow_removals=!admin_selected_root && files_reported>0 && supported>0 && mappings.is_empty() && skipped_unmapped==0 && ignored_layout==0;
     if files_reported==0 {warn!("No files reported by DSM: bulk disappearance reconciliation skipped");}
     info!("DSM scan detail: {files_reported} files returned, {supported} matched approved projects, {skipped_unmapped} missing approved ЖК/work mapping, {unchanged} unchanged, {ignored_layout} skipped by folder layout, {ignored_extension} skipped by extension/temp filename");
     if files_reported>0 && supported==0 {

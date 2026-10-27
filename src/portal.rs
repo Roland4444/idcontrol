@@ -287,6 +287,7 @@ pub async fn administration(State(st):State<Shared>,Extension(actor):Extension<P
     }
     let mut work_options=String::from("<option value=''>Из структуры NAS (по умолчанию — из .env)</option>");
     for wt in &st.catalog.work_types{work_options.push_str(&format!("<option value='{}'>{}</option>",h(&wt.name),h(&wt.name)));}
+    let active_synology_root=crate::contractor::selected_root(&st).await?;
     let body=format!(r#"<div class="page-title"><h1>Администрирование</h1><p>Сотрудники, роли, проекты и подключённые папки Synology.</p></div>
     <section class="white-panel" id="superadmins"><h2>Суперадминистраторы</h2><p>Полный доступ ко всем проектам, проверкам и настройкам. Для назначения доступны только действующие сотрудники Bitrix24 — без гостей и внешних пользователей. Поиск по имени или фамилии.</p>
     <form class="admin-form" method="post" action="/administration/superadmins">{}<label>Сотрудник<select name="user_id" class="employee-picker" required><option value="">Выберите сотрудника</option></select></label><button class="primary" name="action" value="grant">Назначить суперадминистратором</button></form>
@@ -300,13 +301,14 @@ pub async fn administration(State(st):State<Shared>,Extension(actor):Extension<P
     <form class="admin-form" method="post" action="/administration/projects/access">{}<label>Жилой комплекс<select name="project_id">{options}</select></label><label>Сотрудник<select name="user_id" class="employee-picker" required><option value="">Выберите сотрудника</option></select></label><label>Действие<select name="action"><option value="grant">Предоставить доступ</option><option value="revoke">Убрать доступ к проекту</option></select></label><button>Сохранить</button></form>
     <table><thead><tr><th>Проект</th><th>Сотрудник</th><th>Права</th></tr></thead><tbody>{member_rows}</tbody></table>
     <p class="section-copy">При отзыве доступа к проекту удаляются назначения на виды работ этого проекта. Назначение администратором проекта снимается отдельно.</p></section>
+    <section class="white-panel"><h2>Корневая папка проектов на Synology</h2><p>Выберите каталог внутри /ResData. Для каждого ЖК и вида работ он будет использоваться автоматически при передаче архивов подрядчиками.</p><a class="buttonlink" href="/administration/storage">Выбрать папку в Synology →</a></section>
     <section class="white-panel" id="synology-mapping"><h2>Synology → жилые комплексы</h2>
     <p>Исходная папка — первая папка под SYNOLOGY_ROOT. Если корень содержит сразу ИД/ и ПД/, используется SYNOLOGY_PROJECT_NAME. Несопоставленные документы не импортируются.</p>
     <p>Текущий корень: <code>{}</code>; имя по умолчанию: <code>{}</code>. После изменения выполните <a href="/diagnostics">сканирование Synology</a>. Старые файлы в базе не удаляются.</p>
     <form method="post" action="/administration/synology-map">{}<label>Исходная папка NAS<input name="source_name" required maxlength="200" value="{}"></label><label>Сопоставить с ЖК<select name="project_id">{options}</select></label><label>Вид работ для плоского корня<select name="default_work">{work_options}</select></label><label>Действие<select name="action"><option value="save">Сохранить сопоставление</option><option value="remove">Удалить сопоставление</option></select></label><button>Применить</button></form>
     <table><thead><tr><th>Папка NAS</th><th>Жилой комплекс</th><th>Вид работ для плоского корня</th></tr></thead><tbody>{mapping_rows}</tbody></table></section>
     <section class="white-panel"><h2>Роли и ограничения</h2><p><strong>Суперадминистратор</strong> управляет всей системой и назначает роли. <strong>Администратор проекта</strong> отвечает за виды работ своего ЖК. <strong>Пользователь</strong> видит только назначенные проекты и комплекты.</p><p>Права проверяются сервером при каждом обращении, включая скачивание документов и запуск OCR.</p></section>
-    {}"#,web::hidden(&st.csrf),web::hidden(&st.csrf),web::hidden(&st.csrf),h(&st.cfg.synology_root),h(&st.cfg.synology_project_name),web::hidden(&st.csrf),h(&st.cfg.synology_project_name),employee_picker());
+    {}"#,web::hidden(&st.csrf),web::hidden(&st.csrf),web::hidden(&st.csrf),h(&active_synology_root),h(&st.cfg.synology_project_name),web::hidden(&st.csrf),h(&st.cfg.synology_project_name),employee_picker());
     Ok(web::layout("Администрирование",body))
 }
 

@@ -21,11 +21,20 @@ pub fn timeline_discrepancies(text:&str)->Vec<String>{
     let mut all:Vec<_>=result.into_iter().collect(); all.sort();all
 }
 pub async fn analyze(db:&PgPool, catalog:&Catalog,package_id:i64,source:&str)->Result<i64>{
+    analyze_internal(db,catalog,package_id,source,None).await
+}
+/// Evaluate exactly one contractor delivery instead of accidentally combining
+/// every archived revision of the same package. Reference PD/RD remains shared.
+pub async fn analyze_delivery(db:&PgPool,catalog:&Catalog,package_id:i64,source:&str,delivery_prefix:&str)->Result<i64>{
+    analyze_internal(db,catalog,package_id,source,Some(delivery_prefix)).await
+}
+async fn analyze_internal(db:&PgPool,catalog:&Catalog,package_id:i64,source:&str,delivery_prefix:Option<&str>)->Result<i64>{
     let package=repo::package(db,package_id).await?;
     let docs=repo::documents(db,package_id).await?;
     let mut latest:HashMap<String,Document>=HashMap::new();
     for doc in docs{latest.entry(doc.relative_path.clone()).or_insert(doc);}
-    let inputs:Vec<_>=latest.values().filter(|d|d.is_present && d.source_kind=="ID").collect();
+    let inputs:Vec<_>=latest.values().filter(|d|d.is_present && d.source_kind=="ID" &&
+        delivery_prefix.is_none_or(|prefix|d.relative_path.starts_with(prefix))).collect();
     let reference_exists=latest.values().any(|d|d.is_present && d.source_kind=="REFERENCE");
     let mut findings=Vec::new();
     let norm_rules=norms::approved_rules(db,package.catalog_name.as_deref().unwrap_or("")).await?;

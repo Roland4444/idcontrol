@@ -20,6 +20,7 @@ pub fn has_super_role(id:i64,role:&str)->bool { is_super(id) || role=="admin" }
 fn digest(token:&str)->String {hex::encode(Sha256::digest(token.as_bytes()))}
 fn bad_auth()->Response {(StatusCode::UNAUTHORIZED,"Войдите через приложение в Bitrix24").into_response()}
 fn allowed_public(path:&str,method:&Method)->bool {
+    (path.starts_with("/contractor/") && (method==Method::GET || method==Method::POST)) ||
     (path=="/bitrix" && (method==Method::GET || method==Method::POST)) ||
     (path=="/auth/bitrix" && method==Method::POST) ||
     (path=="/assets/bitrix-client.js" && method==Method::GET) ||

@@ -1,4 +1,4 @@
-use crate::{access,portal,ui_version,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
+use crate::{access,portal,contractor,ui_version,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
 use anyhow::Result;
 use axum::{
     body::{Body,Bytes},
@@ -207,6 +207,12 @@ pub fn router(state:Shared)->Router{
         .route("/projects/{id}/works",post(portal::create_work))
         .route("/projects/{id}/works/all",post(portal::create_all))
         .route("/projects/{id}/assign",post(portal::assign_work))
+        .route("/contractor/{token}",get(contractor::public_form).post(contractor::public_upload))
+        .route("/contractor/{token}/status",get(contractor::public_status))
+        .route("/administration/storage",get(contractor::storage_view).post(contractor::storage_save))
+        .route("/packages/{id}/contractor-links",post(contractor::create_link))
+        .route("/packages/{id}/contractor-links/{link_id}/revoke",post(contractor::revoke_link))
+        .route("/packages/{id}/submissions/{submission_id}/review",post(contractor::review_submission))
         .route("/administration",get(portal::administration))
         .route("/administration/superadmins",post(portal::assign_superadmin))
         .route("/api/employees/known",get(portal::known_employees))
@@ -356,7 +362,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
         for item in &wt.items {panel_html.push_str(&format!("<option value='{}'>{} — {}</option>",h(&item.code),h(&item.code),h(&item.title)));}
     }
     for item in &custom_items {panel_html.push_str(&format!("<option value='{}'>{}</option>",h(&item.code),h(&item.title)));}
-    panel_html.push_str("</select></label><div class=drop-zone id=upload-drop><strong class=upload-mark>⇧</strong><h3>Перетащите файлы сюда или выберите на компьютере</h3><p class=muted>PDF, DOCX, XLSX, JPG, PNG, TIFF, BMP, GIF, WebP · до 20 файлов (DWG пока не поддерживается)</p><input class=uploadfile type=file name=file multiple required accept='.pdf,.docx,.xlsx,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.webp'><small id=upload-count>Файлы не выбраны</small></div><button class=primary>Загрузить файлы</button></form>");
+    panel_html.push_str("</select></label><div class=drop-zone id=upload-drop><strong class=upload-mark>⇧</strong><h3>Перетащите файлы сюда или выберите на компьютере</h3><p class=muted>PDF, DOCX, XLSX, JPG, PNG, TIFF, BMP, GIF, WebP · до 20 файлов (DWG/DXF сохраняются для ручной проверки)</p><input class=uploadfile type=file name=file multiple required accept='.pdf,.docx,.xlsx,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.webp,.dwg,.dxf'><small id=upload-count>Файлы не выбраны</small></div><button class=primary>Загрузить файлы</button></form>");
     panel_html.push_str(&format!("<form action='/packages/{id}/scan' method=post>{}<button class=secondary>Просканировать Synology</button></form></div></details></article>",hidden(&st.csrf)));
     panels.insert("upload",std::mem::take(&mut panel_html));
     panel_html.push_str(&format!("<article id=checklist><details class=collapsible><summary>Чек-лист и вид работ</summary><div><form method=post action=\"/packages/{id}/catalog\">{}<select name=work_type>",hidden(&st.csrf)));
@@ -542,6 +548,8 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     if latest.is_empty(){primary.push_str("<tr><td colspan='4'>Документы ещё не загружены.</td></tr>");}
     primary.push_str("</tbody></table></section>");
     if let Some(pos)=body.find("<section class=overview id=summary>") {body.insert_str(pos,&primary);}else{body.push_str(&primary);}
+    let contractor_panel=contractor::package_controls(&st,&actor,id).await?;
+    if let Some(pos)=body.find("<section class=overview id=summary>") {body.insert_str(pos,&contractor_panel);}else{body.push_str(&contractor_panel);}
     body.push_str("<section class=detail-sections id=detail-sections aria-labelledby=details-title><h2 id=details-title>Подробные разделы и настройки проверок</h2><p class=detail-intro>Нажмите на название раздела, чтобы открыть таблицы и параметры. Из вкладок выше можно сразу перейти к нужной проверке. Для запуска новой проверки используйте кнопку «Запустить проверку комплекта».</p>");
     for (title,description,ids) in [
         ("Результаты проверок","Отчёты, замечания, история и утверждённые нормативные правила",vec!["checks","remarks","history","norms-check"]),
@@ -1164,6 +1172,7 @@ async fn ocr_status_json(State(st):State<Shared>)->WebResult<Json<serde_json::Va
 }
 
 async fn diagnostics(State(st):State<Shared>)->WebResult<Html<String>>{
+    let active_root=contractor::selected_root(&st).await?;
     let stats:Vec<(String,i64)>=sqlx::query_as(
         "SELECT CASE WHEN recognition_status LIKE 'error:%' THEN 'error' ELSE recognition_status END,
          count(*) FROM documents d WHERE d.is_present=true
@@ -1188,7 +1197,7 @@ async fn diagnostics(State(st):State<Shared>)->WebResult<Html<String>>{
         if scan.running{"Выполняется"}else{"Между запусками"},h(&scan.message),
         scan.last_at.map(|t|t.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_else(||"нет данных".into()),h(&scan.detail)));
     body.push_str(&format!("<tr><td>Источник Synology</td><td>Корень: <code>{}</code><br>Папка без вложенного имени ЖК: <code>{}</code><br>Вид работ по умолчанию: <code>{}</code><p><a href='/administration'>Настроить привязку папок к ЖК</a></p></td></tr>",
-        h(&st.cfg.synology_root),h(&st.cfg.synology_project_name),h(&st.cfg.synology_default_work)));
+        h(&active_root),h(&st.cfg.synology_project_name),h(&st.cfg.synology_default_work)));
     // The manual scan action appears after the component status table.
     let model_check=crate::local_ocr::ensure_models(&st.cfg.local_ocr_model_dir);
     body.push_str(&format!("<tr><td>OCR режим</td><td><b>{}</b> · локальные ONNX-модели: {} · путь {}</td></tr>",
