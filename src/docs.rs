@@ -11,7 +11,7 @@ use std::{fs::{self,File}, io::Read, path::Path, sync::{Arc, OnceLock}, time::{D
 use tokio::sync::Semaphore;
 use zip::ZipArchive;
 
-pub const SUPPORTED: &[&str] = &["docx","xlsx","pdf","png","jpg","jpeg","tif","tiff","bmp","gif","webp","dwg","dxf"];
+pub const SUPPORTED: &[&str] = &["doc","docx","xls","xlsx","pdf","png","jpg","jpeg","tif","tiff","bmp","gif","webp","dwg","dxf"];
 pub fn supported(p:&Path) -> bool { p.extension().and_then(|x|x.to_str()).map(|s|SUPPORTED.contains(&s.to_lowercase().as_str())).unwrap_or(false) }
 
 #[derive(Clone, Default)]
@@ -269,7 +269,13 @@ async fn run_extract(path:&Path,max_pages:usize,cfg:&Config,cb:&Option<ProgressC
         progress(cb,"extract",1,1,"Чертёж CAD сохранён; требуется просмотр инженером");
         return Ok(Extracted{text:String::new(),status:"manual".into(),confidence:None});
     }
-    if suffix=="docx" || suffix=="xlsx" {
+    // Binary Word DOC is kept in the original format and included in history.
+    // Parsing old OLE2 documents as DOCX/image is incorrect; require manual review.
+    if suffix=="doc" {
+        progress(cb,"extract",1,1,"Word DOC сохранён без изменений; автоматическое извлечение не поддерживается, требуется ручная проверка");
+        return Ok(Extracted{text:String::new(),status:"manual".into(),confidence:None});
+    }
+    if suffix=="docx" || suffix=="xlsx" || suffix=="xls" {
         progress(cb,"extract",0,1,format!("Извлечение текста из {} без OCR",suffix.to_uppercase()));
         let file=path.to_owned();
         let text=tokio::task::spawn_blocking(move||{

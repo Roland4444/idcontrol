@@ -2,6 +2,7 @@
 //! No Bitrix cookie is required on public /contractor/:token routes.
 use crate::{access::{self,Principal},engine,portal,repo,synology::{SynologyClient,validate_resdata_path},web::{self,Shared,WebError}};
 use anyhow::{bail,Context,Result};
+use encoding_rs::{IBM866, WINDOWS_1251};
 use axum::{extract::{State,Path,Query,Multipart},Extension,Form,Json,
     response::{Html,IntoResponse,Response},http::{header,StatusCode}};
 use rand::RngCore;
@@ -254,6 +255,39 @@ pub async fn public_status(State(st):State<Shared>,Path(token):Path<String>)->Re
     response
 }
 
+/// Decode names from ZIP archives created by Windows tools.
+/// The zip crate correctly handles UTF-8 but otherwise assumes CP437; old Russian
+/// ZIPs commonly store filenames in CP866 without the UTF-8 flag.
+/// A different legacy encoding can be selected with CONTRACTOR_ZIP_LEGACY_ENCODING=cp1251.
+fn decode_zip_path(raw:&[u8])->Result<(String,PathBuf)> {
+    if raw.is_empty() || raw.len()>4096 { bail!("Некорректная длина имени в ZIP"); }
+    let decoded=match std::str::from_utf8(raw) {
+        Ok(value)=>value.to_owned(),
+        Err(_)=>{
+            let charset=std::env::var("CONTRACTOR_ZIP_LEGACY_ENCODING")
+                .unwrap_or_else(|_|"cp866".to_owned()).to_ascii_lowercase();
+            let encoding=match charset.as_str(){
+                "cp866"|"ibm866"|"866"=>IBM866,
+                "cp1251"|"windows-1251"|"1251"=>WINDOWS_1251,
+                _=>bail!("Недопустимая кодировка CONTRACTOR_ZIP_LEGACY_ENCODING"),
+            };
+            let (text,had_errors)=encoding.decode_without_bom_handling(raw);
+            if had_errors {bail!("Не удалось расшифровать имя в ZIP");}
+            text.into_owned()
+        }
+    };
+    // Validate all path segments *after decoding*. Reject traversal, absolute
+    // paths, drive letters, hidden components and control characters.
+    let normal=decoded.replace('\\',"/");
+    let segments=normal.split('/').collect::<Vec<_>>();
+    if segments.is_empty() || segments.len()>12 ||
+        segments.iter().any(|s|repo::validate_segment(s).is_err() || s.contains(':')) {
+        bail!("Некорректное имя или путь файла в ZIP");
+    }
+    let relative=segments.join("/");
+    Ok((relative.clone(),PathBuf::from(relative)))
+}
+
 struct SafeFile {relative:String,local:PathBuf,sha256:String,size:u64}
 fn unpack(zip_path:&FsPath,output:&FsPath,per_file_limit:u64,on_progress:&dyn Fn(u64,u64))->Result<Vec<SafeFile>>{
     let file=File::open(zip_path)?;
@@ -272,11 +306,7 @@ fn unpack(zip_path:&FsPath,output:&FsPath,per_file_limit:u64,on_progress:&dyn Fn
         let mut entry=zip.by_index(idx)?;
         if entry.is_dir(){continue;}
         if entry.unix_mode().is_some_and(|m|m & 0o170000 == 0o120000){bail!("Символические ссылки в архиве запрещены");}
-        let enclosed=entry.enclosed_name().context("В ZIP обнаружен небезопасный путь")?.to_owned();
-        let segments=enclosed.components().map(|c|c.as_os_str().to_string_lossy().to_string()).collect::<Vec<_>>();
-        if segments.is_empty() || segments.len()>12 {bail!("Некорректная глубина вложенности ZIP");}
-        if segments.iter().any(|s|repo::validate_segment(s).is_err() || s.contains(':')){bail!("Некорректное имя в ZIP");}
-        let relative=segments.join("/");
+        let (relative,enclosed)=decode_zip_path(entry.name_raw())?;
         if !names.insert(relative.to_lowercase()){bail!("Повторяющиеся имена файлов в архиве");}
         if !crate::docs::supported(&enclosed) {bail!("Неподдерживаемый файл в ZIP: {relative}");}
         if entry.size()>per_file_limit {bail!("Файл превышает лимит: {relative}");}
@@ -577,6 +607,7 @@ pub async fn package_controls(st:&Shared,actor:&Principal,package_id:i64)->Resul
         let receipt_id:i64=row.try_get("id")?;
         let uploaded:String=row.try_get("uploaded_at")?;
         let sha:String=row.try_get("archive_sha256")?;
+        let error_message:Option<String>=row.try_get("error_message")?;
         let run:Option<i64>=row.try_get("check_run_id")?;
         let (label,actions)=match status.as_str() {
             "pending_review"=>("Ожидает проверки",format!("<form method='post' action='/packages/{package_id}/submissions/{receipt_id}/review' class='inline'>{}<input type='hidden' name='action' value='check'><button>Запустить проверку</button></form> <form method='post' action='/packages/{package_id}/submissions/{receipt_id}/review' class='inline'>{}<input type='hidden' name='action' value='rework'><button class='secondary'>На доработку</button></form>",web::hidden(&st.csrf),web::hidden(&st.csrf))),
@@ -589,7 +620,13 @@ pub async fn package_controls(st:&Shared,actor:&Principal,package_id:i64)->Resul
         let stage:String=row.try_get("processing_stage")?;
         let percent:i16=row.try_get("processing_percent")?;
         let progress=if status=="uploading" {format!("<small style='display:block'>{} — {} %</small><progress max='100' value='{}' style='width:160px'></progress>",h(&stage),percent,percent)} else {String::new()};
-        html.push_str(&format!("<tr><td><b>ИД-{package_id}-{revision:05}</b><small style='display:block'>SHA-256: {}…</small></td><td>{}</td><td>{}{}</td><td>{}</td></tr>",h(&sha[..12]),h(&uploaded),label,progress,actions));
+        // Show the stored cause in the employee interface, escaped as HTML.
+        let failure=if status=="failed" {
+            error_message.as_deref().filter(|msg|!msg.trim().is_empty())
+                .map(|msg|format!("<small style='display:block;max-width:320px;overflow-wrap:anywhere'>Причина: {}</small>",h(msg)))
+                .unwrap_or_default()
+        } else {String::new()};
+        html.push_str(&format!("<tr><td><b>ИД-{package_id}-{revision:05}</b><small style='display:block'>SHA-256: {}…</small></td><td>{}</td><td>{}{}{}</td><td>{}</td></tr>",h(&sha[..12]),h(&uploaded),label,progress,failure,actions));
     }
     html.push_str("</tbody></table></section>");
     Ok(html)
@@ -613,6 +650,21 @@ pub async fn package_controls(st:&Shared,actor:&Principal,package_id:i64)->Resul
     }
     #[test]fn safe_work_folder(){
         assert_eq!(nas_work_folder("Внутренние сети электроснабжения/электроосвещения"),"Внутренние сети электроснабжения - электроосвещения");
+    }
+    #[test]fn cp866_legacy_zip_name_decodes_to_cyrillic(){
+        let raw=b"\x88\x84/1_\x91\xa2\xa0\xa8/1_\x92\xa8\xe2\xe3\xab.doc";
+        let (name,path)=decode_zip_path(raw).unwrap();
+        assert_eq!(name,"ИД/1_Сваи/1_Титул.doc");
+        assert_eq!(path,PathBuf::from("ИД/1_Сваи/1_Титул.doc"));
+        assert!(crate::docs::supported(&path));
+    }
+    #[test]fn decoded_zip_names_block_traversal_and_executables(){
+        for bad in [b"../passwd".as_slice(),b"/etc/passwd",b"C:/windows/a.doc",b"dir/../../a.doc",b"abc\\..\\evil.doc"] {
+            assert!(decode_zip_path(bad).is_err());
+        }
+        assert!(!crate::docs::supported(FsPath::new("photo.exe")));
+        assert!(crate::docs::supported(FsPath::new("old.doc")));
+        assert!(crate::docs::supported(FsPath::new("old.xls")));
     }
     #[test]fn zip_rejects_escape_and_accepts_documents(){
         let temp=tempfile::tempdir().unwrap();
