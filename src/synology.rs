@@ -236,9 +236,9 @@ impl SynologySession<'_> {
             .text("api","SYNO.FileStation.Upload").text("version","2")
             .text("method","upload").text("path",folder.to_string())
             .text("create_parents","true").text("overwrite","false")
-            .text("_sid",self.sid.clone())
             .part("file",part);
         let response=self.client.client.post(self.client.api_url(&api.path)?)
+            .query(&[("_sid",self.sid.as_str())])
             .multipart(form).send().await.context("DSM Upload transport failure")?
             .error_for_status()?;
         let reply=response.bytes().await?;
