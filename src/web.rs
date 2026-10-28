@@ -3,7 +3,7 @@ use anyhow::Result;
 use axum::{
     body::{Body,Bytes},
     extract::{DefaultBodyLimit,Multipart,Path,Query,State},Extension,
-    http::{header,StatusCode,Request},
+    http::{header,HeaderMap,StatusCode,Request},
     middleware,
     response::{Html,IntoResponse,Redirect,Response},
     routing::{get,post}, Form,Json,Router,
@@ -172,9 +172,10 @@ fetch('/api/me',{{credentials:'same-origin'}}).then(r=>r.ok?r.json():null).then(
   setInterval(()=>document.querySelectorAll('.ocr-live').forEach(refresh),4000);
   document.querySelectorAll('.ocr-live').forEach(refresh);
 }})();
-</script>{version_watch}</body></html>"#,
+</script><script>{package_actions}</script>{version_watch}</body></html>"#,
         title=h(title),body=body,portal_style=include_str!("../assets/portal.css"),
-        version_meta=ui_version::meta_tags(),version_watch=ui_version::watcher_tag()))
+        version_meta=ui_version::meta_tags(),version_watch=ui_version::watcher_tag(),
+        package_actions=include_str!("../assets/package-actions.js")))
 }
 
 // Even a cached iframe URL is revalidated. Do not cache dynamically rendered HTML
@@ -242,6 +243,7 @@ pub fn router(state:Shared)->Router{
         .route("/packages/{id}/checklist/custom",post(create_custom_checklist))
         .route("/packages/{id}/checklist/custom/{item_id}",post(edit_custom_checklist))
         .route("/packages/{id}/scan",post(manual_scan))
+        .route("/packages/{id}/scan/status",get(package_scan_status))
         .route("/packages/{id}/check",post(run_package_check))
         .route("/packages/{id}/ai-consent",post(set_ai_consent))
         .route("/packages/{id}/ai-check",post(queue_ai_check))
@@ -357,13 +359,23 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     let mut panels:HashMap<&'static str,String>=HashMap::new();
     let mut panel_html=String::new();
     // Start primary sections. Detailed tables are intentionally folded away.
-    panel_html.push_str(&format!("<article id='upload'><details class=collapsible><summary>Загрузка документов</summary><div><p>Выберите сразу несколько файлов. Все они будут прикреплены к одной позиции чек-листа, если указана позиция.</p><form action='/packages/{id}/upload' method=post enctype=multipart/form-data>{}<label>Тип <select name=kind><option value=ID>Исполнительная документация</option><option value=REFERENCE>ПД/РД (локально, без отправки внешнему ИИ)</option></select></label><label>Позиция чек-листа <select name=catalog_code><option value=''>Не назначена</option>",hidden(&st.csrf)));
-    if let Some(wt)=pkg.catalog_name.as_deref().and_then(|n|st.catalog.work_type(n)) {
-        for item in &wt.items {panel_html.push_str(&format!("<option value='{}'>{} — {}</option>",h(&item.code),h(&item.code),h(&item.title)));}
+    panel_html.push_str("<article id='upload'><details class=collapsible><summary>Загрузка документов</summary><div><p>Добавьте файлы к этому виду работ. После передачи приложение извлечёт текст и зарегистрирует документы.</p>");
+    if matches!(actor_role.as_str(),"manager"|"engineer"|"uploader") {
+        panel_html.push_str(&format!("<form data-package-upload action='/packages/{id}/upload' method='post' enctype='multipart/form-data'>{}<label>Тип <select name=kind><option value=ID>Исполнительная документация</option><option value=REFERENCE>ПД/РД (локально, без отправки внешнему ИИ)</option></select></label><label>Позиция чек-листа <select name=catalog_code><option value=''>Не назначена</option>",hidden(&st.csrf)));
+        if let Some(wt)=pkg.catalog_name.as_deref().and_then(|n|st.catalog.work_type(n)) {
+            for item in &wt.items {panel_html.push_str(&format!("<option value='{}'>{} — {}</option>",h(&item.code),h(&item.code),h(&item.title)));}
+        }
+        for item in &custom_items {panel_html.push_str(&format!("<option value='{}'>{}</option>",h(&item.code),h(&item.title)));}
+        panel_html.push_str("</select></label><div class=drop-zone id=upload-drop><strong class=upload-mark>⇧</strong><h3>Перетащите файлы сюда или выберите на компьютере</h3><p class=muted>PDF, DOC, DOCX, XLS, XLSX, JPG, PNG, TIFF, BMP, GIF, WebP · до 20 файлов (DWG/DXF — для хранения и ручной проверки)</p><input class=uploadfile type=file name=file multiple required accept='.pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.webp,.dwg,.dxf'><small id=upload-count>Файлы не выбраны</small></div><button type=submit class=primary data-upload-button>Загрузить файлы</button><div class='operation-feedback' data-upload-feedback role=status aria-live=polite></div><progress data-upload-progress max=100 value=0 hidden></progress></form>");
+    } else {
+        panel_html.push_str("<p class=muted>У вас доступ на просмотр. Загрузка файлов доступна назначенному исполнителю, инженеру ПТО или администратору проекта.</p>");
     }
-    for item in &custom_items {panel_html.push_str(&format!("<option value='{}'>{}</option>",h(&item.code),h(&item.title)));}
-    panel_html.push_str("</select></label><div class=drop-zone id=upload-drop><strong class=upload-mark>⇧</strong><h3>Перетащите файлы сюда или выберите на компьютере</h3><p class=muted>PDF, DOCX, XLSX, JPG, PNG, TIFF, BMP, GIF, WebP · до 20 файлов (DWG/DXF сохраняются для ручной проверки)</p><input class=uploadfile type=file name=file multiple required accept='.pdf,.docx,.xlsx,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.webp,.dwg,.dxf'><small id=upload-count>Файлы не выбраны</small></div><button class=primary>Загрузить файлы</button></form>");
-    panel_html.push_str(&format!("<form action='/packages/{id}/scan' method=post>{}<button class=secondary>Просканировать Synology</button></form></div></details></article>",hidden(&st.csrf)));
+    if matches!(actor_role.as_str(),"manager"|"engineer") {
+        panel_html.push_str(&format!("<form data-package-scan action='/packages/{id}/scan' method=post data-status-url='/packages/{id}/scan/status'>{}<button type=submit class=secondary data-scan-button>Просканировать Synology</button><div class='operation-feedback' data-scan-feedback role=status aria-live=polite></div></form>",hidden(&st.csrf)));
+    } else {
+        panel_html.push_str("<p class=muted>Сканирование Synology запускает ответственный инженер или администратор проекта.</p>");
+    }
+    panel_html.push_str("</div></details></article>");
     panels.insert("upload",std::mem::take(&mut panel_html));
     panel_html.push_str(&format!("<article id=checklist><details class=collapsible><summary>Чек-лист и вид работ</summary><div><form method=post action=\"/packages/{id}/catalog\">{}<select name=work_type>",hidden(&st.csrf)));
     for wt in &st.catalog.work_types{let sel=if pkg.catalog_name.as_deref()==Some(wt.name.as_str()){ "selected" }else{""};panel_html.push_str(&format!("<option {sel} value=\"{}\">{}</option>",h(&wt.name),h(&wt.name)));}
@@ -845,20 +857,79 @@ async fn run_package_check(State(st):State<Shared>,Extension(actor):Extension<ac
     repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"manual_check",&format!("package={id} run={run}")).await?;
     Ok(Redirect::to(&format!("/packages/{id}?run_id={run}&notice=checked#checks")))
 }
-async fn manual_scan(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
+/// Start a full DSM traversal in the background: no HTTP timeout while it runs.
+/// Access middleware only allows manager/engineer to POST for this package.
+async fn manual_scan(
+    State(st):State<Shared>,
+    Extension(actor):Extension<access::Principal>,
+    Path(id):Path<i64>,
+    headers:HeaderMap,
+    Form(form):Form<CsrfForm>,
+)->WebResult<Response>{
     verify(&form.csrf,&st)?;
-    let _=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    let _guard=st.scan_lock.lock().await;
-    match scanner::scan_once(&st.db,&st.cfg,&st.catalog,&st.nas).await {
-        Ok(result)=>{
-            st.synology_connected.store(true,Ordering::Relaxed);
-            if let Ok(mut s)=st.scan_status.write(){s.running=false;s.last_at=Some(chrono::Utc::now());s.message=format!("Synology: {} новых/обновлённых документов",result.new_documents);s.detail=result.summary();}
-        },
-        Err(e)=>{st.synology_connected.store(false,Ordering::Relaxed);return Err(e.into());}
+    let _pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
+    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")) {
+        return Err(WebError::forbidden());
     }
-    engine::analyze(&st.db,&st.catalog,id,"manual").await?;
-    repo::audit(&st.db,&st.cfg.app_user,"manual_scan",&format!("package={id}")).await?;
-    Ok(Redirect::to(&format!("/packages/{id}")))
+    {
+        let mut state=st.scan_status.write().map_err(|_|WebError::bad("Состояние сканера недоступно"))?;
+        if state.running {
+            return Ok((StatusCode::CONFLICT,Json(serde_json::json!({"error":"Сканирование Synology уже запущено"}))).into_response());
+        }
+        state.running=true;
+        state.message=format!("Запущено сканирование Synology для комплекта #{id}");
+        state.detail=String::new();
+    }
+    let worker=st.clone();
+    let actor_label=format!("bitrix:{}:{}",actor.member,actor.user_id);
+    tokio::spawn(async move {
+        let _guard=worker.scan_lock.lock().await;
+        let outcome=async {
+            let result=scanner::scan_once(&worker.db,&worker.cfg,&worker.catalog,&worker.nas).await?;
+            let run=engine::analyze(&worker.db,&worker.catalog,id,"manual").await?;
+            repo::audit(&worker.db,&actor_label,"manual_scan",&format!("package={id} run={run}")).await?;
+            Ok::<_,anyhow::Error>(result)
+        }.await;
+        match outcome {
+            Ok(result)=>{
+                worker.synology_connected.store(true,Ordering::Relaxed);
+                if let Ok(mut state)=worker.scan_status.write(){
+                    state.running=false;state.last_at=Some(chrono::Utc::now());
+                    state.message=format!("Сканирование завершено: {} новых/обновлённых документов",result.new_documents);
+                    state.detail=result.summary();
+                }
+            },
+            Err(err)=>{
+                error!(package_id=id,"Manual package Synology scan failed: {err:#}");
+                if let Ok(mut state)=worker.scan_status.write(){
+                    state.running=false;state.last_at=Some(chrono::Utc::now());
+                    state.message=format!("Ошибка сканирования: {err:#}");state.detail=String::new();
+                }
+            }
+        }
+    });
+    let ajax=headers.get("x-requested-with")
+        .and_then(|v|v.to_str().ok())==Some("XMLHttpRequest");
+    if ajax {
+        Ok((StatusCode::ACCEPTED,Json(serde_json::json!({"running":true,"message":"Сканирование запущено"}))).into_response())
+    } else {
+        Ok(Redirect::to(&format!("/packages/{id}#upload")).into_response())
+    }
+}
+
+async fn package_scan_status(
+    State(st):State<Shared>,
+    Extension(actor):Extension<access::Principal>,
+    Path(id):Path<i64>,
+)->WebResult<Json<serde_json::Value>>{
+    let _pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
+    if access::package_role(&st,&actor,id).await.is_none(){return Err(WebError::forbidden());}
+    let state=st.scan_status.read().map_err(|_|WebError::bad("Состояние сканера недоступно"))?;
+    Ok(Json(serde_json::json!({
+        "running":state.running,
+        "message":state.message.clone(),
+        "last_at":state.last_at.clone(),
+    })))
 }
 /// Upload up to 20 documents in one request. Files are staged locally first;
 /// originals on NAS are never modified. A single checklist position may have many attachments.

@@ -12,6 +12,7 @@ const JS_FILES: &[&str] = &[
     "src/web.rs", "src/portal.rs", "src/access.rs", "src/contractor.rs",
     "assets/bitrix-client.js", "assets/employee-picker.js",
     "assets/ui-version-watch.js", "assets/contractor-upload.js",
+    "assets/contractor-link-copy.js", "assets/package-actions.js",
 ];
 const CSS_FILES: &[&str] = &[
     "assets/portal.css", "assets/bitrix-client.html", "src/web.rs",
