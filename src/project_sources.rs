@@ -3,7 +3,7 @@
 //! Never classify these files as contractor ID or create a contractor delivery.
 use crate::{access::{self,Principal},contractor,docs,repo,web::{self,Shared,WebError}};
 use anyhow::{Context,Result};
-use axum::{body::Body,extract::{Multipart,Path,State},Extension,response::{Redirect,Response},http::header,Form};
+use axum::{body::Body,extract::{Multipart,Path,State},Extension,response::{IntoResponse,Redirect,Response},http::{header,HeaderMap,StatusCode},Form,Json};
 use serde::Deserialize;
 use sha2::{Digest,Sha256};
 use sqlx::{PgPool,Row};
@@ -38,12 +38,18 @@ pub async fn can_upload(st:&Shared,a:&Principal,project_id:i64)->bool {
       .bind(project_id).bind(&a.member).bind(a.user_id).fetch_one(&st.db).await.unwrap_or(false)
 }
 
-/// Renders a project-wide library on the project page. No extra service or iframe.
-pub async fn panel(st:&Shared,a:&Principal,project_id:i64)->Result<String,WebError> {
+struct SourceRows { html:String, total:usize, pending:usize, ready:usize, errors:usize }
+
+// Shared renderer for the initial HTML and live status endpoint, ensuring they
+// report exactly the same statuses and never mix in contractor submissions.
+async fn render_rows(st:&Shared,a:&Principal,project_id:i64)->Result<SourceRows,WebError> {
     let allowed=can_upload(st,a,project_id).await;
-    let sources=sqlx::query("SELECT id,category,filename,revision,bytes,note,uploaded_by,status,recognition_status,error_message,is_current,created_at FROM project_sources WHERE project_id=$1 ORDER BY category,filename,revision DESC LIMIT 250")
+    let sources=sqlx::query("SELECT id,category,filename,revision,bytes,note,uploaded_by,status,recognition_status,error_message,nas_path,is_current,created_at FROM project_sources WHERE project_id=$1 ORDER BY category,filename,revision DESC LIMIT 250")
         .bind(project_id).fetch_all(&st.db).await?;
     let mut rows=String::new();
+    let mut pending=0usize;
+    let mut ready=0usize;
+    let mut errors=0usize;
     for s in &sources {
         let id:i64=s.try_get("id")?;
         let category:String=s.try_get("category")?;
@@ -51,15 +57,39 @@ pub async fn panel(st:&Shared,a:&Principal,project_id:i64)->Result<String,WebErr
         let revision:i32=s.try_get("revision")?;
         let bytes:i64=s.try_get("bytes")?;
         let status:String=s.try_get("status")?;
+        let nas_path:Option<String>=s.try_get("nas_path")?;
         let recognition:String=s.try_get("recognition_status")?;
         let error:Option<String>=s.try_get("error_message")?;
         let current:bool=s.try_get("is_current")?;
         let note:String=s.try_get("note")?;
-        let state=match status.as_str(){"queued"=>"В очереди","processing"=>"Загрузка на NAS / распознавание","ready"=>"Готов","error"=>"Ошибка обработки",_=>"Неизвестно"};
+        let state=match status.as_str(){
+            "queued"=>{pending+=1;"В очереди"},
+            "processing"=>{pending+=1;if nas_path.is_some(){"Распознавание и подключение к видам работ"}else{"Сохранение на Synology"}},
+            "ready"=>{ready+=1;"Готов"},
+            "error"=>{errors+=1;"Ошибка обработки"},
+            _=>"Неизвестно"
+        };
         let retry=if allowed && status=="error" {format!("<form class='inline' method='post' action='/projects/{project_id}/sources/{id}/retry'>{}<button type='submit'>Повторить</button></form>",web::hidden(&st.csrf))}else{String::new()};
         rows.push_str(&format!("<tr><td><b>{}</b><br><small>{}</small></td><td>v{revision} {}</td><td>{} · {} МБ</td><td>{}<br><small>{}</small>{}</td><td><a href='/projects/{project_id}/sources/{id}/download'>Оригинал</a> {retry}</td></tr>",h(&filename),h(&note),if current{"(активная редакция)"}else{""},h(label(&category)),bytes/1_048_576,h(state),h(&recognition),error.map(|s|format!("<small class='warn'>{}</small>",h(&s))).unwrap_or_default()));
     }
     if rows.is_empty(){rows.push_str("<tr><td colspan='5'>Пока нет исходных документов. Добавьте КР, ПЗУ, ПОС, ППР или РД.</td></tr>");}
+    Ok(SourceRows{html:rows,total:sources.len(),pending,ready,errors})
+}
+
+/// JSON status endpoint for the actual refresh button and automatic polling.
+/// All access is checked by the normal Bitrix24 middleware and here as well.
+pub async fn status(State(st):State<Shared>,Extension(actor):Extension<Principal>,Path(project_id):Path<i64>) -> Result<Json<serde_json::Value>,WebError> {
+    if !access::project_visible(&st,&actor,project_id).await{return Err(WebError::forbidden());}
+    let view=render_rows(&st,&actor,project_id).await?;
+    Ok(Json(serde_json::json!({"rows_html":view.html,"total":view.total,
+        "pending":view.pending,"ready":view.ready,"errors":view.errors})))
+}
+
+/// Renders a project-wide library on the project page. No extra service or iframe.
+pub async fn panel(st:&Shared,a:&Principal,project_id:i64)->Result<String,WebError> {
+    let allowed=can_upload(st,a,project_id).await;
+    let view=render_rows(st,a,project_id).await?;
+    let rows=&view.html;
     let form=if allowed {
         let options=CATEGORIES.iter().map(|(code,title)|format!("<option value='{code}'>{}</option>",h(title))).collect::<String>();
         format!(r#"<form id='project-sources-form' method='post' action='/projects/{project_id}/sources/upload' enctype='multipart/form-data' class='project-sources-form'>
@@ -73,14 +103,14 @@ pub async fn panel(st:&Shared,a:&Principal,project_id:i64)->Result<String,WebErr
     }else{"<p class='muted'>Загружать проектные источники могут администратор ЖК и назначенные инженеры ПТО.</p>".to_owned()};
     let status_script=include_str!("../assets/project-sources.js");
     Ok(format!(r#"<section class='white-panel' id='project-sources' style='margin:22px 0;padding:22px;border-radius:14px'>
-      <div class='panel-heading'><h2>Проектная документация ЖК</h2><span class='pill'>{} редакций</span></div>
+      <div class='panel-heading'><h2>Проектная документация ЖК</h2><span class='pill' id='project-sources-count'>{} редакций</span></div>
       <p>Загрузите КР, ПЗУ, ПОС, ППР, РД и НТД <b>один раз на весь проект</b>. Файлы версионируются и подключаются как справочные источники ко всем созданным видам работ. Они не являются ИД подрядчика и не меняют номера поставок.</p>
       {form}
       <details open><summary><b>Файлы проекта и история редакций</b></summary>
-      <table><thead><tr><th>Файл</th><th>Редакция</th><th>Раздел / размер</th><th>Состояние</th><th>Действия</th></tr></thead><tbody>{rows}</tbody></table></details>
+      <table><thead><tr><th>Файл</th><th>Редакция</th><th>Раздел / размер</th><th>Состояние</th><th>Действия</th></tr></thead><tbody id='project-sources-rows'>{rows}</tbody></table></details>
       <small class='muted'>Если файл с тем же именем изменился, создаётся новая редакция. Неактуальные редакции остаются в истории. OCR выполняется в фоне.</small>
-      <p><a class='buttonlink' href='/projects/{project_id}#project-sources'>Обновить статусы обработки</a></p>
-    </section><script>{status_script}</script>"#,sources.len()))
+      <p><button type='button' class='buttonlink' id='project-sources-refresh' data-status-url='/projects/{project_id}/sources/status'>Обновить статусы обработки</button> <small id='project-sources-refresh-note' role='status' aria-live='polite'></small></p>
+    </section><script>{status_script}</script>"#,view.total))
 }
 
 fn sha256(path:&FsPath)->Result<String>{
@@ -89,7 +119,7 @@ fn sha256(path:&FsPath)->Result<String>{
     Ok(hex::encode(hash.finalize()))
 }
 
-pub async fn upload(State(st):State<Shared>,Extension(actor):Extension<Principal>,Path(project_id):Path<i64>,mut multipart:Multipart)->Result<Redirect,WebError> {
+pub async fn upload(State(st):State<Shared>,Extension(actor):Extension<Principal>,Path(project_id):Path<i64>,headers:HeaderMap,mut multipart:Multipart)->Result<Response,WebError> {
     if !can_upload(&st,&actor,project_id).await{return Err(WebError::forbidden());}
     let project=sqlx::query_scalar::<_,String>("SELECT name FROM projects WHERE id=$1")
         .bind(project_id).fetch_optional(&st.db).await?.ok_or_else(WebError::not_found)?;
@@ -125,6 +155,7 @@ pub async fn upload(State(st):State<Shared>,Extension(actor):Extension<Principal
     if !CATEGORIES.iter().any(|(code,_)|*code==category) {return Err(WebError::bad("Выберите раздел проектной документации"));}
     if note.len()>500 || note.chars().any(char::is_control){return Err(WebError::bad("Недопустимое примечание"));}
     if files.is_empty(){return Err(WebError::bad("Выберите проектные документы"));}
+    let received=files.len();
     let mut spawned=Vec::new();
     for (tmp,filename) in files {
         let digest=sha256(tmp.path()).map_err(anyhow::Error::from)?;
@@ -156,8 +187,14 @@ pub async fn upload(State(st):State<Shared>,Extension(actor):Extension<Principal
         spawned.push(source_id);
     }
     repo::audit(&st.db,&who(&actor),"project_source_upload",&format!("project={project_id} files={} name={project}",spawned.len())).await?;
+    let queued=spawned.len();
     for source_id in spawned {let worker=st.clone();tokio::spawn(async move{process_source(&worker,source_id).await;});}
-    Ok(Redirect::to(&format!("/projects/{project_id}#project-sources")))
+    // Do not follow a 303 to re-render the *whole* project page inside XHR.
+    // That extra response previously kept the UI at "Регистрация файлов...".
+    if headers.get("x-requested-with").and_then(|v|v.to_str().ok())==Some("XMLHttpRequest") {
+        return Ok((StatusCode::ACCEPTED,Json(serde_json::json!({"queued":queued,"unchanged":received-queued}))).into_response());
+    }
+    Ok(Redirect::to(&format!("/projects/{project_id}#project-sources")).into_response())
 }
 
 async fn process_source(st:&Shared,id:i64){
@@ -201,6 +238,9 @@ async fn process_source_inner(st:&Shared,id:i64)->Result<()> {
     // confidential project drawings with an optional cloud OCR provider.
     let mut local_cfg=st.cfg.clone();local_cfg.ocr_mode="local".into();local_cfg.vibe_ocr_enabled=false;
     let parsed=docs::extract_with_progress(FsPath::new(&archived),local_cfg.ocr_max_pages,&local_cfg,None).await;
+    if parsed.status.starts_with("error") {
+        anyhow::bail!("Ошибка распознавания проектного документа {filename}: {}",parsed.status);
+    }
     let mut tx=st.db.begin().await?;
     sqlx::query("UPDATE project_sources SET is_current=false WHERE project_id=$1 AND category=$2 AND filename=$3 AND id<>$4 AND is_current")
         .bind(project_id).bind(&category).bind(&filename).bind(id).execute(&mut *tx).await?;

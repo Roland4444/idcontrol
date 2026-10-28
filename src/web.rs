@@ -206,6 +206,7 @@ pub fn router(state:Shared)->Router{
         .route("/assets/projects/{filename}",get(portal::project_image))
         .route("/projects/{id}",get(portal::project))
         .route("/projects/{id}/sources/upload",post(project_sources::upload))
+        .route("/projects/{id}/sources/status",get(project_sources::status))
         .route("/projects/{id}/sources/{source_id}/retry",post(project_sources::retry))
         .route("/projects/{id}/sources/{source_id}/download",get(project_sources::download))
         .route("/projects/{id}/works",post(portal::create_work))
