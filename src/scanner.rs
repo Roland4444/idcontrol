@@ -73,9 +73,31 @@ pub async fn ingest(db:&PgPool,cfg:&Config,catalog:&Catalog,root:&Path,path:&Pat
     let work=catalog.work_types.iter().find(|w|crate::contractor::nas_work_folder(&w.name)==work_folder)
         .map(|w|w.name.as_str()).unwrap_or(&work_folder);
     let pr=repo::get_or_create_project(db,&project).await?;
-    let mut pkg=repo::get_or_create_package(db,pr.id,work).await?;
+    let pkg=repo::get_or_create_package(db,pr.id,work).await?;
+    ingest_for_package(db,cfg,catalog,pkg,kind,relative,path,origin).await
+}
+
+/// Files delivered by a contractor have an authoritative package ID from the
+/// one-time link. Never re-resolve this ID from folder names or NAS mappings.
+pub async fn ingest_published(
+    db:&PgPool,cfg:&Config,catalog:&Catalog,package_id:i64,
+    path:&Path,db_relative:&str
+)->Result<Option<i64>> {
+    let segments:Vec<&str>=db_relative.split('/').collect();
+    if segments.len()<3 || segments[0]!="ИД" || !crate::contractor::is_published_delivery_folder(segments[1]) ||
+        segments.iter().any(|name|repo::validate_segment(name).is_err()) {
+        bail!("Invalid published delivery relative path");
+    }
+    let pkg=repo::package(db,package_id).await?;
+    ingest_for_package(db,cfg,catalog,pkg,"ID".into(),db_relative.to_owned(),path,"synology").await
+}
+
+async fn ingest_for_package(
+    db:&PgPool,cfg:&Config,catalog:&Catalog,mut pkg:crate::models::Package,
+    kind:String,relative:String,path:&Path,origin:&str
+)->Result<Option<i64>> {
     if pkg.catalog_name.is_none() {
-        if let Some(w)=catalog.closest(&work){
+        if let Some(w)=catalog.closest(&pkg.name){
             sqlx::query("UPDATE packages SET catalog_name=$1 WHERE id=$2 AND catalog_name IS NULL")
                 .bind(&w.name).bind(pkg.id).execute(db).await?;
             pkg.catalog_name=Some(w.name.clone());
@@ -93,7 +115,7 @@ pub async fn ingest(db:&PgPool,cfg:&Config,catalog:&Catalog,root:&Path,path:&Pat
     }
     let version=latest.as_ref().map_or(1,|d|d.version+1);
     let suffix=path.extension().and_then(|e|e.to_str()).unwrap_or("bin").to_lowercase();
-    let archive=cfg.data_root.join("originals").join(pr.id.to_string()).join(pkg.id.to_string())
+    let archive=cfg.data_root.join("originals").join(pkg.project_id.to_string()).join(pkg.id.to_string())
         .join(&digest[..2]).join(format!("{digest}.{suffix}"));
     let src=path.to_owned();let dst=archive.clone();let digest_again=digest.clone();
     tokio::task::spawn_blocking(move||->Result<()>{

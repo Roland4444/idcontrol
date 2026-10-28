@@ -1,6 +1,6 @@
 //! Stage 2.3. Independent, one-use contractor links and safe DSM uploads.
 //! No Bitrix cookie is required on public /contractor/:token routes.
-use crate::{access::{self,Principal},engine,portal,repo,synology::{SynologyClient,validate_resdata_path},web::{self,Shared,WebError}};
+use crate::{access::{self,Principal},engine,portal,repo,scanner,synology::{SynologyClient,validate_resdata_path},web::{self,Shared,WebError}};
 use anyhow::{bail,Context,Result};
 use encoding_rs::{IBM866, WINDOWS_1251};
 use axum::{extract::{State,Path,Query,Multipart},Extension,Form,Json,
@@ -20,6 +20,41 @@ fn html_attribute(s:&str)->String{html_escape::encode_double_quoted_attribute(s)
 /// The catalogue includes work names containing '/': never use these verbatim
 /// as NAS path components. A stable human-readable folder name is sufficient.
 pub fn nas_work_folder(name:&str)->String{name.replace('/'," - ")}
+
+/// Human-readable DSM delivery folder. `submission_id` comes from the global
+/// BIGSERIAL sequence in PostgreSQL; it is not a per-package revision and is
+/// never derived from a random hash. The date is the submission date in
+/// Astrakhan local time (UTC+04:00), not the date the background worker ends.
+fn delivery_folder_name(work:&str, submission_id:i64, uploaded_at:chrono::DateTime<chrono::Utc>)->Result<String>{
+    if submission_id<=0 {bail!("Invalid global delivery number");}
+    // Names in the work catalogue may contain slashes or other characters
+    // forbidden by DSM/Windows. Limit the label so the full segment fits NAS.
+    let mut label=String::new();
+    for ch in work.chars().take(60) {
+        let safe=if ch.is_alphanumeric() || matches!(ch,' ' | '-' | '_' | '(' | ')' | '.') {ch} else {'-'};
+        label.push(safe);
+    }
+    let label=label.trim_matches(|c:char|c.is_whitespace() || c=='-' || c=='.');
+    if label.is_empty(){bail!("Work title cannot be used as a delivery folder");}
+    let tz=chrono::FixedOffset::east_opt(4*3600).context("Invalid delivery timezone")?;
+    let date=uploaded_at.with_timezone(&tz).format("%d.%m.%y");
+    let folder=format!("{label}-версия-{submission_id}-{date}");
+    repo::validate_segment(&folder)?;
+    Ok(folder)
+}
+
+/// Legacy names remain valid for old submissions. New names are validated
+/// separately so existing imports/review links keep working after upgrade.
+pub fn is_published_delivery_folder(name:&str)->bool {
+    if repo::validate_segment(name).is_err(){return false;}
+    if name.starts_with("Поставка-"){return true;}
+    let Some((prefix,date))=name.rsplit_once('-') else {return false;};
+    let Some((title,number))=prefix.rsplit_once("-версия-") else {return false;};
+    if title.is_empty() || number.is_empty() || !number.as_bytes().iter().all(u8::is_ascii_digit) ||
+       number.parse::<i64>().map(|n|n<=0).unwrap_or(true) {return false;}
+    let Ok(parsed)=chrono::NaiveDate::parse_from_str(date,"%d.%m.%y") else {return false;};
+    parsed.format("%d.%m.%y").to_string()==date
+}
 
 fn digest(data:&[u8])->String{hex::encode(Sha256::digest(data))}
 fn actor_name(actor:&Principal)->String{format!("bitrix:{}:{}",actor.member,actor.user_id)}
@@ -467,12 +502,120 @@ async fn progress_reporter(db:sqlx::PgPool,submission:i64,p:Arc<ProgressCounters
             1=>("extracting",(fraction*25.0).floor() as i16),
             2=>("synology",25+(fraction*70.0).floor() as i16),
             3=>("publishing",96),
+            4=>("importing",96+(fraction*3.0).floor() as i16),
             _=>("publishing",96),
         };
         let _=sqlx::query("UPDATE contractor_submissions SET processing_stage=$2,processing_percent=$3,processed_bytes=$4,processing_total_bytes=$5,progress_updated_at=now() WHERE id=$1 AND status='uploading'")
             .bind(submission).bind(label).bind(percent).bind(bytes.min(i64::MAX as u64) as i64)
             .bind(total.min(i64::MAX as u64) as i64).execute(&db).await;
     }
+}
+
+// Register a published contractor revision immediately. We already have the
+// unpacked originals locally, so waiting for the 45-second NAS scanner would
+// leave an apparently ready submission with zero documents in PostgreSQL.
+// The same routine is used to recover older, already-published revisions.
+async fn register_delivery_files(
+    st:&Shared,package_id:i64,delivery_folder:&str,
+    files:&[SafeFile],progress:Option<&ProgressCounters>
+)->Result<()> {
+    // The one-use link is the authoritative binding to this exact package.
+    repo::validate_segment(delivery_folder)?;
+    // Serialise delivery indexing with the periodic scanner to avoid version
+    // races on the same (package_id, relative_path).
+    let _guard=st.scan_lock.lock().await;
+    for (idx,item) in files.iter().enumerate() {
+        let (relative,_)=decode_zip_path(item.relative.as_bytes())?;
+        let expected=format!("ИД/{delivery_folder}/{relative}");
+        scanner::ingest_published(
+            &st.db,&st.cfg,&st.catalog,package_id,&item.local,&expected
+        ).await?;
+        // ingest_published() returns None for an already-indexed document.
+        // Ensure the active row exists; otherwise the check must not start.
+        let exists:i64=sqlx::query_scalar(
+            "SELECT count(*) FROM documents WHERE package_id=$1 AND relative_path=$2 AND is_present=true"
+        ).bind(package_id).bind(&expected).fetch_one(&st.db).await?;
+        if exists==0 {bail!("File was not registered in documents: {expected}");}
+        if let Some(progress)=progress {
+            progress.done.store((idx+1) as u64,Ordering::Relaxed);
+        }
+    }
+    Ok(())
+}
+
+fn file_sha256(path:&FsPath)->Result<String> {
+    let mut source=File::open(path)?;
+    let mut hasher=Sha256::new();
+    let mut buf=[0u8;64*1024];
+    loop {
+        let n=source.read(&mut buf)?;
+        if n==0 {break;}
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+// For revisions published by previous releases, recover documents using the
+// NAS path frozen on the one-use link; never use a newly selected /ResData root.
+async fn import_existing_delivery(
+    st:&Shared,package_id:i64,submission_id:i64,nas_path:&str
+)->Result<()> {
+    let row=sqlx::query(
+        "SELECT l.nas_root,s.manifest_json,p.name AS project,k.name AS work \
+         FROM contractor_submissions s \
+         JOIN contractor_upload_links l ON l.id=s.link_id \
+         JOIN packages k ON k.id=s.package_id \
+         JOIN projects p ON p.id=k.project_id \
+         WHERE s.id=$1 AND s.package_id=$2"
+    ).bind(submission_id).bind(package_id).fetch_one(&st.db).await?;
+    let root:String=row.try_get("nas_root")?;
+    let project:String=row.try_get("project")?;
+    let work:String=row.try_get("work")?;
+    let manifest:Value=row.try_get("manifest_json")?;
+    let entries=manifest.as_array().context("Missing submission manifest")?;
+    if entries.is_empty(){bail!("Delivery manifest contains no files");}
+    validate_resdata_path(&root)?;
+    let folder=nas_path.rsplit('/').next().context("Missing published delivery folder")?;
+    repo::validate_segment(folder)?;
+    let expected=format!("{root}/{project}/{}/ИД/{folder}",nas_work_folder(&work));
+    if nas_path!=expected {bail!("Published submission path does not match the original upload link");}
+    let mut cfg=st.cfg.clone();
+    cfg.synology_root=root;
+    let nas=SynologyClient::new(&cfg)?;
+    let session=nas.connect().await?;
+    let temporary=tempfile::tempdir_in(&st.cfg.temp_root)?;
+    let mut files=Vec::with_capacity(entries.len());
+    let result=async {
+        for entry in entries {
+            let name=entry.get("path").and_then(Value::as_str).context("Manifest file path missing")?;
+            let (_,relative)=decode_zip_path(name.as_bytes())?;
+            let filename=relative.to_str().context("Invalid manifest path")?;
+            let size=entry.get("size").and_then(Value::as_u64).context("Manifest file size missing")?;
+            let checksum=entry.get("sha256").and_then(Value::as_str).context("Manifest checksum missing")?;
+            if size>cfg.max_file_mb*1024*1024 {bail!("Manifest file exceeds MAX_FILE_MB");}
+            if checksum.len()!=64 || !checksum.as_bytes().iter().all(|b|b.is_ascii_hexdigit()) {
+                bail!("Invalid manifest checksum");
+            }
+            let local=temporary.path().join(&relative);
+            fs::create_dir_all(local.parent().context("Bad manifest path")?)?;
+            session.download_to(
+                &format!("{nas_path}/{filename}"),&local,cfg.max_file_mb*1024*1024
+            ).await?;
+            if fs::metadata(&local)?.len()!=size || file_sha256(&local)?!=checksum {
+                bail!("NAS file does not match original delivery manifest: {filename}");
+            }
+            files.push(SafeFile{
+                relative:filename.to_owned(),local,
+                sha256:checksum.to_owned(),size,
+            });
+        }
+        Ok::<(),anyhow::Error>(())
+    }.await;
+    session.logout().await;
+    result?;
+    register_delivery_files(st,package_id,folder,&files,None).await?;
+    tracing::info!(submission_id,package_id,files=files.len(),"Indexed an existing contractor delivery from Synology");
+    Ok(())
 }
 
 async fn process_delivery(
@@ -494,14 +637,40 @@ async fn process_delivery(
                 unpack_progress.done.store(done,Ordering::Relaxed);
             })
         }).await??;
+        let submission_row=sqlx::query(
+            "SELECT uploaded_at,archive_filename FROM contractor_submissions WHERE id=$1 AND package_id=$2"
+        ).bind(submission).bind(package_id).fetch_one(&st.db).await?;
+        let uploaded_at:chrono::DateTime<chrono::Utc>=submission_row.try_get("uploaded_at")?;
+        let archive_filename:String=submission_row.try_get("archive_filename")?;
+        // One global sequence across all projects and work types. Keep the
+        // package-local `revision` for receipts and historical comparisons.
+        let published_name=delivery_folder_name(&work,submission,uploaded_at)?;
+        let manifest:Vec<Value>=files.iter().map(|f|json!({"path":f.relative,"sha256":f.sha256,"size":f.size})).collect();
+        // The archive checksum no longer appears in the directory name.
+        // Save it inside the published delivery with all per-file hashes.
+        let metadata_path=staging.path().join("delivery-info.json");
+        let metadata=serde_json::to_vec_pretty(&json!({
+            "schema_version":1,
+            "folder":published_name,
+            "global_version":submission,
+            "package_revision":revision,
+            "package_id":package_id,
+            "project":project,
+            "work_type":work,
+            "uploaded_at":uploaded_at.to_rfc3339(),
+            "archive_filename":archive_filename,
+            "archive_sha256":archive_hash,
+            "files":manifest
+        }))?;
+        fs::write(&metadata_path,&metadata)?;
         let archive_len=fs::metadata(&archive_path)?.len();
-        let total_sync=files.iter().map(|f|f.size).sum::<u64>().saturating_add(archive_len);
+        let total_sync=files.iter().map(|f|f.size).sum::<u64>()
+            .saturating_add(archive_len).saturating_add(metadata.len() as u64);
         p.phase(2,total_sync);
         let mut cfg=st.cfg.clone(); cfg.synology_root=root.clone();
         let nas=SynologyClient::new(&cfg)?;
         let session=nas.connect().await?;
         let receipt=uuid::Uuid::new_v4().simple().to_string();
-        let published_name=format!("Поставка-{revision:05}-{}",&receipt[..12]);
         let base=format!("{root}/{project}/{}/ИД",nas_work_folder(&work));
         let stage_path=format!("{base}/.incoming-{receipt}");
         let final_path=format!("{base}/{published_name}");
@@ -519,16 +688,22 @@ async fn process_delivery(
                 session.upload_file_with_progress(&parent,name,&item.local,Some(on_bytes.clone())).await?;
             }
             session.upload_file_with_progress(&stage_path,"original-package.zip",&archive_path,Some(on_bytes.clone())).await?;
+            session.upload_file_with_progress(&stage_path,"delivery-info.json",&metadata_path,Some(on_bytes.clone())).await?;
             p.stage.store(3,Ordering::Release);
             session.publish_directory(&stage_path,&published_name).await?;
             Ok::<_,anyhow::Error>(())
         }.await;
         session.logout().await;
         operation?;
-        let manifest:Vec<Value>=files.iter().map(|f|json!({"path":f.relative,"sha256":f.sha256,"size":f.size})).collect();
-        sqlx::query("UPDATE contractor_submissions SET manifest_json=$2 WHERE id=$1")
-            .bind(submission).bind(json!(manifest)).execute(&st.db).await?;
-        tracing::info!("Contractor delivery {submission} published: sha256={archive_hash} package={package_id}");
+        // Persist NAS location before OCR/indexing: a subsequent review or retry
+        // can recover published files without asking the contractor to re-upload.
+        sqlx::query("UPDATE contractor_submissions SET manifest_json=$2,nas_path=$3 WHERE id=$1")
+            .bind(submission).bind(json!(manifest)).bind(&final_path).execute(&st.db).await?;
+        p.phase(4,files.len() as u64);
+        register_delivery_files(
+            &st,package_id,&published_name,&files,Some(&p)
+        ).await?;
+        tracing::info!("Contractor delivery {submission} published and indexed: sha256={archive_hash} package={package_id}");
         Ok::<_,anyhow::Error>(final_path)
     }.await;
     drop(reporter);
@@ -554,32 +729,59 @@ pub async fn review_submission(State(st):State<Shared>,Extension(actor):Extensio
     let info=sqlx::query("SELECT nas_path,status FROM contractor_submissions WHERE id=$1 AND package_id=$2")
         .bind(submission_id).bind(package_id).fetch_optional(&st.db).await?.ok_or_else(WebError::not_found)?;
     let status:String=info.try_get("status")?;
-    if status!="pending_review" {return Err(WebError::bad("Этот комплект уже обработан"));}
+    if status!="pending_review" && !(status=="failed" && form.action=="check" && info.try_get::<Option<String>,_>("nas_path")?.is_some()) {
+        return Err(WebError::bad("Этот комплект уже обработан"));
+    }
     if form.action=="rework"{
         sqlx::query("UPDATE contractor_submissions SET status='rework',checked_by=$2,reviewed_at=now() WHERE id=$1 AND status='pending_review'")
             .bind(submission_id).bind(actor_name(&actor)).execute(&st.db).await?;
     }else if form.action=="check"{
-        // Prevent a false 'checked' result before the scanner imports new files.
-        let path:String=info.try_get::<Option<String>,_>("nas_path")?.context("NAS destination is missing")?;
-        let prefix=path.rsplit('/').next().unwrap_or("");
-        let count:i64=sqlx::query_scalar("SELECT count(*) FROM documents WHERE package_id=$1 AND is_present=true AND relative_path LIKE $2 ESCAPE '\\'")
-            .bind(package_id).bind(format!("ИД/{}/%",prefix.replace('\\',"\\\\").replace('%',"\\%").replace('_',"\\_"))).fetch_one(&st.db).await?;
-        if count==0 {return Err(WebError::bad("Документы ещё не импортированы сканером Synology. Повторите проверку после сканирования"));}
-        let updated=sqlx::query("UPDATE contractor_submissions SET status='checking' WHERE id=$1 AND status='pending_review'")
-            .bind(submission_id).execute(&st.db).await?;
-        if updated.rows_affected()!=1{return Err(WebError::bad("Поставка уже обрабатывается"));}
-        let delivery_prefix=format!("ИД/{prefix}/");
-        match engine::analyze_delivery(&st.db,&st.catalog,package_id,"contractor_review",&delivery_prefix).await{
-            Ok(run)=>{
-                sqlx::query("UPDATE contractor_submissions SET status='checked',check_run_id=$2,checked_by=$3,reviewed_at=now() WHERE id=$1")
-                    .bind(submission_id).bind(run).bind(actor_name(&actor)).execute(&st.db).await?;
-            },
-            Err(err)=>{
-                sqlx::query("UPDATE contractor_submissions SET status='pending_review',error_message=$2 WHERE id=$1")
-                    .bind(submission_id).bind(err.to_string().chars().take(500).collect::<String>()).execute(&st.db).await?;
-                return Err(WebError::from(err));
+        let path:String=info.try_get::<Option<String>,_>("nas_path")?
+            .context("NAS destination is missing")?;
+        let previous_status=status.clone();
+        let updated=sqlx::query(
+            "UPDATE contractor_submissions SET status='checking',error_message=NULL              WHERE id=$1 AND package_id=$2 AND status=$3"
+        ).bind(submission_id).bind(package_id).bind(&previous_status)
+         .execute(&st.db).await?;
+        if updated.rows_affected()!=1 {return Err(WebError::bad("Поставка уже обрабатывается"));}
+        let worker_st=Arc::clone(&st);
+        let checked_by=actor_name(&actor);
+        tokio::spawn(async move {
+            let operation=async {
+                let prefix=path.rsplit('/').next().context("Missing NAS delivery folder")?;
+                repo::validate_segment(prefix)?;
+                let relative_prefix=format!("ИД/{prefix}/");
+                let row=sqlx::query(
+                    "SELECT manifest_json FROM contractor_submissions WHERE id=$1 AND package_id=$2"
+                ).bind(submission_id).bind(package_id).fetch_one(&worker_st.db).await?;
+                let manifest:Value=row.try_get("manifest_json")?;
+                let expected=manifest.as_array().context("Missing delivery manifest")?.len() as i64;
+                if expected==0 {bail!("Delivery manifest contains no files");}
+                let present:i64=sqlx::query_scalar(
+                    "SELECT count(DISTINCT relative_path) FROM documents                      WHERE package_id=$1 AND source_kind='ID' AND is_present=true                      AND relative_path LIKE $2 ESCAPE '\\'"
+                ).bind(package_id).bind(format!(
+                    "{}%",relative_prefix.replace('\\',"\\\\").replace('%',"\\%").replace('_',"\\_")
+                )).fetch_one(&worker_st.db).await?;
+                if present<expected {
+                    import_existing_delivery(&worker_st,package_id,submission_id,&path).await?;
+                }
+                let run=engine::analyze_delivery(
+                    &worker_st.db,&worker_st.catalog,package_id,"contractor_review",&relative_prefix
+                ).await?;
+                sqlx::query(
+                    "UPDATE contractor_submissions SET status='checked',check_run_id=$2,checked_by=$3,reviewed_at=now()                      WHERE id=$1 AND status='checking'"
+                ).bind(submission_id).bind(run).bind(&checked_by)
+                 .execute(&worker_st.db).await?;
+                Ok::<(),anyhow::Error>(())
+            }.await;
+            if let Err(err)=operation {
+                tracing::error!(submission_id,"Contractor review failed: {err:#}");
+                let message=err.to_string().chars().take(500).collect::<String>();
+                let _=sqlx::query(
+                    "UPDATE contractor_submissions SET status='pending_review',error_message=$2                      WHERE id=$1 AND status='checking'"
+                ).bind(submission_id).bind(message).execute(&worker_st.db).await;
             }
-        }
+        });
     }else{return Err(WebError::bad("Неизвестное решение"));}
     repo::audit(&st.db,&actor_name(&actor),"contractor_review",&format!("submission={submission_id} action={}",form.action)).await?;
     Ok(axum::response::Redirect::to(&format!("/packages/{package_id}#contractor")))
@@ -607,13 +809,21 @@ pub async fn package_controls(st:&Shared,actor:&Principal,package_id:i64)->Resul
         let receipt_id:i64=row.try_get("id")?;
         let uploaded:String=row.try_get("uploaded_at")?;
         let sha:String=row.try_get("archive_sha256")?;
+        let delivery_nas_path:Option<String>=row.try_get("nas_path")?;
         let error_message:Option<String>=row.try_get("error_message")?;
         let run:Option<i64>=row.try_get("check_run_id")?;
         let (label,actions)=match status.as_str() {
             "pending_review"=>("Ожидает проверки",format!("<form method='post' action='/packages/{package_id}/submissions/{receipt_id}/review' class='inline'>{}<input type='hidden' name='action' value='check'><button>Запустить проверку</button></form> <form method='post' action='/packages/{package_id}/submissions/{receipt_id}/review' class='inline'>{}<input type='hidden' name='action' value='rework'><button class='secondary'>На доработку</button></form>",web::hidden(&st.csrf),web::hidden(&st.csrf))),
             "checked"=>("Проверено",run.map(|r|format!("<a href='/packages/{package_id}?run_id={r}#remarks'>Результаты проверки #{r}</a>")).unwrap_or_default()),
             "rework"=>("Возвращено на доработку",String::new()),
-            "failed"=>("Ошибка доставки",String::new()),
+            "checking"=>("Импорт документов и проверка",format!("<a href='/packages/{package_id}#contractor'>Обновить состояние</a>")),
+            "failed"=>{
+                let nas_path:Option<String>=row.try_get("nas_path")?;
+                let action=if nas_path.is_some() {
+                    format!("<form method='post' action='/packages/{package_id}/submissions/{receipt_id}/review' class='inline'>{}<input type='hidden' name='action' value='check'><button>Повторить импорт и проверку</button></form>",web::hidden(&st.csrf))
+                }else {String::new()};
+                ("Ошибка доставки / обработки",action)
+            },
             "uploading"=>("Приём / запись на Synology",String::new()),
             _=>("Проверяется",String::new()),
         };
@@ -621,12 +831,15 @@ pub async fn package_controls(st:&Shared,actor:&Principal,package_id:i64)->Resul
         let percent:i16=row.try_get("processing_percent")?;
         let progress=if status=="uploading" {format!("<small style='display:block'>{} — {} %</small><progress max='100' value='{}' style='width:160px'></progress>",h(&stage),percent,percent)} else {String::new()};
         // Show the stored cause in the employee interface, escaped as HTML.
-        let failure=if status=="failed" {
+        let failure=if status=="failed" || status=="pending_review" {
             error_message.as_deref().filter(|msg|!msg.trim().is_empty())
                 .map(|msg|format!("<small style='display:block;max-width:320px;overflow-wrap:anywhere'>Причина: {}</small>",h(msg)))
                 .unwrap_or_default()
         } else {String::new()};
-        html.push_str(&format!("<tr><td><b>ИД-{package_id}-{revision:05}</b><small style='display:block'>SHA-256: {}…</small></td><td>{}</td><td>{}{}{}</td><td>{}</td></tr>",h(&sha[..12]),h(&uploaded),label,progress,failure,actions));
+        let folder_label=delivery_nas_path.as_deref().and_then(|path|path.rsplit('/').next())
+            .map(|name|format!("<small style='display:block'>Папка: {}</small>",h(name)))
+            .unwrap_or_default();
+        html.push_str(&format!("<tr><td><b>ИД-{package_id}-{revision:05}</b>{folder_label}<small style='display:block'>SHA-256: {}…</small></td><td>{}</td><td>{}{}{}</td><td>{}</td></tr>",h(&sha[..12]),h(&uploaded),label,progress,failure,actions));
     }
     html.push_str("</tbody></table></section>");
     Ok(html)
@@ -650,6 +863,23 @@ pub async fn package_controls(st:&Shared,actor:&Principal,package_id:i64)->Resul
     }
     #[test]fn safe_work_folder(){
         assert_eq!(nas_work_folder("Внутренние сети электроснабжения/электроосвещения"),"Внутренние сети электроснабжения - электроосвещения");
+    }
+    #[test]fn new_delivery_folder_uses_global_number_and_upload_date(){
+        use chrono::{TimeZone,Utc};
+        let date=Utc.with_ymd_and_hms(2026,10,26,21,40,0).single().unwrap();
+        let folder=delivery_folder_name("ЗУ",123,date).unwrap();
+        assert_eq!(folder,"ЗУ-версия-123-27.10.26");
+        assert!(is_published_delivery_folder(&folder));
+        assert!(is_published_delivery_folder("Поставка-00001-6cd3ad7f7e60"));
+        assert!(!is_published_delivery_folder("ЗУ-версия-x-26.10.26"));
+        assert!(!is_published_delivery_folder("ЗУ-версия-1-31.02.26"));
+    }
+    #[test]fn folder_label_escapes_slashes_and_rejects_empty(){
+        use chrono::{TimeZone,Utc};
+        let date=Utc.with_ymd_and_hms(2026,10,26,10,0,0).single().unwrap();
+        let folder=delivery_folder_name("Сети связи/сигнализация",4,date).unwrap();
+        assert_eq!(folder,"Сети связи-сигнализация-версия-4-26.10.26");
+        assert!(delivery_folder_name("/",4,date).is_err());
     }
     #[test]fn cp866_legacy_zip_name_decodes_to_cyrillic(){
         let raw=b"\x88\x84/1_\x91\xa2\xa0\xa8/1_\x92\xa8\xe2\xe3\xab.doc";
