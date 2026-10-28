@@ -120,7 +120,11 @@ async fn may_access(st:&Shared,a:&Principal,path:&str,method:&Method,query:Optio
     if path=="/projects" {return false;} // Projects are fixed; no manual names.
     if let Some(project)=param_id(path,"/projects/") {
         let admin_action=path.ends_with("/works") || path.ends_with("/works/all") || path.ends_with("/assign");
-        return if admin_action {is_manager(st,a,project).await} else if method==Method::GET {project_visible(st,a,project).await} else {false};
+        let sources_action=path.contains("/sources/") && (path.ends_with("/upload") || path.ends_with("/retry"));
+        return if admin_action {is_manager(st,a,project).await}
+            else if sources_action && *method==Method::POST {crate::project_sources::can_upload(st,a,project).await}
+            else if *method==Method::GET {project_visible(st,a,project).await}
+            else {false};
     }
     if let Some(package)=param_id(path,"/packages/"){
         return match package_role(st,a,package).await {

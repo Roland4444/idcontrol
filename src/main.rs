@@ -1,6 +1,7 @@
 mod ai;
 mod access;
 mod portal;
+mod project_sources;
 mod block1;
 mod catalog;
 mod classification;
@@ -102,6 +103,10 @@ async fn main()->Result<()> {
     // consumed public token; preserve the failed receipt for the administrator.
     sqlx::query("UPDATE contractor_submissions SET status='failed',processing_stage='failed',error_message='Server restarted during delivery; issue a new link' WHERE status='uploading'")
         .execute(&db).await?;
+    // An interrupted check is retryable because its NAS original and manifest
+    // remain available; never strand a delivery permanently in 'checking'.
+    sqlx::query("UPDATE contractor_submissions SET status='pending_review',error_message='Проверка была прервана перезапуском сервиса. Запустите её повторно.' WHERE status='checking'")
+        .execute(&db).await?;
     ocr_jobs::recover_interrupted(&db).await?;
     classification::recover_interrupted(&db).await?;
     // Resume jobs interrupted by an application restart.
@@ -113,6 +118,7 @@ async fn main()->Result<()> {
     let st=Arc::new(web::AppState{cfg:cfg.clone(),db,catalog,nas,
         synology_connected:AtomicBool::new(false),scan_lock:tokio::sync::Mutex::new(()),csrf,
         scan_status:std::sync::RwLock::new(web::ScanStatus::default()),debug_login});
+    project_sources::recover_interrupted(&st).await?;
     let background=st.clone();
     tokio::spawn(async move{
         let mut interval=tokio::time::interval(Duration::from_secs(background.cfg.poll_interval));

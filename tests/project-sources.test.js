@@ -1,0 +1,26 @@
+const fs=require('fs');
+const assert=require('node:assert/strict');
+const vm=require('vm');
+const path=require('node:path');
+const root=path.join(__dirname,'..');
+const lib=fs.readFileSync(path.join(root,'src/project_sources.rs'),'utf8');
+const web=fs.readFileSync(path.join(root,'src/web.rs'),'utf8');
+const portal=fs.readFileSync(path.join(root,'src/portal.rs'),'utf8');
+const access=fs.readFileSync(path.join(root,'src/access.rs'),'utf8');
+const sql=fs.readFileSync(path.join(root,'migrations/019_project_sources.sql'),'utf8');
+const client=fs.readFileSync(path.join(root,'assets/project-sources.js'),'utf8');
+for (const marker of ['КР —','ПЗУ —','ПОС —','ППР —','Инженерные изыскания']) assert(lib.includes(marker),marker);
+assert(lib.includes('source_kind,origin,is_present') && lib.includes("'REFERENCE','upload',true"));
+assert(lib.includes('project_sources_current')===false); // index defined in migration
+assert(sql.includes('CREATE UNIQUE INDEX IF NOT EXISTS project_sources_current'));
+assert(lib.includes('session.upload_file('));
+assert(lib.includes('contractor::selected_root(st).await?'));
+assert(lib.includes('recover_interrupted'));
+assert(lib.includes('is_current=false'));
+assert(lib.includes("status='ready',is_current=true"));
+assert(lib.includes('sha256('));
+assert(web.includes('.route("/projects/{id}/sources/upload"'));
+assert(portal.includes('{sources_panel}'));
+assert(access.includes('sources_action && *method==Method::POST'));
+new vm.Script(client);
+console.log('Project sources: 15 static invariants + JS syntax OK');

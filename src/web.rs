@@ -1,4 +1,4 @@
-use crate::{block1,access,portal,contractor,ui_version,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
+use crate::{block1,access,portal,project_sources,contractor,ui_version,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
 use anyhow::Result;
 use axum::{
     body::{Body,Bytes},
@@ -205,6 +205,9 @@ pub fn router(state:Shared)->Router{
         .route("/api/me",get(whoami))
         .route("/assets/projects/{filename}",get(portal::project_image))
         .route("/projects/{id}",get(portal::project))
+        .route("/projects/{id}/sources/upload",post(project_sources::upload))
+        .route("/projects/{id}/sources/{source_id}/retry",post(project_sources::retry))
+        .route("/projects/{id}/sources/{source_id}/download",get(project_sources::download))
         .route("/projects/{id}/works",post(portal::create_work))
         .route("/projects/{id}/works/all",post(portal::create_all))
         .route("/projects/{id}/assign",post(portal::assign_work))
@@ -432,7 +435,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     // Start primary sections. Detailed tables are intentionally folded away.
     panel_html.push_str("<article id='upload'><details class=collapsible><summary>Официальная сдача ИД подрядчиком</summary><div><p><b>Официальные версии ИД принимаются только через одноразовую ссылку подрядчика.</b> Архив ZIP, контрольная сумма, номер поставки и исходные файлы сохраняются отдельно. Загрузка сотрудников в этот поток отключена.</p><p><a class=buttonlink href='#contractor'>Выдать ссылку подрядчику / история поставок →</a></p><p class=muted>Если нужны ПД/РД, нормативные документы или приказы для сверки, откройте соседний раздел «Материалы для проверки».</p></div></details></article>");
     panels.insert("upload",std::mem::take(&mut panel_html));
-    panel_html.push_str("<article id='references'><details class=collapsible open><summary>Материалы для проверки (не ИД подрядчика)</summary><div><p>Ответственный сотрудник добавляет исходные и контрольные документы. Они хранятся отдельно от официальных ZIP-поставок, версионируются по SHA-256 и используются только в рамках текущего вида работ.</p><p><b>Нормативные PDF</b> можно приложить здесь как источник, но для автоматической нормативной проверки необходимо отдельно создать и утвердить правило в <a href='/norms'>каталоге правил НТД</a> (доступно суперадминистратору).</p>");
+    panel_html.push_str(&format!("<article id='references'><details class=collapsible open><summary>Материалы для проверки (не ИД подрядчика)</summary><div><p><b>Общие проектные источники</b> КР, ПЗУ, ПОС и ППР загружаются <a href='/projects/{}#project-sources'>в библиотеку ЖК</a> один раз и автоматически становятся доступными в каждом виде работ. Здесь добавляются только дополнительные контрольные файлы <b>этого конкретного комплекта</b>.</p><p><b>Нормативные PDF</b> служат источниками. Для автоматической нормативной проверки правило отдельно утверждается в <a href='/norms'>каталоге правил НТД</a>.</p>",pkg.project_id));
     if matches!(actor_role.as_str(),"manager"|"engineer") {
         panel_html.push_str(&format!("<form data-package-upload action='/packages/{id}/references/upload' method='post' enctype='multipart/form-data'>{}<input type=hidden name=kind value=REFERENCE><label>Категория документа <select name=reference_type required>",hidden(&st.csrf)));
         for (code,title) in REFERENCE_CATEGORIES {

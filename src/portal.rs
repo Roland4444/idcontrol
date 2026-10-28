@@ -125,11 +125,12 @@ pub async fn project(State(st):State<Shared>,Extension(user):Extension<Principal
     }
     let bulk=if manager {format!(r#"<form method="post" action="/projects/{id}/works/all" class="inline">{}<button class="primary">＋ Создать все 14 видов работ</button></form>"#,web::hidden(&st.csrf))} else {String::new()};
     let assignment=if manager {format!(r#"<details class="admin-management"><summary>Управление доступом сотрудников к видам работ</summary><div class="section-copy">Выберите сотрудника по имени. Права назначаются на сервере и действуют для документов и проверок.</div><table><thead><tr><th>Вид работ</th><th>Назначить сотрудника</th></tr></thead><tbody>{assigned_table}</tbody></table>{}</details>"#,employee_picker())}else{String::new()};
+    let sources_panel=crate::project_sources::panel(&st,&user,id).await?;
     let empty=if works.is_empty() {"<p class='empty-work'>Доступных видов работ пока нет. Администратор проекта должен создать комплект и назначить вам доступ.</p>"}else{""};
     let body=format!(r#"<div class="crumb"><a href="/">← К выбору объектов</a> <span>›</span> {}</div>
       <section class="project-hero" style="--hero-image:url('{}')"><div class="project-hero-content"><h1>{}</h1><p>⌖ {}, Астрахань</p><div class="hero-stats"><span>▤ Жилой комплекс</span><span>▥ Исполнительная документация</span><span>◫ {active} из 14 разделов</span></div></div></section>
-      <div class="workflow-hint"><strong>Как проверить документы?</strong><span>1. Откройте вид работ → 2. Загрузите ИД и ПД/РД либо запустите сканирование Synology → 3. Нажмите «Запустить проверку» → 4. Откройте результаты и замечания.</span><small>Под каждым видом работ показана последняя проверка. Если данных нет, так и указано.</small></div>
-      <div class="section-heading"><div><h2>Комплекты исполнительной документации</h2><p>Одно нажатие на вид работ открывает загрузку и проверку конкретного комплекта.</p></div><span class="counter">{active} разделов создано</span>{bulk}</div>
+      <div class="workflow-hint"><strong>Как проверить документы?</strong><span>1. Загрузите КР, ПЗУ, ПОС, ППР и РД в библиотеку ЖК ниже → 2. Откройте вид работ и получите ИД от подрядчика по одноразовой ссылке → 3. Утвердите применимые требования → 4. Запустите проверку.</span><small>Проектные документы подключаются ко всем созданным видам работ; исходные ZIP подрядчика остаются отдельными.</small></div>
+      {sources_panel}<div class="section-heading"><div><h2>Комплекты исполнительной документации</h2><p>Одно нажатие на вид работ открывает загрузку и проверку конкретного комплекта.</p></div><span class="counter">{active} разделов создано</span>{bulk}</div>
       <div class="works-grid">{works}</div>{empty}{assignment}"#,h(&name),photo(slug),h(&name),h(address));
     Ok(web::layout(&name,body))
 }
@@ -151,6 +152,7 @@ pub async fn create_work(State(st):State<Shared>,Extension(actor):Extension<Prin
     if project_info(&project_name).is_none(){return Err(WebError::not_found());}
     let pkg=repo::get_or_create_package(&st.db,id,&wt.name).await?;
     sqlx::query("UPDATE packages SET catalog_name=$1 WHERE id=$2 AND catalog_name IS NULL").bind(&wt.name).bind(pkg.id).execute(&st.db).await?;
+    crate::project_sources::sync_project_to_package(&st.db,id,pkg.id).await?;
     repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"create_work",&format!("project={id} package={}",pkg.id)).await?;
     Ok(Redirect::to(&format!("/projects/{id}")))
 }
@@ -165,6 +167,8 @@ pub async fn create_all(State(st):State<Shared>,Extension(actor):Extension<Princ
             .bind(id).bind(&wt.name).execute(&mut *tx).await?;
     }
     tx.commit().await?;
+    let packages:Vec<i64>=sqlx::query_scalar("SELECT id FROM packages WHERE project_id=$1").bind(id).fetch_all(&st.db).await?;
+    for package_id in packages { crate::project_sources::sync_project_to_package(&st.db,id,package_id).await?; }
     repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"create_all_works",&format!("project={id}")).await?;
     Ok(Redirect::to(&format!("/projects/{id}")))
 }
