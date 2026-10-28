@@ -144,8 +144,23 @@ async fn ingest_for_package(
         catalog.classify(path.file_name().unwrap_or_default().to_str().unwrap_or(""),&parsed.text,
             pkg.catalog_name.as_deref().and_then(|n|catalog.work_type(n)))
     }else{None};
+    let reference_type=if kind=="REFERENCE" {
+        let section=relative.strip_prefix("REFERENCE/").and_then(|r|r.split('/').next());
+        Some(match section {
+            Some("PD")=>"Проектная документация",
+            Some("RD")=>"Рабочая документация",
+            Some("NTD")=>"Нормативные документы",
+            Some("ORDERS")=>"Приказы и полномочия",
+            Some("SRO")=>"СРО и организации",
+            Some("PERMIT")=>"Разрешение на строительство",
+            Some("QUALITY")=>"Документы качества материалов",
+            Some("JOURNALS")=>"Журналы работ",
+            Some("OTHER")=>"Прочие документы-основания",
+            _=>"Справочный документ ПД/РД",
+        }.to_owned())
+    }else{None};
     let (code,dtype)=classified.map(|(a,b)|(Some(a),Some(b)))
-        .unwrap_or_else(||(None,if kind=="REFERENCE"{Some("Эталон ПД/РД".to_string())}
+        .unwrap_or_else(||(None,if kind=="REFERENCE"{reference_type}
             else {crate::catalog::guess_general_document_type(path.file_name().unwrap_or_default().to_str().unwrap_or(""),&parsed.text)}));
     let mut tx=db.begin().await?;
     if let Some(old)=&latest {

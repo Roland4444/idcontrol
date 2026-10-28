@@ -249,6 +249,7 @@ pub fn router(state:Shared)->Router{
         .route("/packages/{id}/ai-check",post(queue_ai_check))
         .route("/ai-suggestions/{id}/review",post(review_ai_suggestion))
         .route("/packages/{id}/upload",post(upload))
+        .route("/packages/{id}/references/upload",post(upload))
         .route("/documents/{id}/classify",post(classify))
         .route("/packages/{id}/classification/provider",post(set_classify_provider))
         .route("/packages/{id}/classification/all",post(queue_classify_all))
@@ -268,6 +269,24 @@ pub fn router(state:Shared)->Router{
 
 async fn whoami(Extension(actor):Extension<access::Principal>)->Json<serde_json::Value>{
     Json(serde_json::json!({"name":actor.name,"id":actor.user_id,"superadmin":actor.superuser,"debug":actor.debug}))
+}
+
+// Reference materials are evidence supplied by the responsible employee, never
+// an official contractor delivery. Category codes are validated on the server.
+const REFERENCE_CATEGORIES: &[(&str, &str)] = &[
+    ("PD", "Проектная документация (ПД)"),
+    ("RD", "Рабочая документация (РД)"),
+    ("NTD", "Нормативные документы (ГОСТ, СП, приказы)"),
+    ("ORDERS", "Приказы и полномочия подписантов"),
+    ("SRO", "СРО и сведения об организациях"),
+    ("PERMIT", "Разрешение на строительство"),
+    ("QUALITY", "Паспорта и сертификаты материалов"),
+    ("JOURNALS", "Журналы работ для сверки"),
+    ("OTHER", "Прочие документы-основания"),
+];
+fn reference_category_label(code:&str)->&'static str {
+    REFERENCE_CATEGORIES.iter().find(|(c,_)|*c==code)
+        .map(|(_,label)|*label).unwrap_or("Ранее загруженный справочный документ")
 }
 
 #[derive(sqlx::FromRow)]
@@ -309,10 +328,10 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     let mut body=format!(r##"<div class="crumb"><a href="/">Выбор объектов</a> › <a href="/projects/{}">{}</a> › {}</div>
       <section class="package-hero" style="--hero-image:url('/assets/projects/{}.webp?v={}')"><div><h1>{}</h1><p>⌖ {} · {} · Комплект исполнительной документации</p></div></section>
       <div class="package-shell"><aside class="package-sidebar"><div class="sidebar-project"><img src="/assets/projects/{}.webp?v={}" alt="Объект"><div><strong>{}</strong><small>{}</small></div></div><h3>Комплекты исполнительной документации</h3>{}</aside><div class="package-content role-{}">
-      <nav class="package-tabs" aria-label="Разделы проверки"><a href="#upload">Загрузка и проверка</a><a href="#documents">Список документов</a><a href="#checks">Результаты проверки</a><a href="#remarks">Замечания</a><a href="#history">История проверок</a></nav>"##,
+      <nav class="package-tabs" aria-label="Разделы проверки"><a href="#upload">Сдача ИД</a><a href="#references">Материалы для проверки</a><a href="#documents">Список документов</a><a href="#checks">Результаты проверки</a><a href="#remarks">Замечания</a><a href="#history">История проверок</a></nav>"##,
       pkg.project_id,h(&projects.name),h(&pkg.name),slug,ui_version::images_id(),h(&pkg.name),h(address),h(&projects.name),slug,ui_version::images_id(),h(&projects.name),h(address),sidebar,h(&actor_role));
     if let Some(notice)=params.notice.as_deref() {
-        let msg=match notice {"classified"=>"Тип документа сохранён, комплект перепроверен.","uploaded"=>"Файлы загружены. Результаты обработки доступны ниже.","checklist"=>"Изменения чек-листа сохранены, комплект перепроверен.","checked"=>"Проверка завершена. Результат сохранён в истории.",_=>""};
+        let msg=match notice {"classified"=>"Тип документа сохранён, комплект перепроверен.","uploaded"=>"Материалы проверки загружены; официальная версия ИД подрядчика не изменилась. Для сверки запустите новую проверку.","checklist"=>"Изменения чек-листа сохранены, комплект перепроверен.","checked"=>"Проверка завершена. Результат сохранён в истории.",_=>""};
         if !msg.is_empty(){body.push_str(&format!("<p class=notice role=status>{msg} {}</p>",params.doc.map(|d|format!("Документ #{d}")).unwrap_or_default()));}
     }
     // A visible start button and explicit result location; engine::analyze
@@ -332,15 +351,15 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     if approved_rules==0 {
         body.push_str("<p class=muted><strong>Внимание:</strong> нет утверждённых правил НТД. Проверка сможет выявить только ошибки комплектности и встроенные формальные несоответствия; нормативное соответствие не подтверждается.</p>");
     }
-    body.push_str("</section><nav class='package-steps' aria-label='Последовательность проверки'><a href='#upload'>1. Загрузить файлы</a><a href='#checklist'>2. Настроить чек-лист</a><a href='#checks'>3. Результаты</a><a href='#remarks'>4. Замечания</a><a href='#history'>5. История</a></nav>");
+    body.push_str("</section><nav class='package-steps' aria-label='Последовательность проверки'><a href='#upload'>1. Сдача ИД подрядчиком</a><a href='#references'>2. Материалы для проверки</a><a href='#checklist'>3. Чек-лист</a><a href='#checks'>4. Результаты</a><a href='#remarks'>5. Замечания</a><a href='#history'>6. История</a></nav>");
     if actor.superuser {
         body.push_str("<p><a href='/norms'>⚙ Добавить, отключить или экспортировать нормативные правила →</a> <small class=muted>(только суперадминистратор)</small></p>");
     }
     let coverage=match pct {Some(n)=>format!("{n}%"),None=>"Не настроен".to_string()};
-    body.push_str(&format!("<section class=overview id=summary><h2>Результат проверки комплекта</h2><p class=muted>Прогресс показывает покрытие обязательных позиций файлами, <b>не</b> соответствие ГОСТ/СП. Рассматривается только выбранный комплект.</p><div class=metrics><div class=metric>Файлы ИД<strong>{id_docs}</strong><small>ПД/РД: {ref_docs}</small></div><div class=metric>Чек-лист<strong>{completed}/{}</strong><small>Обязательных позиций</small></div><div class=metric>Замечания<strong>{unresolved}</strong><small>Требуют рассмотрения</small></div><div class=metric>Не привязаны<strong>{nonclassified}</strong><small>Файлов ИД</small></div></div>",required_codes.len()));
+    body.push_str(&format!("<section class=overview id=summary><h2>Результат проверки комплекта</h2><p class=muted>Прогресс показывает покрытие обязательных позиций файлами, <b>не</b> соответствие ГОСТ/СП. Рассматривается только выбранный комплект.</p><div class=metrics><div class=metric>Файлы ИД<strong>{id_docs}</strong><small>Материалы проверки: {ref_docs}</small></div><div class=metric>Чек-лист<strong>{completed}/{}</strong><small>Обязательных позиций</small></div><div class=metric>Замечания<strong>{unresolved}</strong><small>Требуют рассмотрения</small></div><div class=metric>Не привязаны<strong>{nonclassified}</strong><small>Файлов ИД</small></div></div>",required_codes.len()));
     body.push_str(&format!("<p><b>Комплектность: {coverage}</b></p>"));
     if let Some(n)=pct {body.push_str(&format!("<div class=summarybar role=progressbar aria-valuemin=0 aria-valuemax=100 aria-valuenow={n} aria-label='Покрытие чек-листа'><span style='width:{n}%'></span></div>"));}
-    body.push_str("<nav class=jump-links aria-label='Разделы комплекта'><a href=#remarks>Замечания<small>Результаты и решения инженера</small></a><a href=#documents>Документы<small>Файлы, типы и вложения</small></a><a href=#checklist>Чек-лист<small>Изменение обязательных позиций</small></a><a href=#upload>Загрузить<small>Несколько файлов одной операцией</small></a><a href=#classification>ИИ-классификация<small>Предложения модели и подтверждение</small></a><a href=#ocr>Обработка и прогресс<small>Фоновые задания OCR</small></a><a href=#norms-check>Нормативные правила<small>Подробные результаты</small></a></nav></section>");
+    body.push_str("<nav class=jump-links aria-label='Разделы комплекта'><a href=#remarks>Замечания<small>Результаты и решения инженера</small></a><a href=#documents>Документы<small>Файлы, типы и вложения</small></a><a href=#checklist>Чек-лист<small>Изменение обязательных позиций</small></a><a href=#upload>Сдача ИД<small>Одноразовая ссылка и версии подрядчика</small></a><a href=#references>Материалы для проверки<small>ПД, РД, НТД, приказы, СРО и документы-основания</small></a><a href=#classification>ИИ-классификация<small>Предложения модели и подтверждение</small></a><a href=#ocr>Обработка и прогресс<small>Фоновые задания OCR</small></a><a href=#norms-check>Нормативные правила<small>Подробные результаты</small></a></nav></section>");
     // A compact action-oriented summary stays above ALL detailed menus.
     let missing=required_codes.len().saturating_sub(completed);
     body.push_str("<section class=attention-panel aria-labelledby=attention-title><h2 id=attention-title>Что требует внимания</h2><p class=muted>Ниже перечислены только сводные результаты. Подробные таблицы находятся внизу страницы: нажмите на ссылку, чтобы открыть нужный раздел.</p><div class=attention-list>");
@@ -359,24 +378,20 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     let mut panels:HashMap<&'static str,String>=HashMap::new();
     let mut panel_html=String::new();
     // Start primary sections. Detailed tables are intentionally folded away.
-    panel_html.push_str("<article id='upload'><details class=collapsible><summary>Загрузка документов</summary><div><p>Добавьте файлы к этому виду работ. После передачи приложение извлечёт текст и зарегистрирует документы.</p>");
-    if matches!(actor_role.as_str(),"manager"|"engineer"|"uploader") {
-        panel_html.push_str(&format!("<form data-package-upload action='/packages/{id}/upload' method='post' enctype='multipart/form-data'>{}<label>Тип <select name=kind><option value=ID>Исполнительная документация</option><option value=REFERENCE>ПД/РД (локально, без отправки внешнему ИИ)</option></select></label><label>Позиция чек-листа <select name=catalog_code><option value=''>Не назначена</option>",hidden(&st.csrf)));
-        if let Some(wt)=pkg.catalog_name.as_deref().and_then(|n|st.catalog.work_type(n)) {
-            for item in &wt.items {panel_html.push_str(&format!("<option value='{}'>{} — {}</option>",h(&item.code),h(&item.code),h(&item.title)));}
-        }
-        for item in &custom_items {panel_html.push_str(&format!("<option value='{}'>{}</option>",h(&item.code),h(&item.title)));}
-        panel_html.push_str("</select></label><div class=drop-zone id=upload-drop><strong class=upload-mark>⇧</strong><h3>Перетащите файлы сюда или выберите на компьютере</h3><p class=muted>PDF, DOC, DOCX, XLS, XLSX, JPG, PNG, TIFF, BMP, GIF, WebP · до 20 файлов (DWG/DXF — для хранения и ручной проверки)</p><input class=uploadfile type=file name=file multiple required accept='.pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.webp,.dwg,.dxf'><small id=upload-count>Файлы не выбраны</small></div><button type=submit class=primary data-upload-button>Загрузить файлы</button><div class='operation-feedback' data-upload-feedback role=status aria-live=polite></div><progress data-upload-progress max=100 value=0 hidden></progress></form>");
-    } else {
-        panel_html.push_str("<p class=muted>У вас доступ на просмотр. Загрузка файлов доступна назначенному исполнителю, инженеру ПТО или администратору проекта.</p>");
-    }
-    if matches!(actor_role.as_str(),"manager"|"engineer") {
-        panel_html.push_str(&format!("<form data-package-scan action='/packages/{id}/scan' method=post data-status-url='/packages/{id}/scan/status'>{}<button type=submit class=secondary data-scan-button>Просканировать Synology</button><div class='operation-feedback' data-scan-feedback role=status aria-live=polite></div></form>",hidden(&st.csrf)));
-    } else {
-        panel_html.push_str("<p class=muted>Сканирование Synology запускает ответственный инженер или администратор проекта.</p>");
-    }
-    panel_html.push_str("</div></details></article>");
+    panel_html.push_str("<article id='upload'><details class=collapsible><summary>Официальная сдача ИД подрядчиком</summary><div><p><b>Официальные версии ИД принимаются только через одноразовую ссылку подрядчика.</b> Архив ZIP, контрольная сумма, номер поставки и исходные файлы сохраняются отдельно. Загрузка сотрудников в этот поток отключена.</p><p><a class=buttonlink href='#contractor'>Выдать ссылку подрядчику / история поставок →</a></p><p class=muted>Если нужны ПД/РД, нормативные документы или приказы для сверки, откройте соседний раздел «Материалы для проверки».</p></div></details></article>");
     panels.insert("upload",std::mem::take(&mut panel_html));
+    panel_html.push_str("<article id='references'><details class=collapsible open><summary>Материалы для проверки (не ИД подрядчика)</summary><div><p>Ответственный сотрудник добавляет исходные и контрольные документы. Они хранятся отдельно от официальных ZIP-поставок, версионируются по SHA-256 и используются только в рамках текущего вида работ.</p><p><b>Нормативные PDF</b> можно приложить здесь как источник, но для автоматической нормативной проверки необходимо отдельно создать и утвердить правило в <a href='/norms'>каталоге правил НТД</a> (доступно суперадминистратору).</p>");
+    if matches!(actor_role.as_str(),"manager"|"engineer") {
+        panel_html.push_str(&format!("<form data-package-upload action='/packages/{id}/references/upload' method='post' enctype='multipart/form-data'>{}<input type=hidden name=kind value=REFERENCE><label>Категория документа <select name=reference_type required>",hidden(&st.csrf)));
+        for (code,title) in REFERENCE_CATEGORIES {
+            panel_html.push_str(&format!("<option value='{}'>{}</option>",h(code),h(title)));
+        }
+        panel_html.push_str("</select></label><label>Примечание / назначение документа <input name=reference_note maxlength=500 placeholder='Например: редакция проекта или дата приказа' style='width:min(580px,100%)'></label><div class=drop-zone id=upload-drop><strong class=upload-mark>⇧</strong><h3>Выберите контрольные файлы</h3><p class=muted>PDF, DOC, DOCX, XLS, XLSX и изображения; до 20 файлов за раз. Никакой подмены поставки подрядчика.</p><input class=uploadfile type=file name=file multiple required accept='.pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.webp'><small id=upload-count>Файлы не выбраны</small></div><button type=submit class=primary data-upload-button>Добавить материалы для проверки</button><div class=operation-feedback data-upload-feedback role=status aria-live=polite></div><progress data-upload-progress max=100 value=0 hidden></progress></form>");
+    } else {
+        panel_html.push_str("<p class=muted>Добавление исходных документов доступно только инженеру или администратору проекта. Доступ на просмотр не позволяет изменять их.</p>");
+    }
+    panel_html.push_str("<p>Все уже загруженные контрольные файлы отображаются ниже в <a href='#documents'>списке документов</a> с категорией, версией и оригиналом.</p></div></details></article>");
+    panels.insert("references",std::mem::take(&mut panel_html));
     panel_html.push_str(&format!("<article id=checklist><details class=collapsible><summary>Чек-лист и вид работ</summary><div><form method=post action=\"/packages/{id}/catalog\">{}<select name=work_type>",hidden(&st.csrf)));
     for wt in &st.catalog.work_types{let sel=if pkg.catalog_name.as_deref()==Some(wt.name.as_str()){ "selected" }else{""};panel_html.push_str(&format!("<option {sel} value=\"{}\">{}</option>",h(&wt.name),h(&wt.name)));}
     panel_html.push_str("</select><p class=muted>Отметьте документы, обязательность которых утвердил инженер. До утверждения ни один пункт не считается автоматически обязательным.</p>");
@@ -461,12 +476,16 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     panel_html.push_str(&format!("<article id=ocr><details class=collapsible><summary>Повторное распознавание и задания</summary><div><p class=muted>Работает фоновая очередь. Статусы обновляются каждые 4 секунды без перезагрузки страницы. Оригиналы и версии файлов не изменяются.</p><div class=toolbox><form method=post action='/packages/{id}/reprocess-errors'>{}<button>Распознать все с ошибками</button></form><form method=post action='/packages/{id}/reprocess-all'>{}<button class=secondary onclick=\"return confirm('Повторно обработать ВСЕ документы комплекта? При OCR_MODE=vibecode возможны платные запросы VibeCode.')\">Перераспознать весь комплект</button></form><a href='/diagnostics'>Журнал и диагностика</a> <small id=ocr-poll-state></small></div><div class='ocr-live' data-url='/ocr/jobs/fragment?package_id={id}'>Загрузка очереди...</div></div></details></article>",hidden(&st.csrf),hidden(&st.csrf)));
     panels.insert("ocr",std::mem::take(&mut panel_html));
     panel_html.push_str("<article id=documents><details class=collapsible><summary>Документы и вложения</summary><div><p>Документы, назначенные одной позиции чек-листа, считаются подтверждающими её вложениями. Можно прикреплять любое количество файлов.</p><label>Поиск по файлам и типам <input type=search class=filefilter data-table-search=doc-table placeholder='Название, тип, статус'></label><table class=filelist id=doc-table><thead><tr><th>Файл</th><th>Тип и распознавание</th><th>Версия</th><th>Действия</th></tr></thead><tbody>");
+    let reference_meta:HashMap<i64,(String,String)>=sqlx::query_as::<_,(i64,String,String)>(
+        "SELECT document_id,category,note FROM reference_materials WHERE document_id IN (SELECT id FROM documents WHERE package_id=$1)")
+        .bind(id).fetch_all(&st.db).await?.into_iter()
+        .map(|(doc,category,note)|(doc,(category,note))).collect();
     let mut shown:Vec<_>=current.values().collect();
     shown.sort_by(|a,b| a.source_kind.cmp(&b.source_kind)
         .then(a.catalog_code.cmp(&b.catalog_code)).then(a.relative_path.cmp(&b.relative_path)));
     let mut last_group=String::new();
     for doc in shown{
-        let group=if doc.source_kind=="REFERENCE" {"ПД/РД — только локальная обработка".to_string()}
+        let group=if doc.source_kind=="REFERENCE" {"Материалы для проверки (не поставка подрядчика)".to_string()}
         else if let Some(code)=&doc.catalog_code {
             let title=pkg.catalog_name.as_deref().and_then(|n|st.catalog.work_type(n))
                 .and_then(|wt|wt.items.iter().find(|i|i.code==*code)).map(|i|i.title.as_str())
@@ -478,7 +497,10 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
             last_group=group;
         }
         let delete_msg=if !doc.is_present{" <span class=warn>(отсутствует на NAS)</span>"}else{""};
-        panel_html.push_str(&format!("<tr id=doc-{}><td>{}{}<br><small>{}</small></td><td>{}<br><small>{}</small></td><td>v{}</td><td><a href=\"/documents/{}/download\">Оригинал</a>",doc.id,h(&doc.relative_path),delete_msg,h(&doc.sha256[..12]),h(doc.document_type.as_deref().unwrap_or("не классифицирован")),h(&doc.recognition_status),doc.version,doc.id));
+        panel_html.push_str(&format!("<tr id=doc-{}><td>{}{}<br><small>{}</small></td><td>{}<br><small>{}</small></td><td>v{}</td><td><a href=\"/documents/{}/download\">Оригинал</a>",doc.id,h(&doc.relative_path),delete_msg,h(&doc.sha256[..12]),h(reference_meta.get(&doc.id).map(|(cat,_)|reference_category_label(cat)).unwrap_or_else(||doc.document_type.as_deref().unwrap_or("не классифицирован"))),h(&doc.recognition_status),doc.version,doc.id));
+        if let Some((_,note))=reference_meta.get(&doc.id) {
+            if !note.is_empty() {panel_html.push_str(&format!("<div><small>Назначение: {}</small></div>",h(note)));}
+        }
         panel_html.push_str(&format!(" <span class='ocr-inline' data-doc='{}'></span>",doc.id));
         if let Some((ai_provider,ai_label,score,explanation,review_status,evidence))=classification_by_document.get(&doc.id) {
             panel_html.push_str(&format!("<div class=job><small>ИИ ({}) — <b>{}</b> · уверенность {:.0}% · {}</small><div><small>{}</small></div>",
@@ -552,6 +574,11 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
         primary.push_str(&upload_panel.replacen("<details class=collapsible>","<details class=collapsible open>",1));
         primary.push_str("</section>");
     }
+    if let Some(ref_panel)=panels.remove("references") {
+        primary.push_str("<section class='main-upload-panel reference-materials'>");
+        primary.push_str(&ref_panel);
+        primary.push_str("</section>");
+    }
     primary.push_str("<section class='recent-documents'><div class='recent-heading'><h2>Загруженные документы</h2><a href='#documents'>Полный список документов →</a></div><table><thead><tr><th>Файл</th><th>Тип</th><th>OCR</th><th>Действие</th></tr></thead><tbody>");
     for d in latest.iter().take(8) {
         primary.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td><a href='/documents/{}/download'>Просмотр / оригинал</a></td></tr>",
@@ -565,7 +592,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     body.push_str("<section class=detail-sections id=detail-sections aria-labelledby=details-title><h2 id=details-title>Подробные разделы и настройки проверок</h2><p class=detail-intro>Нажмите на название раздела, чтобы открыть таблицы и параметры. Из вкладок выше можно сразу перейти к нужной проверке. Для запуска новой проверки используйте кнопку «Запустить проверку комплекта».</p>");
     for (title,description,ids) in [
         ("Результаты проверок","Отчёты, замечания, история и утверждённые нормативные правила",vec!["checks","remarks","history","norms-check"]),
-        ("Документы и комплект","Загруженные файлы, привязка к позициям, редактирование и загрузка",vec!["documents","checklist"]),
+        ("Документы и комплект","Файлы, версии, категории контрольных материалов и чек-лист",vec!["documents","checklist"]),
         ("Распознавание и ИИ","Предложения классификатора, очередь OCR и настройки внешнего ИИ",vec!["classification","ocr","ai-check"]),
     ] {
         body.push_str(&format!("<div class=detail-group><h3>{title}</h3><p>{description}</p>"));
@@ -933,12 +960,17 @@ async fn package_scan_status(
 }
 /// Upload up to 20 documents in one request. Files are staged locally first;
 /// originals on NAS are never modified. A single checklist position may have many attachments.
-async fn upload(State(st):State<Shared>,Path(id):Path<i64>,mut multipart:Multipart)->WebResult<Redirect>{
+async fn upload(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,mut multipart:Multipart)->WebResult<Redirect>{
     let pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
     let project=sqlx::query_as::<_,crate::models::Project>("SELECT id,name FROM projects WHERE id=$1")
         .bind(pkg.project_id).fetch_one(&st.db).await?;
-    let mut kind=String::from("ID");let mut csrf=String::new();
-    let mut catalog_code=String::new();
+    // The server enforces this boundary; changing hidden form fields cannot
+    // turn a reference upload into an official contractor submission.
+    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")) {
+        return Err(WebError::forbidden());
+    }
+    let mut kind=String::from("REFERENCE");let mut csrf=String::new();
+    let mut reference_type=String::new();let mut reference_note=String::new();
     let mut staged:Vec<(tempfile::NamedTempFile,String)>=Vec::new();
     let mut filenames=HashSet::new();
     while let Some(mut field)=multipart.next_field().await.map_err(|e|WebError::bad(e.to_string()))?{
@@ -946,7 +978,8 @@ async fn upload(State(st):State<Shared>,Path(id):Path<i64>,mut multipart:Multipa
         match field_name.as_str(){
             "csrf"=>csrf=field.text().await.map_err(|e|WebError::bad(e.to_string()))?,
             "kind"=>kind=field.text().await.map_err(|e|WebError::bad(e.to_string()))?,
-            "catalog_code"=>catalog_code=field.text().await.map_err(|e|WebError::bad(e.to_string()))?,
+            "reference_type"=>reference_type=field.text().await.map_err(|e|WebError::bad(e.to_string()))?,
+            "reference_note"=>reference_note=field.text().await.map_err(|e|WebError::bad(e.to_string()))?,
             "file"=>{
                 if staged.len()>=20 {return Err(WebError::bad("Можно загрузить не более 20 файлов за раз"));}
                 let original_name=field.file_name().unwrap_or("file").to_owned();
@@ -973,37 +1006,38 @@ async fn upload(State(st):State<Shared>,Path(id):Path<i64>,mut multipart:Multipa
         }
     }
     verify(&csrf,&st)?;
-    if kind!="ID" && kind!="REFERENCE"{return Err(WebError::bad("Неизвестная категория документа"));}
-    if staged.is_empty() {return Err(WebError::bad("Выбери файлы"));}
-    if kind=="REFERENCE" && !catalog_code.is_empty(){return Err(WebError::bad("ПД/РД нельзя привязать к позиции ИД"));}
-    let assigned=if catalog_code.is_empty(){None}else if let Some(item)=st.catalog.item(pkg.catalog_name.as_deref().unwrap_or(""),&catalog_code){
-        Some((item.code.clone(),item.title.clone()))
-    } else {
-        let custom:Option<(String,String)>=sqlx::query_as("SELECT code,title FROM package_custom_checklist WHERE package_id=$1 AND code=$2 AND active=true")
-            .bind(id).bind(&catalog_code).fetch_optional(&st.db).await?;
-        Some(custom.ok_or_else(||WebError::bad("Позиция чек-листа не найдена"))?)
-    };
+    if kind!="REFERENCE" {return Err(WebError::bad("Официальная ИД принимается только через одноразовую ссылку подрядчика"));}
+    if !REFERENCE_CATEGORIES.iter().any(|(code,_)|*code==reference_type){return Err(WebError::bad("Выберите категорию контрольного материала"));}
+    if reference_note.len()>500 || reference_note.chars().any(char::is_control) {
+        return Err(WebError::bad("Некорректное примечание к материалу"));
+    }
+    if staged.is_empty(){return Err(WebError::bad("Выберите файлы для проверки"));}
     let _guard=st.scan_lock.lock().await;
     let root=st.cfg.data_root.join("inbox");
     let mut done=0usize;
     for (tmp,filename) in staged {
-        let file=root.join(&project.name).join(&pkg.name).join(&kind).join(&filename);
+        let file=root.join(&project.name).join(crate::contractor::nas_work_folder(&pkg.name)).join("REFERENCE").join(&reference_type).join(&filename);
         std::fs::create_dir_all(file.parent().unwrap())?;
         // Copy only into application inbox. Synology originals are read-only.
         std::fs::copy(tmp.path(),&file)?;
         scanner::ingest(&st.db,&st.cfg,&st.catalog,&root,&file,"upload").await?;
-        if let Some((code,title))=&assigned {
-            let rel=format!("{kind}/{filename}");
-            if let Some(doc)=repo::latest_document(&st.db,id,&rel).await? {
-                sqlx::query("UPDATE documents SET catalog_code=$1,document_type=$2 WHERE id=$3")
-                    .bind(code).bind(title).bind(doc.id).execute(&st.db).await?;
-            }
+        // Store category and author against the exact document revision after ingest.
+        // Re-uploading a changed file creates a new documents.version; old evidence stays intact.
+        let rel=format!("REFERENCE/{reference_type}/{filename}");
+        if let Some(doc)=repo::latest_document(&st.db,id,&rel).await? {
+            sqlx::query("INSERT INTO reference_materials(document_id,category,note,uploaded_by) VALUES($1,$2,$3,$4) ON CONFLICT(document_id) DO UPDATE SET category=EXCLUDED.category,note=EXCLUDED.note,uploaded_by=EXCLUDED.uploaded_by")
+                .bind(doc.id).bind(&reference_type).bind(&reference_note)
+                .bind(format!("bitrix:{}:{}",actor.member,actor.user_id))
+                .execute(&st.db).await?;
+        } else {
+            return Err(WebError::bad("Не удалось зарегистрировать контрольный документ в комплекте"));
         }
         done+=1;
     }
-    engine::analyze(&st.db,&st.catalog,id,"upload_multi").await?;
-    repo::audit(&st.db,&st.cfg.app_user,"upload_multi",&format!("package={id} files={done} checklist={catalog_code}")).await?;
-    Ok(Redirect::to(&format!("/packages/{id}?notice=uploaded#documents")))
+    // Reference uploads do not create an official delivery or auto-run a check.
+    // The engineer starts a new check explicitly when ready.
+    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"reference_upload",&format!("package={id} files={done} category={reference_type}")).await?;
+    Ok(Redirect::to(&format!("/packages/{id}?notice=uploaded#references")))
 }
 
 #[derive(Deserialize)]struct ClassifyProviderForm {csrf:String,provider:String,#[serde(default)]auto_queue:Option<String>}

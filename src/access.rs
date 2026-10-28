@@ -124,7 +124,7 @@ async fn may_access(st:&Shared,a:&Principal,path:&str,method:&Method,query:Optio
     }
     if let Some(package)=param_id(path,"/packages/"){
         return match package_role(st,a,package).await {
-            Some(role)=> method==Method::GET || role=="manager" || role=="engineer" || (role=="uploader" && path.ends_with("/upload")),
+            Some(role)=> method==Method::GET || role=="manager" || role=="engineer",
             None=>false,
         };
     }

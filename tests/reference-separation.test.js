@@ -1,0 +1,18 @@
+const fs = require('fs');
+const assert = require('assert');
+const web = fs.readFileSync('src/web.rs','utf8');
+const auth = fs.readFileSync('src/access.rs','utf8');
+const engine = fs.readFileSync('src/engine.rs','utf8');
+const migration = fs.readFileSync('migrations/016_reference_materials.sql','utf8');
+assert(web.includes('/packages/{id}/references/upload'));
+assert(web.includes('if kind!="REFERENCE"'));
+assert(web.includes('"Официальная ИД принимается только через одноразовую ссылку подрядчика"'));
+assert(web.includes('REFERENCE_CATEGORIES'));
+assert(web.includes('"reference_type"=>reference_type='));
+assert(web.includes('reference_materials(document_id,category,note,uploaded_by)'));
+assert(web.includes('category=EXCLUDED.category'));
+assert(!auth.includes('role=="uploader" && path.ends_with("/upload")'));
+assert(migration.includes('REFERENCES documents(id) ON DELETE CASCADE'));
+assert(!web.includes('name=kind><option value=ID>'));
+assert(engine.includes('!matches!(segment,"NTD"|"ORDERS"'));
+console.log('OK: reference-only upload, server role checks, categories, document version metadata');

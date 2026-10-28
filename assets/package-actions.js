@@ -1,4 +1,4 @@
-// ID-Control v0.9.18: reliable forms in the Bitrix24 desktop iframe.
+// ID-Control v0.9.19: employee-only reference upload and reliable iframe forms.
 // This is UI-only. All permissions and CSRF verification remain on the Rust server.
 (() => {
   'use strict';
@@ -49,7 +49,7 @@
         if (xhr.status >= 200 && xhr.status < 300) {
           if (feedback) feedback.textContent = 'Документы обработаны. Обновляем список…';
           // POST normally returns 303; XHR follows it and responseURL is the package page.
-          window.location.assign(xhr.responseURL || upload.action.replace(/\/upload$/, '?notice=uploaded#documents'));
+          window.location.assign(xhr.responseURL || upload.action.replace(/\/(references\/)?upload$/, '?notice=uploaded#references'));
         } else {
           const info = (xhr.responseText || '').replace(/<[^>]*>/g, ' ').trim().slice(0, 500);
           if (feedback) feedback.textContent = `Ошибка загрузки (HTTP ${xhr.status}): ${info || 'Смотрите журнал сервера.'}`;
