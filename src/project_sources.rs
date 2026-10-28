@@ -253,7 +253,7 @@ async fn sync_to_package(db:&PgPool,source_id:i64,package_id:i64,category:&str,r
         sqlx::query("UPDATE documents SET is_present=false WHERE id=$1").bind(old_id).execute(&mut *tx).await?;
     }
     let doc_id:i64=sqlx::query_scalar("INSERT INTO documents(package_id,relative_path,source_kind,origin,is_present,sha256,version,archive_path,document_type,catalog_code,recognized_text,recognition_status,recognition_confidence) VALUES($1,$2,'REFERENCE','upload',true,$3,$4,$5,$6,NULL,$7,$8,$9) RETURNING id")
-        .bind(package_id).bind(relative).bind(sha).bind(version).bind(archive).bind(label(category)).bind(text).bind(status).bind(conf)
+        .bind(package_id).bind(relative).bind(sha).bind(version).bind(archive).bind(label(category)).bind(text).bind(status).bind(confidence)
         .fetch_one(&mut *tx).await?;
     sqlx::query("INSERT INTO project_source_package_documents(project_source_id,document_id) VALUES($1,$2)")
         .bind(source_id).bind(doc_id).execute(&mut *tx).await?;
