@@ -450,7 +450,7 @@ pub async fn panel(st:&Shared,package_id:i64,role:&str)->Result<String,WebError>
     let readiness=match &model {Ok(m)=>m.probe().await,Err(err)=>Err(anyhow!("{err:#}"))};
     let enabled=readiness.is_ok();
     let editable=matches!(role,"manager"|"engineer");
-    let jobs=sqlx::query("SELECT job_kind,status,total,completed,found,error_message,created_at FROM block1_semantic_jobs WHERE package_id=$1 ORDER BY id DESC LIMIT 6")
+    let jobs=sqlx::query("SELECT job_kind,status,model,total,completed,found,error_message,created_at FROM block1_semantic_jobs WHERE package_id=$1 ORDER BY id DESC LIMIT 6")
         .bind(package_id).fetch_all(&st.db).await?;
     let mut html_out=String::from("<article id='semantic-block1'><details class='collapsible' open><summary>Семантическая проверка ИД (ИИ + доказательства)</summary><div>");
     html_out.push_str("<p>Шаг 1: извлечь предложения из распознанных КР/ПЗУ/ПОС/ППР. Шаг 2: инженер утверждает их в разделе «Требования из проекта». Шаг 3: обычная проверка выбранной поставки. Шаг 4: семантически сопоставить с ИД. Ответ модели является предложением, а не актом приёмки.</p>");
