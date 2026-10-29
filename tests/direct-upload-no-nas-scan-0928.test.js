@@ -1,0 +1,13 @@
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const src=n=>fs.readFileSync(path.join(__dirname,'..',n),'utf8');
+const main=src('src/main.rs'),contractor=src('src/contractor.rs'),web=src('src/web.rs'),scanner=src('src/scanner.rs'),config=src('src/config.rs'),js=src('assets/package-actions.js');
+assert.doesNotMatch(main,/scanner::scan_once|scan_lock|poll_interval|scan_status|list_files\(\)/);
+assert.doesNotMatch(contractor,/scan_lock|waiting_for_scan|Ожидание завершения сканирования/);
+assert.match(contractor,/register_delivery_files\(\s*&st,package_id,&published_name,&files/);
+assert.match(contractor,/import_existing_delivery/);
+assert.doesNotMatch(web,/scan_lock|scan_status|scan_once|diagnostics_scan|manual_scan|package_scan_status|Сканировать Synology сейчас/);
+assert.doesNotMatch(js,/data-package-scan|scan\/status/);
+assert.doesNotMatch(scanner,/pub async fn scan_once|list_files\(\)/);
+assert.doesNotMatch(config,/poll_interval|stable_seconds/);
+assert.match(web,/"scan_enabled":false/);
+console.log('OK: direct contractor ZIP import without NAS scanning, global mutex, or scan controls');

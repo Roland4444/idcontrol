@@ -27,7 +27,7 @@ mod contractor;
 use anyhow::Result;
 use rand::RngCore;
 use sqlx::postgres::PgPoolOptions;
-use std::{sync::{Arc,atomic::{AtomicBool,Ordering}}, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::{net::TcpListener,signal};
 use tracing::{error,info};
 
@@ -68,19 +68,12 @@ async fn main()->Result<()> {
         if result.status.starts_with("error:") {anyhow::bail!("OCR failed");}
         return Ok(());
     }
-    // Test DSM connectivity without touching PostgreSQL or scanning/downloading files.
-    if std::env::args().any(|arg|arg=="--check-synology" || arg=="--list-synology") {
+    // Explicit connectivity check only: never traverse NAS folders or download files.
+    if std::env::args().any(|arg|arg=="--check-synology") {
         let nas=synology::SynologyClient::new(&cfg)?;
         let session=nas.connect().await?;
-        let files=session.list_files().await?;
         session.logout().await;
-        println!("Synology HTTPS connection OK. Files in configured folder: {}",files.len());
-        if std::env::args().any(|arg|arg=="--list-synology") {
-            for file in files.iter().take(50) {
-                println!("{} ({} bytes)",file.path,file.size);
-            }
-            if files.len()>50 {println!("...and {} more",files.len()-50);}
-        }
+        println!("Synology DSM authentication OK (folder scanning disabled).");
         return Ok(());
     }
     let catalog=catalog::Catalog::load()?;
@@ -127,9 +120,7 @@ async fn main()->Result<()> {
     let mut bytes=[0u8;32];rand::thread_rng().fill_bytes(&mut bytes);
     let csrf=hex::encode(bytes);
     let nas=synology::SynologyClient::new(&cfg)?;
-    let st=Arc::new(web::AppState{cfg:cfg.clone(),db,catalog,nas,
-        synology_connected:AtomicBool::new(false),scan_lock:tokio::sync::Mutex::new(()),csrf,
-        scan_status:std::sync::RwLock::new(web::ScanStatus::default()),debug_login});
+    let st=Arc::new(web::AppState{cfg:cfg.clone(),db,catalog,nas,csrf,debug_login});
     project_sources::recover_interrupted(&st).await?;
     semantic::recover(&st.db).await?;
     // A manual generation interrupted by a previous process crash is retryable.
@@ -148,41 +139,8 @@ async fn main()->Result<()> {
             Err(e)=>tracing::error!("Project requirements startup query failed: {e:#}"),
         }
     });
-    let background=st.clone();
-    tokio::spawn(async move{
-        let mut interval=tokio::time::interval(Duration::from_secs(background.cfg.poll_interval));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop{
-            interval.tick().await;
-            let _guard=background.scan_lock.lock().await;
-            if let Ok(mut scan)=background.scan_status.write() {
-                scan.running=true;
-                scan.message="Идёт сканирование Synology".into();
-            }
-            info!("Synology scan started");
-            match scanner::scan_once(&background.db,&background.cfg,&background.catalog,&background.nas).await {
-                Ok(result)=>{
-                    background.synology_connected.store(true,Ordering::Relaxed);
-                    if let Ok(mut scan)=background.scan_status.write() {
-                        scan.running=false;
-                        scan.last_at=Some(chrono::Utc::now());
-                        scan.message=format!("Synology: {} новых/обновлённых документов",result.new_documents);
-                        scan.detail=result.summary();
-                    }
-                },
-                Err(e)=>{
-                    background.synology_connected.store(false,Ordering::Relaxed);
-                    error!("Synology scan failed: {e:#}");
-                    if let Ok(mut scan)=background.scan_status.write() {
-                        scan.running=false;
-                        scan.last_at=Some(chrono::Utc::now());
-                        scan.message=format!("Ошибка сканирования: {}",e.to_string().chars().take(230).collect::<String>());
-                        scan.detail=String::new();
-                    }
-                },
-            }
-        }
-    });
+    // Synology is storage, not an ingestion source. No directory polling or NAS scan.
+    // Uploaded files are registered directly from the authoritative contractor link.
     let ocr_background=st.clone();
     tokio::spawn(async move {
         let mut interval=tokio::time::interval(Duration::from_secs(2));

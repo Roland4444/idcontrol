@@ -63,7 +63,7 @@ async fn analyze_internal(db:&PgPool,catalog:&Catalog,package_id:i64,source:&str
     if inputs.is_empty(){
         let message=if delivery.is_some() {
             "В выбранной поставке ИД не зарегистрированы. Проверьте импорт с Synology, привязку к виду работ и категорию ID (это ещё не доказательство отсутствия файлов у подрядчика)."
-        } else {"В комплекте не найдены зарегистрированные документы ИД. Проверьте папку и результаты сканирования."};
+        } else {"В комплекте не найдены зарегистрированные документы ИД. Проверьте, завершён ли импорт ZIP подрядчика, и зарегистрированы ли файлы поставки."};
         findings.push(FindingInput::new(1,"E01",message).mismatch());
     }
     if let Some(scope)=delivery {

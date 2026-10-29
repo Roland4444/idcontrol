@@ -496,11 +496,6 @@ impl ProgressCounters {
         self.total.store(total.max(1),Ordering::Relaxed);
         self.stage.store(phase,Ordering::Release);
     }
-    fn waiting_for_scan(&self) {
-        if let Ok(mut file)=self.current_file.lock() {
-            *file="Ожидание завершения сканирования Synology".into();
-        }
-    }
     fn start_file(&self,index:usize,total:usize,filename:&str) {
         if let Ok(mut file)=self.current_file.lock() {
             *file=format!("Файл {index}/{total}: {}",filename.chars().take(90).collect::<String>());
@@ -573,10 +568,8 @@ async fn register_delivery_files(
 )->Result<()> {
     // The one-use link is the authoritative binding to this exact package.
     repo::validate_segment(delivery_folder)?;
-    // Serialise delivery indexing with the periodic scanner to avoid version
-    // races on the same (package_id, relative_path).
-    if let Some(progress)=progress {progress.waiting_for_scan();}
-    let _guard=st.scan_lock.lock().await;
+    // No NAS traversal or global scan mutex: this ZIP is the authoritative source.
+    // The supplied package_id and manifest bind every file to this delivery.
     for (idx,item) in files.iter().enumerate() {
         let (relative,_)=decode_zip_path(item.relative.as_bytes())?;
         let expected=format!("ИД/{delivery_folder}/{relative}");
@@ -737,7 +730,7 @@ async fn process_delivery(
         let on_bytes:Arc<dyn Fn(u64)+Send+Sync>=Arc::new(move |count| {
             uploaded.done.fetch_add(count,Ordering::Relaxed);
         });
-        // Atomic rename publishes a complete delivery to the scanner.
+        // Atomic rename publishes a complete delivery to Synology storage.
         let operation=async {
             for item in &files {
                 let (parent,name)=match item.relative.rsplit_once('/') {

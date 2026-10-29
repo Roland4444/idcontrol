@@ -59,14 +59,5 @@ function makeContext(upload, scan, fetchImpl) {
   env.xhr.status=200; env.xhr.responseURL='/packages/123?notice=uploaded';env.xhr.events.load();
   assert.equal(env.context.redirect,'/packages/123?notice=uploaded');
 
-  const sc = new Form('scan');
-  let active=true;
-  const scanFetch=async (url,opts)=>({ok:true,status:opts?.method==='POST'?202:200,json:async()=>({running:active,message:active?'Идёт сканирование':'Сканирование завершено'}),text:async()=>''});
-  const scanEnv=makeContext(null,sc,scanFetch);
-  vm.runInNewContext(script,scanEnv.context);
-  await sc.events.submit({preventDefault(){}});
-  assert.equal(sc.button.disabled,true);
-  active=false;
-  // The separately named state GET fetch is executed during initial load and polling.
-  console.log('OK: upload validation, percentage, error, success redirect, scan submission');
+  console.log('OK: upload validation, percentage, error, success redirect; NAS scanning controls removed');
 })().catch(e=>{console.error(e);process.exitCode=1});

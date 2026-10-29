@@ -10,25 +10,14 @@ use axum::{
 };
 use serde::Deserialize;
 use sqlx::PgPool;
-use std::{collections::{HashMap,HashSet},io::Write,path::PathBuf,sync::{Arc,RwLock,atomic::{AtomicBool,Ordering}}};
+use std::{collections::{HashMap,HashSet},io::Write,path::PathBuf,sync::Arc};
 use subtle::ConstantTimeEq;
-use tokio::sync::Mutex;
 use tracing::error;
-
-#[derive(Default,Clone)]
-pub struct ScanStatus {
-    pub running:bool,
-    pub last_at:Option<chrono::DateTime<chrono::Utc>>,
-    pub message:String,
-    pub detail:String,
-}
 
 pub struct AppState {
     pub debug_login:bool,
     pub cfg:Config, pub db:PgPool, pub catalog:Catalog,
-    pub nas:crate::synology::SynologyClient, pub synology_connected:AtomicBool,
-    pub scan_lock:Mutex<()>, pub csrf:String,
-    pub scan_status:RwLock<ScanStatus>,
+    pub nas:crate::synology::SynologyClient, pub csrf:String,
 }
 pub type Shared=Arc<AppState>;
 
@@ -228,7 +217,6 @@ pub fn router(state:Shared)->Router{
         .route("/administration/synology-map",post(portal::save_synology_mapping))
         .route("/health",get(health))
         .route("/diagnostics",get(diagnostics))
-        .route("/diagnostics/scan",post(diagnostics_scan))
         .route("/diagnostics/reprocess-errors",post(diagnostics_reprocess_errors))
         .route("/api/ocr/jobs",get(ocr_jobs_json))
         .route("/api/ocr/status",get(ocr_status_json))
@@ -262,8 +250,6 @@ pub fn router(state:Shared)->Router{
         .route("/packages/{id}/support/{req_id}/parent",post(set_support_parent))
         .route("/packages/{id}/checklist/custom",post(create_custom_checklist))
         .route("/packages/{id}/checklist/custom/{item_id}",post(edit_custom_checklist))
-        .route("/packages/{id}/scan",post(manual_scan))
-        .route("/packages/{id}/scan/status",get(package_scan_status))
         .route("/packages/{id}/check",post(run_package_check))
         .route("/packages/{id}/semantic/extract",post(semantic::extract))
         .route("/packages/{id}/semantic/compare",post(semantic::compare))
@@ -1260,80 +1246,6 @@ async fn run_package_check(State(st):State<Shared>,Extension(actor):Extension<ac
     repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"manual_check",&format!("package={id} run={run}")).await?;
     Ok(Redirect::to(&format!("/packages/{id}?run_id={run}&notice=checked#checks")))
 }
-/// Start a full DSM traversal in the background: no HTTP timeout while it runs.
-/// Access middleware only allows manager/engineer to POST for this package.
-async fn manual_scan(
-    State(st):State<Shared>,
-    Extension(actor):Extension<access::Principal>,
-    Path(id):Path<i64>,
-    headers:HeaderMap,
-    Form(form):Form<CsrfForm>,
-)->WebResult<Response>{
-    verify(&form.csrf,&st)?;
-    let _pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")) {
-        return Err(WebError::forbidden());
-    }
-    {
-        let mut state=st.scan_status.write().map_err(|_|WebError::bad("Состояние сканера недоступно"))?;
-        if state.running {
-            return Ok((StatusCode::CONFLICT,Json(serde_json::json!({"error":"Сканирование Synology уже запущено"}))).into_response());
-        }
-        state.running=true;
-        state.message=format!("Запущено сканирование Synology для комплекта #{id}");
-        state.detail=String::new();
-    }
-    let worker=st.clone();
-    let actor_label=format!("bitrix:{}:{}",actor.member,actor.user_id);
-    tokio::spawn(async move {
-        let _guard=worker.scan_lock.lock().await;
-        let outcome=async {
-            let result=scanner::scan_once(&worker.db,&worker.cfg,&worker.catalog,&worker.nas).await?;
-            let run=engine::analyze(&worker.db,&worker.catalog,id,"manual").await?;
-            repo::audit(&worker.db,&actor_label,"manual_scan",&format!("package={id} run={run}")).await?;
-            Ok::<_,anyhow::Error>(result)
-        }.await;
-        match outcome {
-            Ok(result)=>{
-                worker.synology_connected.store(true,Ordering::Relaxed);
-                if let Ok(mut state)=worker.scan_status.write(){
-                    state.running=false;state.last_at=Some(chrono::Utc::now());
-                    state.message=format!("Сканирование завершено: {} новых/обновлённых документов",result.new_documents);
-                    state.detail=result.summary();
-                }
-            },
-            Err(err)=>{
-                error!(package_id=id,"Manual package Synology scan failed: {err:#}");
-                if let Ok(mut state)=worker.scan_status.write(){
-                    state.running=false;state.last_at=Some(chrono::Utc::now());
-                    state.message=format!("Ошибка сканирования: {err:#}");state.detail=String::new();
-                }
-            }
-        }
-    });
-    let ajax=headers.get("x-requested-with")
-        .and_then(|v|v.to_str().ok())==Some("XMLHttpRequest");
-    if ajax {
-        Ok((StatusCode::ACCEPTED,Json(serde_json::json!({"running":true,"message":"Сканирование запущено"}))).into_response())
-    } else {
-        Ok(Redirect::to(&format!("/packages/{id}#upload")).into_response())
-    }
-}
-
-async fn package_scan_status(
-    State(st):State<Shared>,
-    Extension(actor):Extension<access::Principal>,
-    Path(id):Path<i64>,
-)->WebResult<Json<serde_json::Value>>{
-    let _pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    if access::package_role(&st,&actor,id).await.is_none(){return Err(WebError::forbidden());}
-    let state=st.scan_status.read().map_err(|_|WebError::bad("Состояние сканера недоступно"))?;
-    Ok(Json(serde_json::json!({
-        "running":state.running,
-        "message":state.message.clone(),
-        "last_at":state.last_at.clone(),
-    })))
-}
 /// Upload up to 20 documents in one request. Files are staged locally first;
 /// originals on NAS are never modified. A single checklist position may have many attachments.
 async fn upload(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,mut multipart:Multipart)->WebResult<Redirect>{
@@ -1388,7 +1300,6 @@ async fn upload(State(st):State<Shared>,Extension(actor):Extension<access::Princ
         return Err(WebError::bad("Некорректное примечание к материалу"));
     }
     if staged.is_empty(){return Err(WebError::bad("Выберите файлы для проверки"));}
-    let _guard=st.scan_lock.lock().await;
     let root=st.cfg.data_root.join("inbox");
     let mut done=0usize;
     for (tmp,filename) in staged {
@@ -1640,8 +1551,6 @@ async fn ocr_jobs_json(State(st):State<Shared>,Query(q):Query<OcrJobQuery>)->Web
 async fn ocr_status_json(State(st):State<Shared>)->WebResult<Json<serde_json::Value>>{
     let counts:Vec<(String,i64)>=sqlx::query_as("SELECT status,count(*) FROM ocr_jobs GROUP BY status ORDER BY status")
         .fetch_all(&st.db).await?;
-    let scanning=st.scan_status.read().map(|state|state.running).unwrap_or(false);
-    let scan_message=st.scan_status.read().map(|state|state.message.clone()).unwrap_or_default();
     Ok(Json(serde_json::json!({
         "app_version":env!("CARGO_PKG_VERSION"),"ocr_mode":st.cfg.ocr_mode,
         "data_root":st.cfg.data_root.to_string_lossy(),
@@ -1652,9 +1561,9 @@ async fn ocr_status_json(State(st):State<Shared>)->WebResult<Json<serde_json::Va
         "vibe_ocr_key_configured":st.cfg.vibe_ocr_key.is_some(),
         "vibe_timeout_seconds":st.cfg.vibe_ocr_timeout,
         "ocr_max_pages":st.cfg.ocr_max_pages,"ocr_page_workers":st.cfg.ocr_page_workers,"job_counts":counts,
-        "synology_connected":st.synology_connected.load(Ordering::Relaxed),
-        "scan_running":scanning,"scan_message":scan_message,
-        "scan_detail":st.scan_status.read().map(|state|state.detail.clone()).unwrap_or_default()
+        "synology_connected":serde_json::Value::Null,
+        "scan_enabled":false,
+        "synology_mode":"direct_upload_only"
     })))
 }
 
@@ -1672,20 +1581,15 @@ async fn diagnostics(State(st):State<Shared>)->WebResult<Html<String>>{
         "SELECT id,relative_path,recognition_status FROM documents WHERE is_present=true
          AND recognition_status LIKE 'error:%' ORDER BY id DESC LIMIT 15")
         .fetch_all(&st.db).await?;
-    let scan=st.scan_status.read().map(|s|s.clone()).unwrap_or_default();
     let mut body=String::from("<h1>Диагностика системы и OCR</h1><p>Здесь отображаются фактические настройки запуска, очередь и события. API-ключ и содержимое документов в журнал не записываются.</p>");
     body.push_str("<article><h2>Компоненты</h2><table><tr><th>Компонент</th><th>Состояние</th></tr>");
-    body.push_str(&format!("<tr><td>Приложение</td><td>v0.9.4 · порт {}</td></tr>",h(&st.cfg.listen)));
+    body.push_str(&format!("<tr><td>Приложение</td><td>v{} · порт {}</td></tr>",env!("CARGO_PKG_VERSION"),h(&st.cfg.listen)));
     body.push_str(&format!("<tr><td>Локальный архив DATA_ROOT</td><td>{}</td></tr><tr><td>Временные файлы TEMP_ROOT</td><td>{}</td></tr>",
         h(&st.cfg.data_root.to_string_lossy()),h(&st.cfg.temp_root.to_string_lossy())));
-    body.push_str(&format!("<tr><td>PostgreSQL</td><td>Подключена (данные получены)</td></tr><tr><td>Synology</td><td>{}</td></tr>",
-        if st.synology_connected.load(Ordering::Relaxed){"Связь при последней проверке была успешна"}else{"Нет подтверждения успешной связи"}));
-    body.push_str(&format!("<tr><td>Сканирование</td><td>{} · {} · последний запуск {}<p><small>{}</small></p></td></tr>",
-        if scan.running{"Выполняется"}else{"Между запусками"},h(&scan.message),
-        scan.last_at.map(|t|t.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_else(||"нет данных".into()),h(&scan.detail)));
+    body.push_str("<tr><td>PostgreSQL</td><td>Подключена (данные получены)</td></tr><tr><td>Synology</td><td>Хранилище ZIP и проектных документов. Подключение проверяется при прямой операции; обход папок отключён.</td></tr>");
+    body.push_str("<tr><td>Импорт ИД</td><td>По событию загрузки ZIP через ID-Control. Периодическое и ручное сканирование Synology отключено.</td></tr>");
     body.push_str(&format!("<tr><td>Источник Synology</td><td>Корень: <code>{}</code><br>Папка без вложенного имени ЖК: <code>{}</code><br>Вид работ по умолчанию: <code>{}</code><p><a href='/administration'>Настроить привязку папок к ЖК</a></p></td></tr>",
         h(&active_root),h(&st.cfg.synology_project_name),h(&st.cfg.synology_default_work)));
-    // The manual scan action appears after the component status table.
     let model_check=crate::local_ocr::ensure_models(&st.cfg.local_ocr_model_dir);
     body.push_str(&format!("<tr><td>OCR режим</td><td><b>{}</b> · локальные ONNX-модели: {} · путь {}</td></tr>",
         h(&st.cfg.ocr_mode),if model_check.is_ok(){"НАЙДЕНЫ"}else{"НЕ УСТАНОВЛЕНЫ"},h(&st.cfg.local_ocr_model_dir.to_string_lossy())));
@@ -1704,7 +1608,7 @@ async fn diagnostics(State(st):State<Shared>)->WebResult<Html<String>>{
         if classification::configured(&st.cfg,"gigacowork") {"настроен"} else {"не настроен"},
         h(&classifier_status)));
     body.push_str(&format!("<tr><td>Synology TLS</td><td>{}</td></tr>",if st.cfg.synology_verify_tls{"Проверка сертификата включена"}else{"ВНИМАНИЕ: проверка сертификата отключена"}));
-    body.push_str(&format!("</table><form method=post action='/diagnostics/scan'>{}<button class=secondary>Сканировать Synology сейчас</button></form></article><article><h2>Документы: результат извлечения</h2><table><tr><th>Статус</th><th>Количество</th></tr>",hidden(&st.csrf)));
+    body.push_str("</table></article><article><h2>Документы: результат извлечения</h2><table><tr><th>Статус</th><th>Количество</th></tr>");
     for (status,count) in stats {body.push_str(&format!("<tr><td>{}</td><td>{count}</td></tr>",h(&status)));}
     body.push_str("</table><p class=muted>Статистика документов показывает текущие версии. Счётчики очереди ниже — все исторические задания, включая повторные запуски.</p><h3>Последние ошибки</h3><table><tr><th>Документ</th><th>Ошибка</th><th>Действие</th></tr>");
     for (id,name,status) in last_errors {
@@ -1720,36 +1624,6 @@ async fn diagnostics(State(st):State<Shared>)->WebResult<Html<String>>{
 }
 
 
-async fn diagnostics_scan(State(st):State<Shared>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    // A full DSM scan performs OCR of new files and may run much longer than
-    // an HTTPS proxy timeout. Acknowledge the command, then scan in background.
-    let worker=st.clone();
-    tokio::spawn(async move {
-        let _guard=worker.scan_lock.lock().await;
-        if let Ok(mut s)=worker.scan_status.write(){s.running=true;s.message="Ручное сканирование Synology".into();}
-        let result=scanner::scan_once(&worker.db,&worker.cfg,&worker.catalog,&worker.nas).await;
-        match result {
-            Ok(r)=>{
-                worker.synology_connected.store(true,Ordering::Relaxed);
-                if let Ok(mut s)=worker.scan_status.write(){
-                    s.running=false;s.last_at=Some(chrono::Utc::now());
-                    s.message=format!("Synology: {} новых/обновлённых документов",r.new_documents);
-                    s.detail=r.summary();
-                }
-            },
-            Err(e)=>{
-                error!("Manual Synology scan failed: {e:#}");
-                worker.synology_connected.store(false,Ordering::Relaxed);
-                if let Ok(mut s)=worker.scan_status.write(){
-                    s.running=false;s.last_at=Some(chrono::Utc::now());
-                    s.message=format!("Ошибка сканирования: {e}");s.detail=String::new();
-                }
-            },
-        }
-    });
-    Ok(Redirect::to("/diagnostics"))
-}
 async fn diagnostics_reprocess_errors(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
     verify(&form.csrf,&st)?;
     if !actor.superuser {return Err(WebError::forbidden());}
@@ -1793,7 +1667,8 @@ async fn cancel_ocr_job(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Fo
 async fn health(State(st):State<Shared>)->WebResult<Json<serde_json::Value>>{
     let approved:(i64,) = sqlx::query_as("SELECT count(*) FROM normative_rules WHERE approval_status='approved'")
         .fetch_one(&st.db).await?;
-    Ok(Json(serde_json::json!({"synology_connected":st.synology_connected.load(Ordering::Relaxed),
+    Ok(Json(serde_json::json!({"synology_connected":serde_json::Value::Null,
+        "synology_mode":"direct_upload_only","scan_enabled":false,
         "approved_normative_rules":approved.0,"normative_rules_configured":approved.0>0,
-        "app_version":"0.9.4"})))
+        "app_version":env!("CARGO_PKG_VERSION")})))
 }

@@ -1427,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "id-control-axum"
-version = "0.9.27"
+version = "0.9.28"
 dependencies = [
  "encoding_rs",
  "anyhow",
