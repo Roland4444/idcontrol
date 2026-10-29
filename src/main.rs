@@ -40,6 +40,11 @@ async fn main()->Result<()> {
     if debug_login { tracing::warn!("DEBUG LOGIN ACTIVE: Basic admin/super123; do not expose this mode to the Internet"); }
     let cfg=config::Config::load()?;
     info!(data_root=%cfg.data_root.display(),temp_root=%cfg.temp_root.display(),models=%cfg.local_ocr_model_dir.display(),"Local Windows/project storage paths resolved");
+    // Validate the local semantic model without touching PostgreSQL or Synology.
+    if std::env::args().any(|arg|arg=="--check-semantic-model") {
+        semantic::check_cli().await?;
+        return Ok(());
+    }
     // Stand-alone OCR test (no PostgreSQL or Synology required).
     if std::env::args().any(|arg|arg=="--check-local-models") {
         local_ocr::ensure_models(&cfg.local_ocr_model_dir)?;

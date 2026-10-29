@@ -41,25 +41,59 @@ fn genuine_quote(quote:&str,origin:&str)->bool {
 }
 fn clip(s:&str,n:usize)->String{s.chars().take(n).collect()}
 
-#[derive(Clone)]struct Model {url:String,key:Option<String>,name:String}
+// Local-first semantic inference. By default the application speaks only to a
+// loopback Ollama service: no secrets, cloud endpoint or .env keys required.
+// An external provider is an explicit opt-in, never a silent fallback.
+const LOCAL_URL:&str="http://127.0.0.1:11434/v1/chat/completions";
+const LOCAL_MODEL:&str="qwen3:4b-instruct";
+
+#[derive(Clone)]struct Model {url:String,key:Option<String>,name:String,local:bool}
 impl Model {
     fn configured()->Result<Self>{
-        let url=std::env::var("BLOCK1_LLM_URL").context("BLOCK1_LLM_URL не настроен: семантический анализ отключён; OCR и правила продолжают работать")?;
-        let name=std::env::var("BLOCK1_LLM_MODEL").context("BLOCK1_LLM_MODEL не задан")?;
-        if name.trim().is_empty(){bail!("BLOCK1_LLM_MODEL пуст");}
-        let parsed=url::Url::parse(&url).context("Некорректный BLOCK1_LLM_URL")?;
-        let hostname=parsed.host_str().unwrap_or("");
-        let local=matches!(hostname,"localhost"|"127.0.0.1"|"::1"|"[::1]");
-        let remote=std::env::var("BLOCK1_LLM_ALLOW_REMOTE").ok().as_deref()==Some("true");
-        if !matches!(parsed.scheme(),"http"|"https") || parsed.username()!="" || parsed.password().is_some(){bail!("Недопустимый BLOCK1_LLM_URL");}
-        if !local && (!remote || parsed.scheme()!="https") {bail!("Проектные документы запрещено передавать удалённой модели без BLOCK1_LLM_ALLOW_REMOTE=true и HTTPS");}
-        if !parsed.path().ends_with("/chat/completions"){bail!("BLOCK1_LLM_URL должен оканчиваться /chat/completions");}
-        Ok(Self{url,key:std::env::var("BLOCK1_LLM_API_KEY").ok().filter(|k|!k.is_empty()),name})
+        let mode=std::env::var("BLOCK1_LLM_MODE").unwrap_or_else(|_|"local".to_owned()).trim().to_ascii_lowercase();
+        match mode.as_str(){
+            "disabled"=>bail!("Семантический анализ отключён: BLOCK1_LLM_MODE=disabled"),
+            "local"=>{
+                let name=std::env::var("BLOCK1_LOCAL_MODEL").unwrap_or_else(|_|LOCAL_MODEL.to_owned());
+                if name.trim().is_empty(){bail!("BLOCK1_LOCAL_MODEL пуст");}
+                Ok(Self{url:LOCAL_URL.to_owned(),key:None,name,local:true})
+            },
+            "external"=>{
+                let url=std::env::var("BLOCK1_LLM_URL").context("Нужно задать BLOCK1_LLM_URL для внешнего ИИ")?;
+                let name=std::env::var("BLOCK1_LLM_MODEL").context("Нужно задать BLOCK1_LLM_MODEL для внешнего ИИ")?;
+                if name.trim().is_empty(){bail!("BLOCK1_LLM_MODEL пуст");}
+                let parsed=url::Url::parse(&url).context("Некорректный BLOCK1_LLM_URL")?;
+                let hostname=parsed.host_str().unwrap_or("");
+                let loopback=matches!(hostname,"localhost"|"127.0.0.1"|"::1"|"[::1]");
+                let remote=std::env::var("BLOCK1_LLM_ALLOW_REMOTE").ok().as_deref()==Some("true");
+                if !matches!(parsed.scheme(),"http"|"https") || parsed.username()!="" || parsed.password().is_some(){bail!("Недопустимый BLOCK1_LLM_URL");}
+                if !loopback && (!remote || parsed.scheme()!="https") {bail!("Передача проектных документов внешней модели запрещена без BLOCK1_LLM_ALLOW_REMOTE=true и HTTPS");}
+                if !parsed.path().ends_with("/chat/completions"){bail!("BLOCK1_LLM_URL должен оканчиваться /chat/completions");}
+                Ok(Self{url,key:std::env::var("BLOCK1_LLM_API_KEY").ok().filter(|k|!k.is_empty()),name,local:false})
+            },
+            _=>bail!("BLOCK1_LLM_MODE: допустимы local, external, disabled"),
+        }
+    }
+    /// Cheap readiness check: model must actually be downloaded; "configured"
+    /// alone does not mean semantic inference is available.
+    async fn probe(&self)->Result<()> {
+        if !self.local {return Ok(());} // External availability is checked by its real request.
+        let client=reqwest::Client::builder().timeout(Duration::from_secs(4)).build()?;
+        let response=client.get("http://127.0.0.1:11434/api/tags").send().await
+            .context("Локальный ИИ не запущен. Установите Ollama: sudo bash scripts/setup-local-semantic.sh")?
+            .error_for_status().context("Локальный Ollama не отвечает")?;
+        let body:Value=response.json().await.context("Неправильный ответ локального Ollama")?;
+        let names=body.get("models").and_then(Value::as_array).ok_or_else(||anyhow!("Ollama не вернул список моделей"))?;
+        let installed=names.iter().filter_map(|v|v.get("name").and_then(Value::as_str)).any(|name|name==self.name);
+        if !installed {bail!("Локальная модель '{}' не установлена. Выполните sudo bash scripts/setup-local-semantic.sh или ollama pull {}",self.name,self.name);}
+        Ok(())
     }
     async fn ask(&self,system:&str,user:&str)->Result<Value>{
-        let client=reqwest::Client::builder().timeout(Duration::from_secs(140)).build()?;
+        let timeout=if self.local {Duration::from_secs(900)} else {Duration::from_secs(180)};
+        let client=reqwest::Client::builder().timeout(timeout).build()?;
         let mut request=client.post(&self.url).json(&json!({"model":self.name,"temperature":0,
-          "response_format":{"type":"json_object"},"messages":[{"role":"system","content":system},{"role":"user","content":user}]}));
+          "max_tokens":1024,"response_format":{"type":"json_object"},
+          "messages":[{"role":"system","content":system},{"role":"user","content":user}]}));
         if let Some(key)=&self.key{request=request.bearer_auth(key);}
         let response=request.send().await.context("Не удалось связаться с семантической моделью")?.error_for_status().context("Модель отказала в запросе")?;
         let raw=response.bytes().await?;
@@ -69,6 +103,22 @@ impl Model {
         let trimmed=content.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
         serde_json::from_str(trimmed).context("Модель вернула невалидный JSON-объект")
     }
+}
+
+/// Standalone diagnostic, does not connect to PostgreSQL or Synology.
+pub async fn check_cli()->Result<()> {
+    let model=Model::configured()?;
+    model.probe().await?;
+    let local=if model.local {"локальная"}else{"явно подключённая"};
+    println!("Семантическая модель установлена ({local}): {}",model.name);
+    // An installed model is not necessarily capable of JSON inference.
+    println!("Проверяю реальный ответ модели в JSON...");
+    let response=model.ask("Верни только JSON-объект с одним полем ok=true.","Верни JSON: {\"ok\":true}").await?;
+    if response.get("ok").and_then(Value::as_bool)!=Some(true) {
+        bail!("Модель ответила, но JSON-проверка не пройдена: {}",clip(&response.to_string(),160));
+    }
+    println!("Локальная семантика: тестовый JSON-ответ получен, модель готова к работе.");
+    Ok(())
 }
 
 #[derive(Clone,Debug)]struct Chunk {page:Option<i32>,line:i32,text:String}
@@ -293,6 +343,7 @@ async fn compare_job(st:Shared,package_id:i64,run_id:i64,job_id:i64,model:Model)
 /// model. Never delay or fail the contractor's publication if the LLM is down.
 pub async fn auto_compare(st:Shared,package_id:i64,run_id:i64,who:&str)->Result<()> {
     let model=match Model::configured(){Ok(m)=>m,Err(_)=>return Ok(())};
+    if model.probe().await.is_err(){return Ok(());}
     let project_state=project_requirements::checklist(&st.db,package_id).await?;
     if !project_state.signed || project_state.approved.is_empty(){return Ok(());}
     let job=sqlx::query("INSERT INTO block1_semantic_jobs(package_id,run_id,job_kind,status,model,created_by,started_at) VALUES($1,$2,'compare','running',$3,$4,now()) ON CONFLICT DO NOTHING RETURNING id")
@@ -318,6 +369,7 @@ pub async fn auto_compare(st:Shared,package_id:i64,run_id:i64,who:&str)->Result<
 async fn start(st:Shared,actor:access::Principal,package_id:i64,kind:&str)->Result<Redirect,WebError>{
     if !matches!(access::package_role(&st,&actor,package_id).await.as_deref(),Some("manager"|"engineer")){return Err(WebError::forbidden());}
     let model=Model::configured().map_err(|e|WebError::bad(e.to_string()))?;
+    model.probe().await.map_err(|e|WebError::bad(e.to_string()))?;
     let run_id=if kind=="compare" {
         sqlx::query_scalar::<_,i64>("SELECT id FROM check_runs WHERE package_id=$1 AND submission_id IS NOT NULL ORDER BY id DESC LIMIT 1")
             .bind(package_id).fetch_optional(&st.db).await?.ok_or_else(||WebError::bad("Сначала выполните обычную проверку конкретной поставки"))?.into()
@@ -390,16 +442,25 @@ pub async fn status(State(st):State<Shared>,Extension(actor):Extension<access::P
       "completed":r.get::<i32,_>("completed"),"found":r.get::<i32,_>("found"),"error":r.get::<Option<String>,_>("error_message")})).collect();
     let editable=matches!(access::package_role(&st,&actor,package_id).await.as_deref(),Some("manager"|"engineer"));
     let rows_html=evidence_rows(&st,package_id,editable).await?;
-    Ok(Json(json!({"jobs":items,"rows_html":rows_html})))
+    let readiness=match Model::configured(){Ok(m)=>m.probe().await.map(|_|json!({"ready":true,"model":m.name,"local":m.local})).unwrap_or_else(|e|json!({"ready":false,"error":e.to_string()})),Err(e)=>json!({"ready":false,"error":e.to_string()})};
+    Ok(Json(json!({"jobs":items,"rows_html":rows_html,"model_status":readiness})))
 }
 pub async fn panel(st:&Shared,package_id:i64,role:&str)->Result<String,WebError>{
-    let enabled=Model::configured().is_ok();
+    let model=Model::configured();
+    let readiness=match &model {Ok(m)=>m.probe().await,Err(err)=>Err(anyhow!("{err:#}"))};
+    let enabled=readiness.is_ok();
     let editable=matches!(role,"manager"|"engineer");
     let jobs=sqlx::query("SELECT job_kind,status,total,completed,found,error_message,created_at FROM block1_semantic_jobs WHERE package_id=$1 ORDER BY id DESC LIMIT 6")
         .bind(package_id).fetch_all(&st.db).await?;
     let mut html_out=String::from("<article id='semantic-block1'><details class='collapsible' open><summary>Семантическая проверка ИД (ИИ + доказательства)</summary><div>");
     html_out.push_str("<p>Шаг 1: извлечь предложения из распознанных КР/ПЗУ/ПОС/ППР. Шаг 2: инженер утверждает их в разделе «Требования из проекта». Шаг 3: обычная проверка выбранной поставки. Шаг 4: семантически сопоставить с ИД. Ответ модели является предложением, а не актом приёмки.</p>");
-    if !enabled {html_out.push_str("<p class='warn'>Семантический ИИ не настроен. Укажите BLOCK1_LLM_URL и BLOCK1_LLM_MODEL. Без них действуют только OCR, эвристики и количественные проверки.</p>");}
+    if enabled {
+        let name=model.as_ref().map(|m|m.name.as_str()).unwrap_or("?");
+        let type_label=if model.as_ref().map(|m|m.local).unwrap_or(false){"Локальная модель (без внешнего API)"}else{"Внешняя модель (разрешена администратором)"};
+        html_out.push_str(&format!("<p class='ok' id='semantic-model-status'>{}: <strong>{}</strong>. Проверка выполняется на сервере.</p>",html(type_label),html(name)));
+    } else {
+        html_out.push_str(&format!("<p class='warn' id='semantic-model-status'>Локальный семантический ИИ пока недоступен: {}. OCR и формальная проверка продолжают работать.</p>",html(&readiness.err().map(|e|e.to_string()).unwrap_or_default())));
+    }
     if enabled && editable {
         html_out.push_str(&format!("<div class='section-entry-actions'><form method='post' action='/packages/{package_id}/semantic/extract'>{}<button class='primary'>1. Семантически извлечь требования</button></form><form method='post' action='/packages/{package_id}/semantic/compare'>{}<button class='primary'>2. Проверить текущую поставку по утверждённым требованиям</button></form></div>",web::hidden(&st.csrf),web::hidden(&st.csrf)));
     }
@@ -415,7 +476,7 @@ pub async fn panel(st:&Shared,package_id:i64,role:&str)->Result<String,WebError>
     html_out.push_str("<h3>Сопоставленные доказательства (требуют решения инженера)</h3><p class='muted'>Отображаются результаты последней проверки, включая незавершённые задания. При ошибке не считать их полными.</p><table><thead><tr><th>Требование</th><th>Итог</th><th>Цитата ИД</th><th>Пояснение</th><th>Решение</th></tr></thead><tbody id='semantic-evidence-rows'>");
     html_out.push_str(&evidence);
     html_out.push_str("</tbody></table>");
-    html_out.push_str(&format!("</div></details></article><script>(function(){{const b=document.querySelector('[data-semantic-refresh]'),n=document.getElementById('semantic-progress');if(!b||!n)return;async function poll(){{try{{const r=await fetch(b.dataset.url,{{credentials:'same-origin',cache:'no-store'}});if(!r.ok)throw Error('HTTP '+r.status);const d=await r.json();const rows=document.getElementById('semantic-evidence-rows');if(rows&&typeof d.rows_html==='string')rows.innerHTML=d.rows_html;n.textContent=(d.jobs||[]).slice(0,2).map(x=>x.kind+': '+x.status+' '+x.completed+'/'+x.total+(x.error?' — '+x.error:'')).join(' · ');if((d.jobs||[]).some(x=>x.status==='running'))setTimeout(poll,4000);}}catch(e){{n.textContent=String(e)}}}}b.addEventListener('click',poll);poll();}})()</script>"));
+    html_out.push_str(&format!("</div></details></article><script>(function(){{const b=document.querySelector('[data-semantic-refresh]'),n=document.getElementById('semantic-progress');if(!b||!n)return;async function poll(){{try{{const r=await fetch(b.dataset.url,{{credentials:'same-origin',cache:'no-store'}});if(!r.ok)throw Error('HTTP '+r.status);const d=await r.json();const rows=document.getElementById('semantic-evidence-rows');if(rows&&typeof d.rows_html==='string')rows.innerHTML=d.rows_html;const mi=document.getElementById('semantic-model-status');if(mi&&d.model_status){{mi.textContent=d.model_status.ready?(d.model_status.local?'Локальный ИИ доступен: ':'Внешний ИИ доступен: ')+d.model_status.model:'Семантический ИИ недоступен: '+d.model_status.error;}}n.textContent=(d.jobs||[]).slice(0,2).map(x=>x.kind+': '+x.status+' '+x.completed+'/'+x.total+(x.error?' — '+x.error:'')).join(' · ');if((d.jobs||[]).some(x=>x.status==='running'))setTimeout(poll,4000);}}catch(e){{n.textContent=String(e)}}}}b.addEventListener('click',poll);poll();}})()</script>"));
     Ok(html_out)
 }
 
