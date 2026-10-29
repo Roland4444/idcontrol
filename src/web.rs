@@ -1,4 +1,4 @@
-use crate::{block1,access,portal,project_sources,project_requirements,semantic,contractor,ui_version,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
+use crate::{block1,checklist_result,access,portal,project_sources,project_requirements,semantic,contractor,ui_version,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
 use anyhow::Result;
 use axum::{
     body::{Body,Bytes},
@@ -161,10 +161,10 @@ fetch('/api/me',{{credentials:'same-origin'}}).then(r=>r.ok?r.json():null).then(
   setInterval(()=>document.querySelectorAll('.ocr-live').forEach(refresh),4000);
   document.querySelectorAll('.ocr-live').forEach(refresh);
 }})();
-</script><script>{package_actions}</script>{version_watch}</body></html>"#,
+</script><script>{package_actions}</script><script>{semantic_progress_js}</script>{version_watch}</body></html>"#,
         title=h(title),body=body,portal_style=include_str!("../assets/portal.css"),
         version_meta=ui_version::meta_tags(),version_watch=ui_version::watcher_tag(),
-        package_actions=include_str!("../assets/package-actions.js")))
+        package_actions=include_str!("../assets/package-actions.js"),semantic_progress_js=include_str!("../assets/semantic-progress.js")))
 }
 
 // Even a cached iframe URL is revalidated. Do not cache dynamically rendered HTML
@@ -382,7 +382,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     let mut body=format!(r##"<div class="crumb"><a href="/">Выбор объектов</a> › <a href="/projects/{}">{}</a> › {}</div>
       <section class="package-hero" style="--hero-image:url('/assets/projects/{}.webp?v={}')"><div><h1>{}</h1><p>⌖ {} · {} · Комплект исполнительной документации</p></div></section>
       <div class="package-shell"><aside class="package-sidebar"><div class="sidebar-project"><img src="/assets/projects/{}.webp?v={}" alt="Объект"><div><strong>{}</strong><small>{}</small></div></div><h3>Комплекты исполнительной документации</h3>{}</aside><div class="package-content role-{}">
-      <nav class="package-tabs" aria-label="Разделы проверки"><a href="#upload">Сдача ИД</a><a href="#references">Материалы для проверки</a><a href="#documents">Список документов</a><a href="#project-requirements">Требования из проекта</a><a href="#semantic-block1">Семантический анализ</a><a href="#work-register">Реестр работ</a><a href="#block1-evidence">Приложения и испытания</a><a href="#checks">Результаты проверки</a><a href="#remarks">Замечания</a><a href="#history">История проверок</a></nav>"##,
+      <nav class="package-tabs" aria-label="Разделы проверки"><a href="#upload">Сдача ИД</a><a href="#references">Материалы для проверки</a><a href="#documents">Список документов</a><a href="#project-requirements">Требования из проекта</a><a href="#semantic-block1">Семантический анализ</a><a href="#work-register">Реестр работ</a><a href="#block1-evidence">Приложения и испытания</a><a href="#completion">Комплектность по чек-листу</a><a href="#checks">Отчёты</a><a href="#remarks">Замечания</a><a href="#history">История проверок</a></nav>"##,
       pkg.project_id,h(&projects.name),h(&pkg.name),slug,ui_version::images_id(),h(&pkg.name),h(address),h(&projects.name),slug,ui_version::images_id(),h(&projects.name),h(address),sidebar,h(&actor_role));
     if let Some(notice)=params.notice.as_deref() {
         let msg=match notice {"classified"=>"Тип документа сохранён, комплект перепроверен.","uploaded"=>"Материалы проверки загружены; официальная версия ИД подрядчика не изменилась. Для сверки запустите новую проверку.","checklist"=>"Изменения чек-листа сохранены, комплект перепроверен.","checked"=>"Проверка завершена. Результат сохранён в истории.",_=>""};
@@ -408,7 +408,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     if approved_rules==0 {
         body.push_str("<p class=muted><strong>Внимание:</strong> нет утверждённых правил НТД. Проверка сможет выявить только ошибки комплектности и встроенные формальные несоответствия; нормативное соответствие не подтверждается.</p>");
     }
-    body.push_str("</section><nav class='package-steps' aria-label='Последовательность проверки'><a href='#upload'>1. Сдача ИД подрядчиком</a><a href='#references'>2. Материалы для проверки</a><a href='#checklist'>3. Чек-лист</a><a href='#checks'>4. Результаты</a><a href='#remarks'>5. Замечания</a><a href='#history'>6. История</a></nav>");
+    body.push_str("</section><nav class='package-steps' aria-label='Последовательность проверки'><a href='#upload'>1. Сдача ИД подрядчиком</a><a href='#references'>2. Материалы для проверки</a><a href='#checklist'>3. Настроить перечень</a><a href='#completion'>4. Комплектность</a><a href='#remarks'>5. Замечания</a><a href='#history'>6. История</a></nav>");
     if actor.superuser {
         body.push_str("<p><a href='/norms'>⚙ Добавить, отключить или экспортировать нормативные правила →</a> <small class=muted>(только суперадминистратор)</small></p>");
     }
@@ -420,7 +420,32 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     body.push_str(&format!("<section class=overview id=summary><h2>Результат проверки комплекта</h2><p class=muted>Прогресс показывает покрытие обязательных позиций файлами, <b>не</b> соответствие ГОСТ/СП. Рассматривается только выбранный комплект.</p><div class=metrics><div class=metric>Файлы ИД<strong>{id_docs}</strong><small>Материалы проверки: {ref_docs}</small></div><div class=metric>Чек-лист<strong>{completed}/{}</strong><small>Обязательных позиций и приложений</small></div><div class=metric>Замечания<strong>{unresolved}</strong><small>Требуют рассмотрения</small></div><div class=metric>Не привязаны<strong>{nonclassified}</strong><small>Файлов ИД</small></div></div>",checklist_total));
     body.push_str(&format!("<p><b>Комплектность: {coverage}</b></p>"));
     if let Some(n)=pct {body.push_str(&format!("<div class=summarybar role=progressbar aria-valuemin=0 aria-valuemax=100 aria-valuenow={n} aria-label='Покрытие чек-листа'><span style='width:{n}%'></span></div>"));}
-    body.push_str("<nav class=jump-links aria-label='Разделы комплекта'><a href=#remarks>Замечания<small>Результаты и решения инженера</small></a><a href=#documents>Документы<small>Файлы, типы и вложения</small></a><a href=#checklist>Чек-лист<small>Изменение обязательных позиций</small></a><a href=#project-requirements>Требования из проекта<small>КР, ПЗУ, ПОС и ППР с источниками</small></a><a href=#work-register>Реестр работ<small>Фактические объёмы, зоны и акты</small></a><a href=#block1-evidence>Приложения и испытания<small>Сертификаты, протоколы, приложения</small></a><a href=#upload>Сдача ИД<small>Одноразовая ссылка и версии подрядчика</small></a><a href=#references>Материалы для проверки<small>ПД, РД, НТД, приказы, СРО и документы-основания</small></a><a href=#classification>ИИ-классификация<small>Предложения модели и подтверждение</small></a><a href=#ocr>Обработка и прогресс<small>Фоновые задания OCR</small></a><a href=#norms-check>Нормативные правила<small>Подробные результаты</small></a></nav></section>");
+    body.push_str("<nav class=jump-links aria-label='Разделы комплекта'><a href=#completion>Комплектность<small>По каждому пункту чек-листа: да / нет / почему</small></a><a href=#remarks>Замечания<small>Решения инженера и технические вопросы отдельно</small></a><a href=#documents>Документы<small>Файлы, типы и вложения</small></a><a href=#checklist>Чек-лист<small>Изменение обязательных позиций</small></a><a href=#project-requirements>Требования из проекта<small>КР, ПЗУ, ПОС и ППР с источниками</small></a><a href=#work-register>Реестр работ<small>Фактические объёмы, зоны и акты</small></a><a href=#block1-evidence>Приложения и испытания<small>Сертификаты, протоколы, приложения</small></a><a href=#upload>Сдача ИД<small>Одноразовая ссылка и версии подрядчика</small></a><a href=#references>Материалы для проверки<small>ПД, РД, НТД, приказы, СРО и документы-основания</small></a><a href=#classification>ИИ-классификация<small>Предложения модели и подтверждение</small></a><a href=#ocr>Обработка и прогресс<small>Фоновые задания OCR</small></a><a href=#norms-check>Нормативные правила<small>Подробные результаты</small></a></nav></section>");
+    // Main user-facing result: catalogue checklist and quantitative evidence.
+    // Keep semantic analysis and technical OCR/classification findings separate.
+    let checklist_custom:Vec<checklist_result::CustomEntry>=custom_items.iter().map(|c|checklist_result::CustomEntry{
+        code:c.code.clone(),title:c.title.clone(),required:c.required
+    }).collect();
+    let checklist_html=checklist_result::render(&checklist_result::View{
+        catalog:&st.catalog,
+        work_type:pkg.catalog_name.as_deref().unwrap_or(""),
+        required:&with_project,
+        minima:&project_minimums,
+        files:&id_files,
+        custom:&checklist_custom,
+        operations:&operations,
+        work_links:&work_links,
+        support:&support,
+        support_links:&support_links,
+        project_approved:&project_state.approved,
+        has_delivery:selected_delivery.is_some(),
+        manifest_ok,
+        checklist_approved:approval.is_some(),
+        scope_approved:work_approved.is_some(),
+        project_approval_needed:project_state.candidates>0 && !project_state.signed,
+        historical:params.run_id.is_some(),
+    });
+    body.push_str(&checklist_html);
     // A compact action-oriented summary stays above ALL detailed menus.
     let missing=checklist_total.saturating_sub(completed);
     body.push_str("<section class=attention-panel aria-labelledby=attention-title><h2 id=attention-title>Что требует внимания</h2><p class=muted>Ниже перечислены только сводные результаты. Подробные таблицы находятся внизу страницы: нажмите на ссылку, чтобы открыть нужный раздел.</p><div class=attention-list>");
@@ -696,15 +721,30 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     }
     panel_html.push_str("<p><a href=#remarks>Просмотреть замечания →</a> · <a href=#history>История проверок →</a></p></div></details></article>");
     panels.insert("checks",std::mem::take(&mut panel_html));
-    panel_html.push_str("<article id=remarks><details class=collapsible><summary>Замечания и решения инженера</summary><div><table><tr><th>Блок и код</th><th>Источник и описание</th><th>Результат</th><th>Решение инженера</th></tr>");
-    for f in findings{
-        panel_html.push_str(&format!("<tr><td>{} / {}</td><td><small>{}</small><p>{}</p>{}</td><td class=status>{}</td><td><form method=post action=\"/findings/{}/review\">{}<select name=status>",f.block,h(&f.rule_code),h(&f.source_location),h(&f.description),if f.reference.is_empty(){"".to_string()}else{format!("<small>{}</small>",h(&f.reference))},if f.result=="mismatch"{"Выявлено несоответствие"}else{"Требуется ручная проверка"},f.id,hidden(&st.csrf)));
-        for (value,label) in [("pending","На рассмотрении"),("confirmed","Подтверждено"),("rejected","Отклонено"),("resolved","Устранено")]{
-            let sel=if f.review_status==value {"selected"}else{""};panel_html.push_str(&format!("<option value={value} {sel}>{label}</option>"));
+    // Technical classification/OCR issues must NOT be mixed with checklist verdicts.
+    // They remain accessible and actionable without flooding the main screen.
+    let is_technical=|f:&Finding| matches!(f.rule_code.as_str(),
+        "CLASSIFY"|"OCR"|"OCR-CONF"|"E08"|"METADATA-INCOMPLETE");
+    let technical_count=findings.iter().filter(|f|is_technical(f)).count();
+    let issue_count=findings.len()-technical_count;
+    panel_html.push_str(&format!("<article id=remarks><details class=collapsible><summary>Замечания инженера ({issue_count})</summary><div><p class=muted>Замечания по проверке отделены от технических проблем OCR и классификации. Итог по позициям — выше, в разделе <a href='#completion'>«Комплектность по чек-листу»</a>. Семантические доказательства — в отдельном разделе.</p>"));
+    for (group,filter) in [
+        ("Проверочные замечания",false),
+        ("Технические вопросы: распознавание и классификация",true),
+    ] {
+        let count=findings.iter().filter(|f|is_technical(f)==filter).count();
+        panel_html.push_str(&format!("<details class='findings-group' {}><summary>{group} · {count}</summary><div class='findings-table-scroll'><table><thead><tr><th>Блок / код</th><th>Источник и причина</th><th>Результат</th><th>Решение инженера</th></tr></thead><tbody>",if !filter {"open"}else{""}));
+        for f in findings.iter().filter(|f|is_technical(f)==filter){
+            panel_html.push_str(&format!("<tr><td>{} / {}</td><td><small>{}</small><p>{}</p>{}</td><td class=status>{}</td><td><form method=post action=\"/findings/{}/review\">{}<select name=status>",f.block,h(&f.rule_code),h(&f.source_location),h(&f.description),if f.reference.is_empty(){"".to_string()}else{format!("<small>{}</small>",h(&f.reference))},if f.result=="mismatch"{"Выявлено несоответствие"}else{"Требуется ручная проверка"},f.id,hidden(&st.csrf)));
+            for (value,label) in [("pending","На рассмотрении"),("confirmed","Подтверждено"),("rejected","Отклонено"),("resolved","Устранено")]{
+                let sel=if f.review_status==value {"selected"}else{""};panel_html.push_str(&format!("<option value={value} {sel}>{label}</option>"));
+            }
+            panel_html.push_str(&format!("</select><input name=comment placeholder=Комментарий value=\"{}\"><button>Сохранить</button></form></td></tr>",h(&f.comment)));
         }
-        panel_html.push_str(&format!("</select><input name=comment placeholder=Комментарий value=\"{}\"><button>Сохранить</button></form></td></tr>",h(&f.comment)));
+        if count==0 {panel_html.push_str("<tr><td colspan='4'>Замечаний этой категории нет.</td></tr>");}
+        panel_html.push_str("</tbody></table></div></details>");
     }
-    panel_html.push_str("</table><p class=muted>Отсутствие замечаний не подтверждает соответствие всем строительным нормам. Применяются только утверждённые правила; НТД не придумываются.</p></div></details></article>");
+    panel_html.push_str("<p class=muted>Отсутствие замечаний не подтверждает соответствие всем строительным нормам.</p></div></details></article>");
     panels.insert("remarks",std::mem::take(&mut panel_html));
     panel_html.push_str("<article id=history><details class=collapsible><summary>История проверок</summary><div><table><thead><tr><th>Проверка</th><th>Дата и время</th><th>Источник</th><th>Действия</th></tr></thead><tbody>");
     for run in &runs {
@@ -720,8 +760,8 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     if norm_checks.is_empty(){panel_html.push_str("<tr><td colspan=3>Нет записей нормативных проверок для выбранного запуска. Проверьте, утверждены ли правила и выполнено ли распознавание.</td></tr>");}
     panel_html.push_str("</table></div></details></article>");
     panels.insert("norms-check",std::mem::take(&mut panel_html));
-    // Match the screen mock-up: upload and recent documents immediately below
-    // the tabs. Existing tables and audit history remain further down.
+    // Keep checklist outcome visible first; uploads and recent documents are
+    // below it, ahead of technical settings. Anchors still link to each section.
     let mut primary=String::new();
     if let Some(upload_panel)=panels.remove("upload") {
         primary.push_str("<section class='main-upload-panel'>");
@@ -740,9 +780,9 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     }
     if latest.is_empty(){primary.push_str("<tr><td colspan='4'>Документы ещё не загружены.</td></tr>");}
     primary.push_str("</tbody></table></section>");
-    if let Some(pos)=body.find("<section class=overview id=summary>") {body.insert_str(pos,&primary);}else{body.push_str(&primary);}
+    if let Some(pos)=body.find("<section class=detail-sections ") {body.insert_str(pos,&primary);}else{body.push_str(&primary);}
     let contractor_panel=contractor::package_controls(&st,&actor,id).await?;
-    if let Some(pos)=body.find("<section class=overview id=summary>") {body.insert_str(pos,&contractor_panel);}else{body.push_str(&contractor_panel);}
+    if let Some(pos)=body.find("<section class=detail-sections ") {body.insert_str(pos,&contractor_panel);}else{body.push_str(&contractor_panel);}
     body.push_str("<section class=detail-sections id=detail-sections aria-labelledby=details-title><h2 id=details-title>Подробные разделы и настройки проверок</h2><p class=detail-intro>Нажмите на название раздела, чтобы открыть таблицы и параметры. Из вкладок выше можно сразу перейти к нужной проверке. Для запуска новой проверки используйте кнопку «Запустить проверку комплекта».</p>");
     for (title,description,ids) in [
         ("Результаты проверок","Отчёты, замечания, история и утверждённые нормативные правила",vec!["checks","remarks","history","norms-check"]),

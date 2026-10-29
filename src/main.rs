@@ -5,6 +5,7 @@ mod project_sources;
 mod project_requirements;
 mod semantic;
 mod block1;
+mod checklist_result;
 mod catalog;
 mod classification;
 mod config;
