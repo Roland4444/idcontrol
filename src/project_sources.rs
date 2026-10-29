@@ -248,6 +248,11 @@ async fn process_source_inner(st:&Shared,id:i64)->Result<()> {
         .bind(id).bind(&nas_file).bind(&parsed.text).bind(&parsed.status).bind(parsed.confidence).execute(&mut *tx).await?;
     tx.commit().await?;
     sync_source_to_packages(&st.db,id).await?;
+    // Generate auditable Block-1 proposals from the current project revision.
+    // This is NOT an automatic approval of construction requirements.
+    if let Err(err)=crate::project_requirements::extract_source(&st.db,&st.catalog,id).await {
+        tracing::error!(source_id=id,"Cannot extract project requirements: {err:#}");
+    }
     Ok(())
 }
 

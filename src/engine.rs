@@ -1,5 +1,5 @@
 //! MVP rules: absence of evidence NEVER implies compliance.
-use crate::{block1, catalog::Catalog, models::{Document, FindingInput}, norms, repo};
+use crate::{block1, project_requirements, catalog::Catalog, models::{Document, FindingInput}, norms, repo};
 use anyhow::Result;
 use chrono::NaiveDate;
 use once_cell::sync::Lazy;
@@ -74,10 +74,32 @@ async fn analyze_internal(db:&PgPool,catalog:&Catalog,package_id:i64,source:&str
             findings.push(FindingInput::new(1,"IMPORT-GAP",format!("В поставке по описи {} файлов, зарегистрировано как ИД: {}. Проверьте импорт, поддерживаемые форматы и классификацию, прежде чем оценивать комплектность.",scope.expected_files,inputs.len())));
         }
     }
-    let required:Vec<String>=serde_json::from_str(&package.required_codes_json).unwrap_or_default();
+    let mut required:Vec<String>=serde_json::from_str(&package.required_codes_json).unwrap_or_default();
+    let project_state=project_requirements::checklist(db,package_id).await?;
+    let mut project_basis=std::collections::HashMap::new();
+    // Candidates are merely evidence until the engineer signs off against the
+    // exact current project-source revisions. Never import draft decisions.
+    if project_state.candidates>0 {
+        if !project_state.signed {
+            findings.push(FindingInput::new(1,"PROJECT-REQUIREMENTS-PENDING",
+                format!("Проектные требования из КР/ПЗУ/ПОС/ППР не утверждены для текущих редакций. Требуют решения: {}. Проверьте страницу «Требования из проекта».",project_state.pending)));
+        } else {
+            for item in &project_state.approved {
+                if !required.contains(&item.code){required.push(item.code.clone());}
+                project_basis.entry(item.code.clone()).or_insert_with(||format!("{}; {}{}: {}",item.source,
+                    item.title,item.page.map(|p|format!(", страница {p}")).unwrap_or_default(),item.basis));
+            }
+        }
+    }
     let counts=block1::counted_unique_codes(inputs.iter().copied());
     let operations=block1::work_operations(db,package_id).await?;
-    let minimums=block1::effective_minimums(&block1::minimums(db,package_id).await?,&operations);
+    let mut minimums=block1::effective_minimums(&block1::minimums(db,package_id).await?,&operations);
+    if project_state.signed {
+        for item in &project_state.approved {
+            let count=minimums.entry(item.code.clone()).or_insert(1);
+            *count=(*count).max(item.count);
+        }
+    }
     let scope_approved:bool=sqlx::query_scalar("SELECT block1_scope_approved_at IS NOT NULL FROM packages WHERE id=$1")
         .bind(package_id).fetch_one(db).await?;
     if !scope_approved {
@@ -102,7 +124,9 @@ async fn analyze_internal(db:&PgPool,catalog:&Catalog,package_id:i64,source:&str
                 let present=counts.get(code).copied().unwrap_or(0);
                 if present<expected {
                     let mut f=FindingInput::new(1,format!("C-{}",code),format!("Недостаточно документов: {} (пункт {}). Требуется: {}, найдено: {} в данной поставке.",item.title,code,expected,present)).mismatch();
-                    f.reference=format!("Каталог ИД: {}",item.norm_reference);
+                    f.reference=project_basis.get(code)
+                        .cloned().unwrap_or_else(||format!("Каталог ИД: {}",item.norm_reference));
+                    if let Some(basis)=project_basis.get(code) {f.ntd=basis.clone();}
                     findings.push(f);
                 }
             }
@@ -217,15 +241,29 @@ async fn analyze_internal(db:&PgPool,catalog:&Catalog,package_id:i64,source:&str
     }).count();
     let total=required.len()+custom_count+operations.len()+requirements.len();
     let confirmed=catalog_done+custom_done+work_done+support_done;
-    let checks_ready=approval.is_some() && scope_approved && !inputs.is_empty() && total>0 &&
+    let checks_ready=approval.is_some() && scope_approved &&
+        (project_state.candidates==0 || project_state.signed) && !inputs.is_empty() && total>0 &&
         block1::complete_metadata(&inputs) && delivery.map(|d|block1::manifest_problems(d,&inputs).is_empty()).unwrap_or(!has_delivery_history) &&
         !findings.iter().any(|f|f.block==1 && f.result=="manual" &&
             matches!(f.rule_code.as_str(),"C-UNKNOWN"|"C-NOT-CONFIGURED"|"IMPORT-GAP"|"CLASSIFY"));
     let coverage=if checks_ready {Some(((confirmed*100)/total).min(100) as i32)}else{None};
     let ready_for_engineer_review=coverage==Some(100) && !findings.iter().any(|f|f.block==1 && f.result=="mismatch");
+    let project_sig=project_requirements::source_signature(db,package.project_id).await?;
+    let project_snapshot=serde_json::json!({
+      "source_signature": project_sig,
+      "signed": project_state.signed,
+      "pending_count": project_state.pending,
+      "required": project_state.approved.iter().map(|r|serde_json::json!({
+        "candidate_id":r.candidate_id,"catalog_code":r.code,"min_count":r.count,
+        "source":r.source,"page":r.page,"excerpt":r.basis
+      })).collect::<Vec<_>>()
+    });
     let mut tx=db.begin().await?;
     let run_id:(i64,)=sqlx::query_as("INSERT INTO check_runs(package_id,source,rule_version,submission_id) VALUES($1,$2,3,$3) RETURNING id")
         .bind(package_id).bind(source).bind(delivery.map(|d|d.id)).fetch_one(&mut *tx).await?;
+    sqlx::query("INSERT INTO check_run_project_requirements(run_id,source_signature,signed,snapshot) VALUES($1,$2,$3,$4)")
+        .bind(run_id.0).bind(&project_sig).bind(project_state.signed).bind(project_snapshot)
+        .execute(&mut *tx).await?;
     sqlx::query("INSERT INTO check_run_block1_metrics(run_id,required_total,confirmed_total,coverage_pct,ready_for_engineer_review) VALUES($1,$2,$3,$4,$5)")
         .bind(run_id.0).bind(total as i32).bind(confirmed as i32).bind(coverage)
         .bind(ready_for_engineer_review).execute(&mut *tx).await?;

@@ -126,11 +126,12 @@ pub async fn project(State(st):State<Shared>,Extension(user):Extension<Principal
     let bulk=if manager {format!(r#"<form method="post" action="/projects/{id}/works/all" class="inline">{}<button class="primary">＋ Создать все 14 видов работ</button></form>"#,web::hidden(&st.csrf))} else {String::new()};
     let assignment=if manager {format!(r#"<details class="admin-management"><summary>Управление доступом сотрудников к видам работ</summary><div class="section-copy">Выберите сотрудника по имени. Права назначаются на сервере и действуют для документов и проверок.</div><table><thead><tr><th>Вид работ</th><th>Назначить сотрудника</th></tr></thead><tbody>{assigned_table}</tbody></table>{}</details>"#,employee_picker())}else{String::new()};
     let sources_panel=crate::project_sources::panel(&st,&user,id).await?;
+    let requirements_panel=crate::project_requirements::project_panel(&st,id,&user).await?;
     let empty=if works.is_empty() {"<p class='empty-work'>Доступных видов работ пока нет. Администратор проекта должен создать комплект и назначить вам доступ.</p>"}else{""};
     let body=format!(r#"<div class="crumb"><a href="/">← К выбору объектов</a> <span>›</span> {}</div>
       <section class="project-hero" style="--hero-image:url('{}')"><div class="project-hero-content"><h1>{}</h1><p>⌖ {}, Астрахань</p><div class="hero-stats"><span>▤ Жилой комплекс</span><span>▥ Исполнительная документация</span><span>◫ {active} из 14 разделов</span></div></div></section>
       <div class="workflow-hint"><strong>Как проверить документы?</strong><span>1. Загрузите КР, ПЗУ, ПОС, ППР и РД в библиотеку ЖК ниже → 2. Откройте вид работ и получите ИД от подрядчика по одноразовой ссылке → 3. Утвердите применимые требования → 4. Запустите проверку.</span><small>Проектные документы подключаются ко всем созданным видам работ; исходные ZIP подрядчика остаются отдельными.</small></div>
-      {sources_panel}<div class="section-heading"><div><h2>Комплекты исполнительной документации</h2><p>Одно нажатие на вид работ открывает загрузку и проверку конкретного комплекта.</p></div><span class="counter">{active} разделов создано</span>{bulk}</div>
+      {sources_panel}{requirements_panel}<div class="section-heading"><div><h2>Комплекты исполнительной документации</h2><p>Одно нажатие на вид работ открывает загрузку и проверку конкретного комплекта.</p></div><span class="counter">{active} разделов создано</span>{bulk}</div>
       <div class="works-grid">{works}</div>{empty}{assignment}"#,h(&name),photo(slug),h(&name),h(address));
     Ok(web::layout(&name,body))
 }

@@ -1,4 +1,4 @@
-use crate::{block1,access,portal,project_sources,project_requirements,semantic,contractor,ui_version,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
+use crate::{block1,access,portal,project_sources,project_requirements,contractor,ui_version,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
 use anyhow::Result;
 use axum::{
     body::{Body,Bytes},
@@ -265,10 +265,6 @@ pub fn router(state:Shared)->Router{
         .route("/packages/{id}/scan",post(manual_scan))
         .route("/packages/{id}/scan/status",get(package_scan_status))
         .route("/packages/{id}/check",post(run_package_check))
-        .route("/packages/{id}/semantic/extract",post(semantic::extract))
-        .route("/packages/{id}/semantic/compare",post(semantic::compare))
-        .route("/packages/{id}/semantic/status",get(semantic::status))
-        .route("/packages/{id}/semantic/evidence/{evidence_id}/review",post(semantic::review))
         .route("/packages/{id}/ai-consent",post(set_ai_consent))
         .route("/packages/{id}/ai-check",post(queue_ai_check))
         .route("/ai-suggestions/{id}/review",post(review_ai_suggestion))
@@ -396,7 +392,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     let mut body=format!(r##"<div class="crumb"><a href="/">Выбор объектов</a> › <a href="/projects/{}">{}</a> › {}</div>
       <section class="package-hero" style="--hero-image:url('/assets/projects/{}.webp?v={}')"><div><h1>{}</h1><p>⌖ {} · {} · Комплект исполнительной документации</p></div></section>
       <div class="package-shell"><aside class="package-sidebar"><div class="sidebar-project"><img src="/assets/projects/{}.webp?v={}" alt="Объект"><div><strong>{}</strong><small>{}</small></div></div><h3>Комплекты исполнительной документации</h3>{}</aside><div class="package-content role-{}">
-      <nav class="package-tabs" aria-label="Разделы проверки"><a href="#upload">Сдача ИД</a><a href="#references">Материалы для проверки</a><a href="#documents">Список документов</a><a href="#project-requirements">Требования из проекта</a><a href="#semantic-block1">Семантический анализ</a><a href="#work-register">Реестр работ</a><a href="#block1-evidence">Приложения и испытания</a><a href="#checks">Результаты проверки</a><a href="#remarks">Замечания</a><a href="#history">История проверок</a></nav>"##,
+      <nav class="package-tabs" aria-label="Разделы проверки"><a href="#upload">Сдача ИД</a><a href="#references">Материалы для проверки</a><a href="#documents">Список документов</a><a href="#project-requirements">Требования из проекта</a><a href="#work-register">Реестр работ</a><a href="#block1-evidence">Приложения и испытания</a><a href="#checks">Результаты проверки</a><a href="#remarks">Замечания</a><a href="#history">История проверок</a></nav>"##,
       pkg.project_id,h(&projects.name),h(&pkg.name),slug,ui_version::images_id(),h(&pkg.name),h(address),h(&projects.name),slug,ui_version::images_id(),h(&projects.name),h(address),sidebar,h(&actor_role));
     if let Some(notice)=params.notice.as_deref() {
         let msg=match notice {"classified"=>"Тип документа сохранён, комплект перепроверен.","uploaded"=>"Материалы проверки загружены; официальная версия ИД подрядчика не изменилась. Для сверки запустите новую проверку.","checklist"=>"Изменения чек-листа сохранены, комплект перепроверен.","checked"=>"Проверка завершена. Результат сохранён в истории.",_=>""};
@@ -492,7 +488,6 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     panels.insert("checklist",std::mem::take(&mut panel_html));
     let project_requirement_panel=project_requirements::panel(&st,id,&actor_role).await?;
     panels.insert("project-requirements",project_requirement_panel);
-    panels.insert("semantic-block1",semantic::panel(&st,id,&actor_role).await?);
     panel_html.push_str("<article id=work-register><details class=collapsible open><summary>Блок 1 — реестр фактически выполненных работ и необходимого количества ИД</summary><div><p>Фиксируйте каждую зону, этап СМР и количество актов по ПД/РД. Без подтверждённого реестра система не выводит итоговый процент. Количество одинаковых документов суммируется по зонам; прошлые ревизии не засчитываются.</p>");
     panel_html.push_str(&format!("<p><b>Реестр работ:</b> {}</p>",work_approved.as_ref().map(|v|format!("Подтверждён: {}",h(v))).unwrap_or_else(||"Не подтверждён".into())));
     if !operations.is_empty() {
@@ -760,7 +755,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     body.push_str("<section class=detail-sections id=detail-sections aria-labelledby=details-title><h2 id=details-title>Подробные разделы и настройки проверок</h2><p class=detail-intro>Нажмите на название раздела, чтобы открыть таблицы и параметры. Из вкладок выше можно сразу перейти к нужной проверке. Для запуска новой проверки используйте кнопку «Запустить проверку комплекта».</p>");
     for (title,description,ids) in [
         ("Результаты проверок","Отчёты, замечания, история и утверждённые нормативные правила",vec!["checks","remarks","history","norms-check"]),
-        ("Документы и комплект","Файлы, версии, категории контрольных материалов и чек-лист",vec!["documents","checklist","project-requirements","semantic-block1","work-register","block1-evidence"]),
+        ("Документы и комплект","Файлы, версии, категории контрольных материалов и чек-лист",vec!["documents","checklist","project-requirements","work-register","block1-evidence"]),
         ("Распознавание и ИИ","Предложения классификатора, очередь OCR и настройки внешнего ИИ",vec!["classification","ocr","ai-check"]),
     ] {
         body.push_str(&format!("<div class=detail-group><h3>{title}</h3><p>{description}</p>"));
@@ -1254,9 +1249,6 @@ async fn run_package_check(State(st):State<Shared>,Extension(actor):Extension<ac
     let _pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
     // Authorization middleware permits only manager/engineer to POST here.
     let run=engine::analyze(&st.db,&st.catalog,id,"manual_ui").await?;
-    if let Err(err)=semantic::auto_compare(st.clone(),id,run,&format!("bitrix:{}:{}",actor.member,actor.user_id)).await {
-        tracing::warn!(package=id,"Failed to schedule semantic check: {err:#}");
-    }
     repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"manual_check",&format!("package={id} run={run}")).await?;
     Ok(Redirect::to(&format!("/packages/{id}?run_id={run}&notice=checked#checks")))
 }
