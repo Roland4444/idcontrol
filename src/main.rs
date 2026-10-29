@@ -3,6 +3,7 @@ mod access;
 mod portal;
 mod project_sources;
 mod project_requirements;
+mod semantic;
 mod block1;
 mod catalog;
 mod classification;
@@ -120,6 +121,7 @@ async fn main()->Result<()> {
         synology_connected:AtomicBool::new(false),scan_lock:tokio::sync::Mutex::new(()),csrf,
         scan_status:std::sync::RwLock::new(web::ScanStatus::default()),debug_login});
     project_sources::recover_interrupted(&st).await?;
+    semantic::recover(&st.db).await?;
     // A manual generation interrupted by a previous process crash is retryable.
     sqlx::query("UPDATE project_requirement_generation_jobs SET status='error',error_message='Анализ прерван перезапуском. Нажмите «Сформировать требования» повторно.',finished_at=now() WHERE status='running'")
         .execute(&st.db).await?;
