@@ -478,13 +478,54 @@ impl Drop for ReporterGuard {fn drop(&mut self){self.0.abort();}}
 
 struct ProgressCounters {
     stage:AtomicU8,done:AtomicU64,total:AtomicU64,
+    // The expensive final 4% contains per-file OCR, not only SQL inserts.
+    // Keep the currently processed filename and OCR page counters visible.
+    current_file:std::sync::Mutex<String>,
+    ocr_current:AtomicU64,ocr_total:AtomicU64,
+    ocr_phase:std::sync::Mutex<String>,
 }
 impl ProgressCounters {
-    fn new()->Self {Self{stage:AtomicU8::new(0),done:AtomicU64::new(0),total:AtomicU64::new(1)}}
+    fn new()->Self {Self{
+        stage:AtomicU8::new(0),done:AtomicU64::new(0),total:AtomicU64::new(1),
+        current_file:std::sync::Mutex::new(String::new()),
+        ocr_current:AtomicU64::new(0),ocr_total:AtomicU64::new(0),
+        ocr_phase:std::sync::Mutex::new(String::new()),
+    }}
     fn phase(&self,phase:u8,total:u64) {
         self.done.store(0,Ordering::Relaxed);
         self.total.store(total.max(1),Ordering::Relaxed);
         self.stage.store(phase,Ordering::Release);
+    }
+    fn waiting_for_scan(&self) {
+        if let Ok(mut file)=self.current_file.lock() {
+            *file="Ожидание завершения сканирования Synology".into();
+        }
+    }
+    fn start_file(&self,index:usize,total:usize,filename:&str) {
+        if let Ok(mut file)=self.current_file.lock() {
+            *file=format!("Файл {index}/{total}: {}",filename.chars().take(90).collect::<String>());
+        }
+        if let Ok(mut stage)=self.ocr_phase.lock() {*stage="Подготовка документа".into();}
+        self.ocr_current.store(0,Ordering::Relaxed);
+        self.ocr_total.store(0,Ordering::Relaxed);
+    }
+    fn record_ocr(&self,event:&crate::docs::OcrProgress) {
+        if let Ok(mut stage)=self.ocr_phase.lock() {
+            *stage=match event.stage {
+                "local_wait"=>"Ожидание OCR".into(),
+                "local_workers"=>"Запуск OCR".into(),
+                "render"|"render_queued"=>"Подготовка страниц".into(),
+                "local_page"|"local_page_start"=>"Распознавание страниц".into(),
+                "local_done"|"result"=>"OCR завершён".into(),
+                "error"|"page_error"=>"Ошибка OCR".into(),
+                _=>"Извлечение текста".into(),
+            };
+        }
+        // Only completed pages count; rendering is independent and concurrent.
+        if matches!(event.stage,"local_page"|"local_done") && event.total>0 {
+            self.ocr_total.store(event.total as u64,Ordering::Relaxed);
+            self.ocr_current.fetch_max(event.current.max(0) as u64,Ordering::Relaxed);
+        }
     }
 }
 
@@ -498,12 +539,23 @@ async fn progress_reporter(db:sqlx::PgPool,submission:i64,p:Arc<ProgressCounters
         let total=p.total.load(Ordering::Relaxed).max(1);
         let fraction=bytes.min(total) as f64 / total as f64;
         let (label,percent)=match phase {
-            0=>("queued",0),
-            1=>("extracting",(fraction*25.0).floor() as i16),
-            2=>("synology",25+(fraction*70.0).floor() as i16),
-            3=>("publishing",96),
-            4=>("importing",96+(fraction*3.0).floor() as i16),
-            _=>("publishing",96),
+            0=>("queued".to_string(),0),
+            1=>("extracting".to_string(),(fraction*25.0).floor() as i16),
+            2=>("synology".to_string(),25+(fraction*70.0).floor() as i16),
+            3=>("publishing".to_string(),96),
+            4=>{
+                let filename=p.current_file.lock().map(|v|v.clone()).unwrap_or_default();
+                let step=p.ocr_phase.lock().map(|v|v.clone()).unwrap_or_default();
+                let pages=p.ocr_total.load(Ordering::Relaxed);
+                let completed=p.ocr_current.load(Ordering::Relaxed).min(pages);
+                let extra=if pages>0 {format!(" · OCR {completed}/{pages} стр.")}else{String::new()};
+                let detail=if filename.is_empty() {"Регистрация документов".to_owned()}
+                    else {format!("{} · {}{}",filename,step,extra)};
+                let file_fraction=if pages>0 {completed as f64/pages as f64}else{0.0};
+                let total_fraction=((bytes.min(total) as f64)+file_fraction)/total as f64;
+                (format!("importing · {detail}"),96+(total_fraction*3.0).floor() as i16)
+            },
+            _=>("publishing".to_string(),96),
         };
         let _=sqlx::query("UPDATE contractor_submissions SET processing_stage=$2,processing_percent=$3,processed_bytes=$4,processing_total_bytes=$5,progress_updated_at=now() WHERE id=$1 AND status='uploading'")
             .bind(submission).bind(label).bind(percent).bind(bytes.min(i64::MAX as u64) as i64)
@@ -517,18 +569,25 @@ async fn progress_reporter(db:sqlx::PgPool,submission:i64,p:Arc<ProgressCounters
 // The same routine is used to recover older, already-published revisions.
 async fn register_delivery_files(
     st:&Shared,package_id:i64,delivery_folder:&str,
-    files:&[SafeFile],progress:Option<&ProgressCounters>
+    files:&[SafeFile],progress:Option<&Arc<ProgressCounters>>
 )->Result<()> {
     // The one-use link is the authoritative binding to this exact package.
     repo::validate_segment(delivery_folder)?;
     // Serialise delivery indexing with the periodic scanner to avoid version
     // races on the same (package_id, relative_path).
+    if let Some(progress)=progress {progress.waiting_for_scan();}
     let _guard=st.scan_lock.lock().await;
     for (idx,item) in files.iter().enumerate() {
         let (relative,_)=decode_zip_path(item.relative.as_bytes())?;
         let expected=format!("ИД/{delivery_folder}/{relative}");
-        scanner::ingest_published(
-            &st.db,&st.cfg,&st.catalog,package_id,&item.local,&expected
+        if let Some(progress)=progress {progress.start_file(idx+1,files.len(),&relative);}
+        let ocr_callback:Option<crate::docs::ProgressCallback>=progress.map(|progress| {
+            let p=Arc::clone(progress);
+            let callback:crate::docs::ProgressCallback=Arc::new(move |event|p.record_ocr(&event));
+            callback
+        });
+        scanner::ingest_published_with_progress(
+            &st.db,&st.cfg,&st.catalog,package_id,&item.local,&expected,ocr_callback
         ).await?;
         // ingest_published() returns None for an already-indexed document.
         // Ensure the active row exists; otherwise the check must not start.
@@ -805,10 +864,12 @@ pub async fn package_controls(st:&Shared,actor:&Principal,package_id:i64)->Resul
         }
         html.push_str("</table>");
     }
-    html.push_str("<h3>Полученные комплекты и версии</h3><table><thead><tr><th>Поставка</th><th>Дата</th><th>Состояние</th><th>Контроль / действия</th></tr></thead><tbody>");
+    let mut has_active_import=false;
+    html.push_str("<h3>Полученные комплекты и версии</h3><table id='contractor-submissions-table'><thead><tr><th>Поставка</th><th>Дата</th><th>Состояние</th><th>Контроль / действия</th></tr></thead><tbody>");
     for row in rows {
         let revision:i32=row.try_get("revision")?;
         let status:String=row.try_get("status")?;
+        if matches!(status.as_str(),"uploading"|"checking") {has_active_import=true;}
         let receipt_id:i64=row.try_get("id")?;
         let uploaded:String=row.try_get("uploaded_at")?;
         let sha:String=row.try_get("archive_sha256")?;
@@ -827,7 +888,7 @@ pub async fn package_controls(st:&Shared,actor:&Principal,package_id:i64)->Resul
                 }else {String::new()};
                 ("Ошибка доставки / обработки",action)
             },
-            "uploading"=>("Приём / запись на Synology",String::new()),
+            "uploading"=>("Импорт документов",format!("<a href='/packages/{package_id}#contractor'>Обновить состояние</a>")),
             _=>("Проверяется",String::new()),
         };
         let stage:String=row.try_get("processing_stage")?;
@@ -844,7 +905,34 @@ pub async fn package_controls(st:&Shared,actor:&Principal,package_id:i64)->Resul
             .unwrap_or_default();
         html.push_str(&format!("<tr><td><b>ИД-{package_id}-{revision:05}</b>{folder_label}<small style='display:block'>SHA-256: {}…</small></td><td>{}</td><td>{}{}{}</td><td>{}</td></tr>",h(&sha[..12]),h(&uploaded),label,progress,failure,actions));
     }
-    html.push_str("</tbody></table></section>");
+    html.push_str("</tbody></table>");
+    if has_active_import {
+        // Refresh only the submissions table; no navigation or loss of scroll position.
+        html.push_str(r#"<p class='minor'>Статусы поставок обновляются автоматически каждые 12 секунд.</p>
+<script>(function(){
+  const tableId='contractor-submissions-table';
+  let busy=false;
+  const timer=setInterval(async()=>{
+    if(busy || document.hidden)return;
+    busy=true;
+    try {
+      const response=await fetch(window.location.href,{credentials:'same-origin',cache:'no-store'});
+      if(!response.ok)return;
+      const doc=new DOMParser().parseFromString(await response.text(),'text/html');
+      const updated=doc.getElementById(tableId);
+      const current=document.getElementById(tableId);
+      if(updated && current){
+        current.replaceWith(updated);
+        if(!updated.textContent.includes('importing') &&
+           !updated.textContent.includes('Приём / запись') &&
+           !updated.textContent.includes('Импорт документов и проверка') &&
+           !updated.textContent.includes('Импорт документов'))clearInterval(timer);
+      }
+    }catch(_e){}finally{busy=false;}
+  },12000);
+})();</script>"#);
+    }
+    html.push_str("</section>");
     Ok(html)
 }
 

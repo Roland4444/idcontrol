@@ -1,0 +1,23 @@
+// Regression assertions for the slow final import stage.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const {execFileSync} = require('node:child_process');
+const base = path.resolve(__dirname, '..');
+const contractor = fs.readFileSync(path.join(base,'src/contractor.rs'),'utf8');
+const scanner = fs.readFileSync(path.join(base,'src/scanner.rs'),'utf8');
+const main = fs.readFileSync(path.join(base,'src/main.rs'),'utf8');
+assert.match(contractor,/start_file\(idx\+1,files\.len\(\),&relative\)/);
+assert.match(contractor,/record_ocr\(&event\)/);
+assert.match(contractor,/OCR \{completed\}\/\{pages\} стр/);
+assert.match(contractor,/Ожидание завершения сканирования Synology/);
+assert.match(contractor,/id='contractor-submissions-table'/);
+assert.match(contractor,/current\.replaceWith\(updated\)/);
+assert.match(scanner,/ingest_published_with_progress/);
+assert.match(scanner,/external_progress/);
+assert.match(main,/jsonb_array_length\(manifest_json\)>0/);
+assert.match(main,/Повторить импорт и проверку/);
+const embedded = contractor.match(/<script>\(function\(\)\{([\s\S]*?)<\/script>/);
+assert.ok(embedded,'Expected embedded admin table-refresh script');
+execFileSync(process.execPath,['--check','-'],{input:'(function(){'+embedded[1],encoding:'utf8'});
+console.log('OK: per-document OCR, scanner wait, NAS restart recovery, admin auto refresh');

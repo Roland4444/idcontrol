@@ -74,7 +74,7 @@ pub async fn ingest(db:&PgPool,cfg:&Config,catalog:&Catalog,root:&Path,path:&Pat
         .map(|w|w.name.as_str()).unwrap_or(&work_folder);
     let pr=repo::get_or_create_project(db,&project).await?;
     let pkg=repo::get_or_create_package(db,pr.id,work).await?;
-    ingest_for_package(db,cfg,catalog,pkg,kind,relative,path,origin).await
+    ingest_for_package(db,cfg,catalog,pkg,kind,relative,path,origin,None).await
 }
 
 /// Files delivered by a contractor have an authoritative package ID from the
@@ -83,18 +83,26 @@ pub async fn ingest_published(
     db:&PgPool,cfg:&Config,catalog:&Catalog,package_id:i64,
     path:&Path,db_relative:&str
 )->Result<Option<i64>> {
+    ingest_published_with_progress(db,cfg,catalog,package_id,path,db_relative,None).await
+}
+
+pub async fn ingest_published_with_progress(
+    db:&PgPool,cfg:&Config,catalog:&Catalog,package_id:i64,
+    path:&Path,db_relative:&str,external_progress:Option<docs::ProgressCallback>
+)->Result<Option<i64>> {
     let segments:Vec<&str>=db_relative.split('/').collect();
     if segments.len()<3 || segments[0]!="ИД" || !crate::contractor::is_published_delivery_folder(segments[1]) ||
         segments.iter().any(|name|repo::validate_segment(name).is_err()) {
         bail!("Invalid published delivery relative path");
     }
     let pkg=repo::package(db,package_id).await?;
-    ingest_for_package(db,cfg,catalog,pkg,"ID".into(),db_relative.to_owned(),path,"synology").await
+    ingest_for_package(db,cfg,catalog,pkg,"ID".into(),db_relative.to_owned(),path,"synology",external_progress).await
 }
 
 async fn ingest_for_package(
     db:&PgPool,cfg:&Config,catalog:&Catalog,mut pkg:crate::models::Package,
-    kind:String,relative:String,path:&Path,origin:&str
+    kind:String,relative:String,path:&Path,origin:&str,
+    external_progress:Option<docs::ProgressCallback>
 )->Result<Option<i64>> {
     if pkg.catalog_name.is_none() {
         if let Some(w)=catalog.closest(&pkg.name){
@@ -135,6 +143,7 @@ async fn ingest_for_package(
     let rel_for_log=relative.clone();
     let callback:docs::ProgressCallback=Arc::new(move |event| {
         info!(file=%rel_for_log,stage=event.stage,current=event.current,total=event.total,"{}",event.message);
+        if let Some(callback)=&external_progress {callback(event);}
     });
     let mut safe_cfg=cfg.clone();
     if kind=="REFERENCE" { safe_cfg.ocr_mode="local".into(); safe_cfg.vibe_ocr_enabled=false; }

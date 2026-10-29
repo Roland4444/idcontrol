@@ -106,9 +106,14 @@ async fn main()->Result<()> {
         return Ok(());
     }
 
-    // An interrupted HTTP upload cannot be safely retried with an already
-    // consumed public token; preserve the failed receipt for the administrator.
-    sqlx::query("UPDATE contractor_submissions SET status='failed',processing_stage='failed',error_message='Server restarted during delivery; issue a new link' WHERE status='uploading'")
+    // A restart may interrupt either the HTTP stream or the *post-publication*
+    // OCR/indexing at 96%. Preserve NAS-backed deliveries and allow the existing
+    // "Повторить импорт и проверку" operation to safely reconstruct the documents.
+    sqlx::query("UPDATE contractor_submissions SET status='failed',processing_stage='failed',progress_updated_at=now(), \
+        error_message=CASE WHEN nas_path IS NOT NULL AND jsonb_array_length(manifest_json)>0 \
+        THEN 'Индексирование прервано перезапуском. Архив на Synology сохранён. Нажмите «Повторить импорт и проверку».' \
+        ELSE 'Передача ZIP прервана перезапуском до публикации. Требуется новая ссылка подрядчику.' END \
+        WHERE status='uploading'")
         .execute(&db).await?;
     // An interrupted check is retryable because its NAS original and manifest
     // remain available; never strand a delivery permanently in 'checking'.
