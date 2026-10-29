@@ -765,18 +765,16 @@ pub async fn review_submission(State(st):State<Shared>,Extension(actor):Extensio
                 if present<expected {
                     import_existing_delivery(&worker_st,package_id,submission_id,&path).await?;
                 }
-let run = engine::analyze_delivery(
-    &worker_st.db,
-    &worker_st.catalog,
-    package_id,
-    "contractor_review",
-    submission_id,
-    &relative_prefix
-).await?;
+                let run=engine::analyze_delivery(
+                    &worker_st.db,&worker_st.catalog,package_id,"contractor_review",submission_id,&relative_prefix
+                ).await?;
                 sqlx::query(
                     "UPDATE contractor_submissions SET status='checked',check_run_id=$2,checked_by=$3,reviewed_at=now()                      WHERE id=$1 AND status='checking'"
                 ).bind(submission_id).bind(run).bind(&checked_by)
                  .execute(&worker_st.db).await?;
+                if let Err(err)=crate::semantic::auto_compare(worker_st.clone(),package_id,run,"system:contractor_review").await {
+                    tracing::warn!(submission_id,"Semantic follow-up not scheduled: {err:#}");
+                }
                 Ok::<(),anyhow::Error>(())
             }.await;
             if let Err(err)=operation {

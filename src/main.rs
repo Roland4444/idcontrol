@@ -2,6 +2,8 @@ mod ai;
 mod access;
 mod portal;
 mod project_sources;
+mod project_requirements;
+mod semantic;
 mod block1;
 mod catalog;
 mod classification;
@@ -119,6 +121,23 @@ async fn main()->Result<()> {
         synology_connected:AtomicBool::new(false),scan_lock:tokio::sync::Mutex::new(()),csrf,
         scan_status:std::sync::RwLock::new(web::ScanStatus::default()),debug_login});
     project_sources::recover_interrupted(&st).await?;
+    semantic::recover(&st.db).await?;
+    // A manual generation interrupted by a previous process crash is retryable.
+    sqlx::query("UPDATE project_requirement_generation_jobs SET status='error',error_message='Анализ прерван перезапуском. Нажмите «Сформировать требования» повторно.',finished_at=now() WHERE status='running'")
+        .execute(&st.db).await?;
+    // Backfill proposal candidates from previously OCR-completed project sources
+    // without re-uploading or re-running OCR on originals.
+    let backfill=st.clone();
+    tokio::spawn(async move {
+        match sqlx::query_scalar::<_,i64>("SELECT id FROM projects").fetch_all(&backfill.db).await {
+            Ok(ids) => for id in ids {
+                if let Err(e)=project_requirements::refresh_project(&backfill.db,&backfill.catalog,id).await {
+                    tracing::error!(project_id=id,"Project requirements backfill failed: {e:#}");
+                }
+            },
+            Err(e)=>tracing::error!("Project requirements startup query failed: {e:#}"),
+        }
+    });
     let background=st.clone();
     tokio::spawn(async move{
         let mut interval=tokio::time::interval(Duration::from_secs(background.cfg.poll_interval));

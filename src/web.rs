@@ -1,4 +1,4 @@
-use crate::{block1,access,portal,project_sources,contractor,ui_version,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
+use crate::{block1,access,portal,project_sources,project_requirements,semantic,contractor,ui_version,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
 use anyhow::Result;
 use axum::{
     body::{Body,Bytes},
@@ -206,6 +206,8 @@ pub fn router(state:Shared)->Router{
         .route("/assets/projects/{filename}",get(portal::project_image))
         .route("/projects/{id}",get(portal::project))
         .route("/projects/{id}/sources/upload",post(project_sources::upload))
+        .route("/projects/{id}/project-requirements/generate",post(project_requirements::generate))
+        .route("/projects/{id}/project-requirements/status",get(project_requirements::status))
         .route("/projects/{id}/sources/status",get(project_sources::status))
         .route("/projects/{id}/sources/{source_id}/retry",post(project_sources::retry))
         .route("/projects/{id}/sources/{source_id}/download",get(project_sources::download))
@@ -245,6 +247,8 @@ pub fn router(state:Shared)->Router{
         .route("/packages/{id}",get(package_view))
         .route("/packages/{id}/catalog",post(set_catalog))
         .route("/packages/{id}/checklist/approve",post(approve_block1))
+        .route("/packages/{id}/project-requirements/{candidate_id}/decision",post(project_requirements::decide))
+        .route("/packages/{id}/project-requirements/approve",post(project_requirements::approve))
         .route("/packages/{id}/work-register",post(add_work_operation))
         .route("/packages/{id}/work-register/{work_id}/disable",post(disable_work_operation))
         .route("/packages/{id}/work-register/{work_id}/evidence",post(add_work_evidence))
@@ -261,6 +265,10 @@ pub fn router(state:Shared)->Router{
         .route("/packages/{id}/scan",post(manual_scan))
         .route("/packages/{id}/scan/status",get(package_scan_status))
         .route("/packages/{id}/check",post(run_package_check))
+        .route("/packages/{id}/semantic/extract",post(semantic::extract))
+        .route("/packages/{id}/semantic/compare",post(semantic::compare))
+        .route("/packages/{id}/semantic/status",get(semantic::status))
+        .route("/packages/{id}/semantic/evidence/{evidence_id}/review",post(semantic::review))
         .route("/packages/{id}/ai-consent",post(set_ai_consent))
         .route("/packages/{id}/ai-check",post(queue_ai_check))
         .route("/ai-suggestions/{id}/review",post(review_ai_suggestion))
@@ -345,12 +353,22 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     let work_links=block1::work_evidence(&st.db,id).await?;
     let support=block1::support_requirements(&st.db,id).await?;
     let support_links=block1::linked_evidence(&st.db,id).await?;
-    let completed_catalog=required_codes.iter().filter(|code|code_counts.get(*code).copied().unwrap_or(0)>=min_counts.get(*code).copied().unwrap_or(1).max(1) as usize).count();
+    let project_state=project_requirements::checklist(&st.db,id).await?;
+    let mut with_project=required_codes.clone();
+    let mut project_minimums=min_counts.clone();
+    if project_state.signed {
+        for item in &project_state.approved {
+            with_project.insert(item.code.clone());
+            let count=project_minimums.entry(item.code.clone()).or_insert(1);
+            *count=(*count).max(item.count);
+        }
+    }
+    let completed_catalog=with_project.iter().filter(|code|code_counts.get(*code).copied().unwrap_or(0)>=project_minimums.get(*code).copied().unwrap_or(1).max(1) as usize).count();
     let completed_support=support.iter().filter(|r|block1::requirement_parent_valid(r,&id_files) &&
         block1::evidence_count(r.id,&support_links,&id_files)>=r.min_count as usize).count();
     let completed_work=operations.iter().filter(|op|block1::work_evidence_count(op,&work_links,&id_files)>=op.required_count as usize).count();
     let completed=completed_catalog+completed_support+completed_work;
-    let checklist_total=required_codes.len()+support.len()+operations.len();
+    let checklist_total=with_project.len()+support.len()+operations.len();
     let approval:Option<String>=sqlx::query_scalar("SELECT block1_approved_by FROM packages WHERE id=$1")
         .bind(id).fetch_one(&st.db).await?;
     let work_approved:Option<String>=sqlx::query_scalar("SELECT block1_scope_approved_by FROM packages WHERE id=$1")
@@ -363,7 +381,8 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     let no_revisions=selected_delivery.is_none();
     let metadata_ok=block1::complete_metadata(&id_files);
     let pct=if params.run_id.is_some() || checklist_total==0 || approval.is_none() || work_approved.is_none() ||
-        no_revisions || !manifest_ok || !metadata_ok || !operations.iter().all(|op|required_codes.contains(&op.catalog_code))
+        no_revisions || !manifest_ok || !metadata_ok ||
+        (project_state.candidates>0 && !project_state.signed) || !operations.iter().all(|op|required_codes.contains(&op.catalog_code))
         {None}else{Some((completed*100/checklist_total).min(100))};
     let actor_role=access::package_role(&st,&actor,id).await.unwrap_or_else(||"viewer".into());
     let mut sidebar=String::new();
@@ -377,7 +396,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     let mut body=format!(r##"<div class="crumb"><a href="/">Выбор объектов</a> › <a href="/projects/{}">{}</a> › {}</div>
       <section class="package-hero" style="--hero-image:url('/assets/projects/{}.webp?v={}')"><div><h1>{}</h1><p>⌖ {} · {} · Комплект исполнительной документации</p></div></section>
       <div class="package-shell"><aside class="package-sidebar"><div class="sidebar-project"><img src="/assets/projects/{}.webp?v={}" alt="Объект"><div><strong>{}</strong><small>{}</small></div></div><h3>Комплекты исполнительной документации</h3>{}</aside><div class="package-content role-{}">
-      <nav class="package-tabs" aria-label="Разделы проверки"><a href="#upload">Сдача ИД</a><a href="#references">Материалы для проверки</a><a href="#documents">Список документов</a><a href="#work-register">Реестр работ</a><a href="#block1-evidence">Приложения и испытания</a><a href="#checks">Результаты проверки</a><a href="#remarks">Замечания</a><a href="#history">История проверок</a></nav>"##,
+      <nav class="package-tabs" aria-label="Разделы проверки"><a href="#upload">Сдача ИД</a><a href="#references">Материалы для проверки</a><a href="#documents">Список документов</a><a href="#project-requirements">Требования из проекта</a><a href="#semantic-block1">Семантический анализ</a><a href="#work-register">Реестр работ</a><a href="#block1-evidence">Приложения и испытания</a><a href="#checks">Результаты проверки</a><a href="#remarks">Замечания</a><a href="#history">История проверок</a></nav>"##,
       pkg.project_id,h(&projects.name),h(&pkg.name),slug,ui_version::images_id(),h(&pkg.name),h(address),h(&projects.name),slug,ui_version::images_id(),h(&projects.name),h(address),sidebar,h(&actor_role));
     if let Some(notice)=params.notice.as_deref() {
         let msg=match notice {"classified"=>"Тип документа сохранён, комплект перепроверен.","uploaded"=>"Материалы проверки загружены; официальная версия ИД подрядчика не изменилась. Для сверки запустите новую проверку.","checklist"=>"Изменения чек-листа сохранены, комплект перепроверен.","checked"=>"Проверка завершена. Результат сохранён в истории.",_=>""};
@@ -415,7 +434,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     body.push_str(&format!("<section class=overview id=summary><h2>Результат проверки комплекта</h2><p class=muted>Прогресс показывает покрытие обязательных позиций файлами, <b>не</b> соответствие ГОСТ/СП. Рассматривается только выбранный комплект.</p><div class=metrics><div class=metric>Файлы ИД<strong>{id_docs}</strong><small>Материалы проверки: {ref_docs}</small></div><div class=metric>Чек-лист<strong>{completed}/{}</strong><small>Обязательных позиций и приложений</small></div><div class=metric>Замечания<strong>{unresolved}</strong><small>Требуют рассмотрения</small></div><div class=metric>Не привязаны<strong>{nonclassified}</strong><small>Файлов ИД</small></div></div>",checklist_total));
     body.push_str(&format!("<p><b>Комплектность: {coverage}</b></p>"));
     if let Some(n)=pct {body.push_str(&format!("<div class=summarybar role=progressbar aria-valuemin=0 aria-valuemax=100 aria-valuenow={n} aria-label='Покрытие чек-листа'><span style='width:{n}%'></span></div>"));}
-    body.push_str("<nav class=jump-links aria-label='Разделы комплекта'><a href=#remarks>Замечания<small>Результаты и решения инженера</small></a><a href=#documents>Документы<small>Файлы, типы и вложения</small></a><a href=#checklist>Чек-лист<small>Изменение обязательных позиций</small></a><a href=#work-register>Реестр работ<small>Фактические объёмы, зоны и акты</small></a><a href=#block1-evidence>Приложения и испытания<small>Сертификаты, протоколы, приложения</small></a><a href=#upload>Сдача ИД<small>Одноразовая ссылка и версии подрядчика</small></a><a href=#references>Материалы для проверки<small>ПД, РД, НТД, приказы, СРО и документы-основания</small></a><a href=#classification>ИИ-классификация<small>Предложения модели и подтверждение</small></a><a href=#ocr>Обработка и прогресс<small>Фоновые задания OCR</small></a><a href=#norms-check>Нормативные правила<small>Подробные результаты</small></a></nav></section>");
+    body.push_str("<nav class=jump-links aria-label='Разделы комплекта'><a href=#remarks>Замечания<small>Результаты и решения инженера</small></a><a href=#documents>Документы<small>Файлы, типы и вложения</small></a><a href=#checklist>Чек-лист<small>Изменение обязательных позиций</small></a><a href=#project-requirements>Требования из проекта<small>КР, ПЗУ, ПОС и ППР с источниками</small></a><a href=#work-register>Реестр работ<small>Фактические объёмы, зоны и акты</small></a><a href=#block1-evidence>Приложения и испытания<small>Сертификаты, протоколы, приложения</small></a><a href=#upload>Сдача ИД<small>Одноразовая ссылка и версии подрядчика</small></a><a href=#references>Материалы для проверки<small>ПД, РД, НТД, приказы, СРО и документы-основания</small></a><a href=#classification>ИИ-классификация<small>Предложения модели и подтверждение</small></a><a href=#ocr>Обработка и прогресс<small>Фоновые задания OCR</small></a><a href=#norms-check>Нормативные правила<small>Подробные результаты</small></a></nav></section>");
     // A compact action-oriented summary stays above ALL detailed menus.
     let missing=checklist_total.saturating_sub(completed);
     body.push_str("<section class=attention-panel aria-labelledby=attention-title><h2 id=attention-title>Что требует внимания</h2><p class=muted>Ниже перечислены только сводные результаты. Подробные таблицы находятся внизу страницы: нажмите на ссылку, чтобы открыть нужный раздел.</p><div class=attention-list>");
@@ -471,6 +490,9 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     }
     panel_html.push_str(&format!("<form method=post action='/packages/{id}/checklist/custom'>{}<label>Добавить позицию <input name=title required minlength=2 maxlength=300 placeholder='Например: Протокол испытания сваи' size=48></label><label>Примечание <input name=note maxlength=500 placeholder='Необязательно'></label><label><input type=checkbox name=required value=yes checked> Обязательная</label><button>Добавить</button></form></div></details></article>",hidden(&st.csrf)));
     panels.insert("checklist",std::mem::take(&mut panel_html));
+    let project_requirement_panel=project_requirements::panel(&st,id,&actor_role).await?;
+    panels.insert("project-requirements",project_requirement_panel);
+    panels.insert("semantic-block1",semantic::panel(&st,id,&actor_role).await?);
     panel_html.push_str("<article id=work-register><details class=collapsible open><summary>Блок 1 — реестр фактически выполненных работ и необходимого количества ИД</summary><div><p>Фиксируйте каждую зону, этап СМР и количество актов по ПД/РД. Без подтверждённого реестра система не выводит итоговый процент. Количество одинаковых документов суммируется по зонам; прошлые ревизии не засчитываются.</p>");
     panel_html.push_str(&format!("<p><b>Реестр работ:</b> {}</p>",work_approved.as_ref().map(|v|format!("Подтверждён: {}",h(v))).unwrap_or_else(||"Не подтверждён".into())));
     if !operations.is_empty() {
@@ -738,7 +760,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     body.push_str("<section class=detail-sections id=detail-sections aria-labelledby=details-title><h2 id=details-title>Подробные разделы и настройки проверок</h2><p class=detail-intro>Нажмите на название раздела, чтобы открыть таблицы и параметры. Из вкладок выше можно сразу перейти к нужной проверке. Для запуска новой проверки используйте кнопку «Запустить проверку комплекта».</p>");
     for (title,description,ids) in [
         ("Результаты проверок","Отчёты, замечания, история и утверждённые нормативные правила",vec!["checks","remarks","history","norms-check"]),
-        ("Документы и комплект","Файлы, версии, категории контрольных материалов и чек-лист",vec!["documents","checklist","work-register","block1-evidence"]),
+        ("Документы и комплект","Файлы, версии, категории контрольных материалов и чек-лист",vec!["documents","checklist","project-requirements","semantic-block1","work-register","block1-evidence"]),
         ("Распознавание и ИИ","Предложения классификатора, очередь OCR и настройки внешнего ИИ",vec!["classification","ocr","ai-check"]),
     ] {
         body.push_str(&format!("<div class=detail-group><h3>{title}</h3><p>{description}</p>"));
@@ -1232,6 +1254,9 @@ async fn run_package_check(State(st):State<Shared>,Extension(actor):Extension<ac
     let _pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
     // Authorization middleware permits only manager/engineer to POST here.
     let run=engine::analyze(&st.db,&st.catalog,id,"manual_ui").await?;
+    if let Err(err)=semantic::auto_compare(st.clone(),id,run,&format!("bitrix:{}:{}",actor.member,actor.user_id)).await {
+        tracing::warn!(package=id,"Failed to schedule semantic check: {err:#}");
+    }
     repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"manual_check",&format!("package={id} run={run}")).await?;
     Ok(Redirect::to(&format!("/packages/{id}?run_id={run}&notice=checked#checks")))
 }
