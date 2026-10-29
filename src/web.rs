@@ -95,7 +95,7 @@ fetch('/api/me',{{credentials:'same-origin'}}).then(r=>r.ok?r.json():null).then(
   const topProgress=document.getElementById('top-progress');
   const coverage=document.querySelector('#summary [role="progressbar"]');
   if(topProgress && document.getElementById('summary')){{
-    topProgress.textContent=coverage ? 'Комплектность: '+coverage.getAttribute('aria-valuenow')+'%' : 'Комплектность: чек-лист не настроен';
+    topProgress.textContent=coverage ? 'Сопоставлено: '+coverage.getAttribute('aria-valuenow')+'% (предварительно)' : 'Комплектность: '+(document.querySelector('#summary [data-completion-label]')?.textContent || 'проверка не завершена');
   }}
   function navigateToAnchor(fragment, updateUrl, smooth) {{
     let id;
@@ -264,6 +264,7 @@ pub fn router(state:Shared)->Router{
         .route("/packages/{id}/classification/provider",post(set_classify_provider))
         .route("/packages/{id}/classification/all",post(queue_classify_all))
         .route("/packages/{id}/classification/unclassified",post(queue_classify_unclassified))
+        .route("/packages/{id}/classification/reconcile",post(reconcile_catalog_codes))
         .route("/packages/{id}/classification/fragment",get(classification_fragment))
         .route("/documents/{id}/ai-classify",post(queue_classify_one))
         .route("/documents/{id}/ai-classify/confirm",post(confirm_classification))
@@ -366,9 +367,10 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     let manifest_ok=selected_delivery.as_ref().map(|scope|block1::manifest_problems(scope,&id_files).is_empty()).unwrap_or(false);
     let no_revisions=selected_delivery.is_none();
     let metadata_ok=block1::complete_metadata(&id_files);
-    let pct=if params.run_id.is_some() || checklist_total==0 || approval.is_none() || work_approved.is_none() ||
-        no_revisions || !manifest_ok || !metadata_ok ||
-        (project_state.candidates>0 && !project_state.signed) || !operations.iter().all(|op|required_codes.contains(&op.catalog_code))
+    // This is strictly a *quantitative* progress indication, never an approval.
+    // An unapproved checklist, pending project sources or some unclassified files
+    // must not hide the count of already linked documents from the engineer.
+    let pct=if params.run_id.is_some() || checklist_total==0 || no_revisions || !manifest_ok
         {None}else{Some((completed*100/checklist_total).min(100))};
     let actor_role=access::package_role(&st,&actor,id).await.unwrap_or_else(||"viewer".into());
     let mut sidebar=String::new();
@@ -385,7 +387,7 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
       <nav class="package-tabs" aria-label="Разделы проверки"><a href="#upload">Сдача ИД</a><a href="#references">Материалы для проверки</a><a href="#documents">Список документов</a><a href="#project-requirements">Требования из проекта</a><a href="#semantic-block1">Семантический анализ</a><a href="#work-register">Реестр работ</a><a href="#block1-evidence">Приложения и испытания</a><a href="#completion">Комплектность по чек-листу</a><a href="#checks">Отчёты</a><a href="#remarks">Замечания</a><a href="#history">История проверок</a></nav>"##,
       pkg.project_id,h(&projects.name),h(&pkg.name),slug,ui_version::images_id(),h(&pkg.name),h(address),h(&projects.name),slug,ui_version::images_id(),h(&projects.name),h(address),sidebar,h(&actor_role));
     if let Some(notice)=params.notice.as_deref() {
-        let msg=match notice {"classified"=>"Тип документа сохранён, комплект перепроверен.","uploaded"=>"Материалы проверки загружены; официальная версия ИД подрядчика не изменилась. Для сверки запустите новую проверку.","checklist"=>"Изменения чек-листа сохранены, комплект перепроверен.","checked"=>"Проверка завершена. Результат сохранён в истории.",_=>""};
+        let msg=match notice {"classified"=>"Тип документа сохранён, комплект перепроверен.","uploaded"=>"Материалы проверки загружены; официальная версия ИД подрядчика не изменилась. Для сверки запустите новую проверку.","checklist"=>"Изменения чек-листа сохранены, комплект перепроверен.","checked"=>"Проверка завершена. Результат сохранён в истории.","reconciled"=>"Выполнено сопоставление по сохранённому OCR. Количества пересчитаны, неопределённые документы оставлены на проверку инженеру.",_=>""};
         if !msg.is_empty(){body.push_str(&format!("<p class=notice role=status>{msg} {}</p>",params.doc.map(|d|format!("Документ #{d}")).unwrap_or_default()));}
     }
     // A visible start button and explicit result location; engine::analyze
@@ -416,9 +418,18 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
         .map(|d|format!("Проверяемая поставка: ревизия {} / запись #{}. Только документы этой поставки учитываются в показателях.",d.revision,d.id))
         .unwrap_or_else(||"Поставок подрядчика с опубликованными файлами пока нет. Учитываются зарегистрированные ИД без привязки к поставке.".to_string());
     body.push_str(&format!("<p class=notice role=status>{}</p>",h(&scope_label)));
-    let coverage=match pct {Some(n)=>format!("{n}% (предварительное покрытие)"),None if params.run_id.is_some()=>"Историческая проверка: см. сохранённые замечания".to_string(),None=>"Не утверждён или не настроен".to_string()};
+    let coverage=match pct {
+        Some(n)=>format!("{n}% сопоставлено (предварительно; не оценка правильности документов)"),
+        None if params.run_id.is_some()=>"Историческая проверка: см. сохранённые замечания".to_string(),
+        None if no_revisions=>"Нет опубликованной поставки подрядчика".to_string(),
+        None if !manifest_ok=>"Опись поставки требует проверки".to_string(),
+        None=>"Чек-лист ещё не настроен".to_string(),
+    };
     body.push_str(&format!("<section class=overview id=summary><h2>Результат проверки комплекта</h2><p class=muted>Прогресс показывает покрытие обязательных позиций файлами, <b>не</b> соответствие ГОСТ/СП. Рассматривается только выбранный комплект.</p><div class=metrics><div class=metric>Файлы ИД<strong>{id_docs}</strong><small>Материалы проверки: {ref_docs}</small></div><div class=metric>Чек-лист<strong>{completed}/{}</strong><small>Обязательных позиций и приложений</small></div><div class=metric>Замечания<strong>{unresolved}</strong><small>Требуют рассмотрения</small></div><div class=metric>Не привязаны<strong>{nonclassified}</strong><small>Файлов ИД</small></div></div>",checklist_total));
-    body.push_str(&format!("<p><b>Комплектность: {coverage}</b></p>"));
+    body.push_str(&format!("<p><b>Комплектность: <span data-completion-label>{coverage}</span></b></p>"));
+    if !metadata_ok && id_docs>0 && params.run_id.is_none() {
+        body.push_str("<p class='muted'>Есть файлы с незавершённым OCR или без подтверждённого типа. Количественный прогресс предварительный; эти файлы не считаются доказательством отсутствия документов.</p>");
+    }
     if let Some(n)=pct {body.push_str(&format!("<div class=summarybar role=progressbar aria-valuemin=0 aria-valuemax=100 aria-valuenow={n} aria-label='Покрытие чек-листа'><span style='width:{n}%'></span></div>"));}
     body.push_str("<nav class=jump-links aria-label='Разделы комплекта'><a href=#completion>Комплектность<small>По каждому пункту чек-листа: да / нет / почему</small></a><a href=#remarks>Замечания<small>Решения инженера и технические вопросы отдельно</small></a><a href=#documents>Документы<small>Файлы, типы и вложения</small></a><a href=#checklist>Чек-лист<small>Изменение обязательных позиций</small></a><a href=#project-requirements>Требования из проекта<small>КР, ПЗУ, ПОС и ППР с источниками</small></a><a href=#work-register>Реестр работ<small>Фактические объёмы, зоны и акты</small></a><a href=#block1-evidence>Приложения и испытания<small>Сертификаты, протоколы, приложения</small></a><a href=#upload>Сдача ИД<small>Одноразовая ссылка и версии подрядчика</small></a><a href=#references>Материалы для проверки<small>ПД, РД, НТД, приказы, СРО и документы-основания</small></a><a href=#classification>ИИ-классификация<small>Предложения модели и подтверждение</small></a><a href=#ocr>Обработка и прогресс<small>Фоновые задания OCR</small></a><a href=#norms-check>Нормативные правила<small>Подробные результаты</small></a></nav></section>");
     // Main user-facing result: catalogue checklist and quantitative evidence.
@@ -446,6 +457,11 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
         historical:params.run_id.is_some(),
     });
     body.push_str(&checklist_html);
+    if !id_files.is_empty() && params.run_id.is_none() &&
+        matches!(actor_role.as_str(),"manager"|"engineer") &&
+        id_files.iter().any(|d|d.catalog_code.is_none() && !d.recognized_text.trim().is_empty()) {
+        body.push_str(&format!("<section class='completion-reconcile'><h3>Найти документы, которые не попали в чек-лист</h3><p>Повторно сравнить заголовки и сохранённый OCR-текст файлов с пунктами чек-листа. <b>Без ИИ, без платных запросов и без повторного OCR.</b> Однозначные соответствия будут привязаны; остальные файлы останутся без типа для ручной проверки. Оригиналы и версии не изменяются.</p><form method='post' action='/packages/{id}/classification/reconcile'>{}<button>Сопоставить документы по OCR</button></form></section>",hidden(&st.csrf)));
+    }
     // A compact action-oriented summary stays above ALL detailed menus.
     let missing=checklist_total.saturating_sub(completed);
     body.push_str("<section class=attention-panel aria-labelledby=attention-title><h2 id=attention-title>Что требует внимания</h2><p class=muted>Ниже перечислены только сводные результаты. Подробные таблицы находятся внизу страницы: нажмите на ссылку, чтобы открыть нужный раздел.</p><div class=attention-list>");
@@ -1405,6 +1421,50 @@ async fn queue_classify_unclassified(State(st):State<Shared>,Path(id):Path<i64>,
     repo::audit(&st.db,&st.cfg.app_user,"ai_classification_unclassified",&format!("package={id} count={count}")).await?;
     Ok(Redirect::to(&format!("/packages/{id}")))
 }
+/// One-click, non-AI reconciliation of the *current* contractor delivery.
+/// Respect engineer overrides and never rewrite previously assigned codes.
+async fn reconcile_catalog_codes(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
+    verify(&form.csrf,&st)?;
+    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")) {
+        return Err(WebError::forbidden());
+    }
+    let pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
+    let work=pkg.catalog_name.as_deref().and_then(|name|st.catalog.work_type(name))
+        .ok_or_else(||WebError::bad("Сначала выберите вид работ в каталоге"))?;
+    let delivery=block1::current_delivery(&st.db,id).await?;
+    let history:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM contractor_submissions WHERE package_id=$1)")
+        .bind(id).fetch_one(&st.db).await?;
+    if history && delivery.is_none() {
+        return Err(WebError::bad("Нет опубликованной поставки подрядчика: старые ревизии нельзя засчитывать"));
+    }
+    let docs=repo::documents(&st.db,id).await?;
+    let latest=block1::latest(&docs);
+    let excluded:HashSet<i64>=sqlx::query_as::<_,(i64,)>(
+        "SELECT document_id FROM classification_results WHERE review_status='manual_override' AND document_id IN (SELECT id FROM documents WHERE package_id=$1)")
+        .bind(id).fetch_all(&st.db).await?.into_iter().map(|x|x.0).collect();
+    let mut decisions=Vec::new();
+    for doc in latest {
+        if !block1::is_delivery_id(doc,delivery.as_ref()) || doc.catalog_code.is_some() ||
+            excluded.contains(&doc.id) || doc.recognized_text.trim().is_empty() ||
+            !matches!(doc.recognition_status.as_str(),"extracted"|"ocr"|"ocr_vibe"|"ocr_local") {continue;}
+        let filename=doc.relative_path.rsplit('/').next().unwrap_or(&doc.relative_path);
+        if let Some((code,title))=st.catalog.classify(filename,&doc.recognized_text,Some(work)) {
+            decisions.push((doc.id,code,title));
+        }
+    }
+    let mut tx=st.db.begin().await?;
+    let mut changed=0usize;
+    for (doc_id,code,title) in &decisions {
+        changed+=sqlx::query("UPDATE documents d SET catalog_code=$2,document_type=COALESCE(NULLIF(d.document_type,''),$3) WHERE d.id=$1 AND d.package_id=$4 AND d.is_present=true AND d.source_kind='ID' AND d.catalog_code IS NULL AND NOT EXISTS (SELECT 1 FROM classification_results c WHERE c.document_id=d.id AND c.review_status='manual_override')")
+            .bind(doc_id).bind(code).bind(title).bind(id).execute(&mut *tx).await?.rows_affected() as usize;
+    }
+    tx.commit().await?;
+    if changed>0 {engine::analyze(&st.db,&st.catalog,id,"catalog_ocr_reconciliation").await?;}
+    let actor_label=format!("bitrix:{}:{}",actor.member,actor.user_id);
+    repo::audit(&st.db,&actor_label,"catalog_ocr_reconciliation",&format!("package={id} linked={changed} considered={}",decisions.len())).await?;
+    Ok(Redirect::to(&format!("/packages/{id}?notice=reconciled#completion")))
+}
+
 async fn queue_classify_one(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
     verify(&form.csrf,&st)?;
     let doc=repo::document(&st.db,id).await.map_err(|_|WebError::not_found())?;
@@ -1429,11 +1489,15 @@ async fn confirm_classification(State(st):State<Shared>,Path(id):Path<i64>,Form(
     }
     let pkg=repo::package(&st.db,doc.package_id).await?;
     let found=pkg.catalog_name.as_deref().and_then(|name|st.catalog.work_type(name)).and_then(|wt|{
-       wt.items.iter().find(|item|crate::catalog::normalize(&item.title)==crate::catalog::normalize(&label))
+       // AI labels such as "АОСР" or "Исполнительная геодезическая схема"
+       // are not verbatim checklist titles. Use the same conservative mapper.
+       // Type confirmation must not be rewritten by incidental references
+       // to unrelated documents inside its OCR body.
+       st.catalog.classify(&label,"",Some(wt))
     });
     let mut tx=st.db.begin().await?;
     sqlx::query("UPDATE documents SET document_type=$2,catalog_code=$3 WHERE id=$1")
-       .bind(id).bind(&label).bind(found.map(|x|x.code.as_str())).execute(&mut *tx).await?;
+       .bind(id).bind(&label).bind(found.as_ref().map(|x|x.0.as_str())).execute(&mut *tx).await?;
     sqlx::query("UPDATE classification_results SET review_status='confirmed',reviewed_by=$2,reviewed_at=now() WHERE document_id=$1")
        .bind(id).bind(&st.cfg.app_user).execute(&mut *tx).await?;
     tx.commit().await?;

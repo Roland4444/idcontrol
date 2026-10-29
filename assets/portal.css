@@ -213,3 +213,10 @@ main{max-width:1460px;margin:25px auto 70px;padding:0 clamp(16px,2.7vw,32px)}
 .completion-unclassified{border:1px solid #e5cda1;background:#fffcf3;padding:12px 14px;border-radius:9px;margin-top:14px;font-size:12px}
 .completion-unclassified>summary{font-weight:700;cursor:pointer;color:#765e28}
 .completion-unclassified li{margin-top:7px;overflow-wrap:anywhere}
+
+/* v0.9.32: independently visible OCR reconciliation, no invented checklist matches. */
+.completion-reconcile{background:#f7fbff;border:1px solid #cbdfee;border-radius:11px;padding:17px 20px;margin:12px 0 22px;display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:14px}
+.completion-reconcile h3{font-size:16px;margin:0 0 6px;color:#254a65}
+.completion-reconcile p{font-size:13px;color:#4c6477;line-height:1.55;max-width:880px;margin:0}
+.completion-reconcile form{margin:0}.completion-reconcile button{white-space:normal}
+@media(max-width:780px){.completion-reconcile{padding:13px}.completion-reconcile form,.completion-reconcile button{width:100%}}

@@ -92,6 +92,7 @@ async fn analyze_internal(db:&PgPool,catalog:&Catalog,package_id:i64,source:&str
         }
     }
     let counts=block1::counted_unique_codes(inputs.iter().copied());
+    let unmatched_id_files=inputs.iter().filter(|d|d.catalog_code.is_none()).count();
     let operations=block1::work_operations(db,package_id).await?;
     let mut minimums=block1::effective_minimums(&block1::minimums(db,package_id).await?,&operations);
     if project_state.signed {
@@ -123,7 +124,11 @@ async fn analyze_internal(db:&PgPool,catalog:&Catalog,package_id:i64,source:&str
                 let expected=minimums.get(code).copied().unwrap_or(1).max(1) as usize;
                 let present=counts.get(code).copied().unwrap_or(0);
                 if present<expected {
-                    let mut f=FindingInput::new(1,format!("C-{}",code),format!("Недостаточно документов: {} (пункт {}). Требуется: {}, найдено: {} в данной поставке.",item.title,code,expected,present)).mismatch();
+                    let mut f=if unmatched_id_files>0 {
+                        FindingInput::new(1,format!("C-{}",code),format!("Документы пока не сопоставлены с пунктом: {} ({}). Требуется: {}, подтверждённых по коду: {}. В текущей поставке {} файлов без привязки к чек-листу; отсутствие документов не установлено.",item.title,code,expected,present,unmatched_id_files))
+                    } else {
+                        FindingInput::new(1,format!("C-{}",code),format!("Недостаточно документов: {} (пункт {}). Требуется: {}, найдено: {} в данной поставке.",item.title,code,expected,present)).mismatch()
+                    };
                     f.reference=project_basis.get(code)
                         .cloned().unwrap_or_else(||format!("Каталог ИД: {}",item.norm_reference));
                     if let Some(basis)=project_basis.get(code) {f.ntd=basis.clone();}

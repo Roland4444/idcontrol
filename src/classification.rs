@@ -120,7 +120,8 @@ pub async fn enqueue(db:&PgPool,package_id:i64,only_unclassified:bool,requested_
           AND d.id=(SELECT MAX(newest.id) FROM documents newest WHERE newest.package_id=d.package_id
             AND newest.relative_path=d.relative_path)
           AND d.recognition_status NOT LIKE 'error:%'
-          AND (NOT $4 OR d.document_type IS NULL OR btrim(d.document_type)='')
+          -- A preliminary generic label is NOT a link to the checklist.
+          AND (NOT $4 OR d.catalog_code IS NULL)
           AND NOT EXISTS(SELECT 1 FROM classification_jobs j WHERE j.document_id=d.id AND j.status IN ('pending','running'))
        "#).bind(package_id).bind(provider).bind(requested_by).bind(only_unclassified)
         .execute(db).await?.rows_affected();

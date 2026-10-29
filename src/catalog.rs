@@ -68,9 +68,54 @@ impl Catalog {
     pub fn item(&self, work: &str, code: &str) -> Option<&Item> {
         self.work_type(work)?.items.iter().find(|i| i.code == code)
     }
+    /// Conservative semantic routing for a whole *document*, not an assertion of
+    /// its engineering correctness. OCR may contain references to other acts,
+    /// therefore only the filename and the START of the text are inspected.
+    /// Ambiguous documents remain unlinked for an engineer to review.
     pub fn classify(&self, filename: &str, text: &str, work: Option<&WorkType>) -> Option<(String,String)> {
         let work = work?;
-        let hay = normalize(&format!("{}\n{}",filename,text.chars().take(3500).collect::<String>()));
+        let path = normalize(filename).replace('_', " ").replace('-', " ");
+        let header = normalize(&text.chars().take(750).collect::<String>())
+            .split_whitespace().collect::<Vec<_>>().join(" ");
+        let title_text = format!("{path}\n{header}");
+        let has = |needle:&str| title_text.contains(needle);
+
+        // Earthworks has several different kinds of acts. Exact type keywords
+        // win over a generic "акт" or incidental references in the appendix.
+        // Do not classify a plain "исполнительная схема" as geodetic without
+        // additional geodetic / earthwork evidence.
+        if work.name=="Земляные работы" {
+            let direct: Option<&str> = if has("реестр исполнительной документации") ||
+                (path.contains("реестр") && path.contains(" ид")) {Some("1.1")}
+            else if has("освидетельствования геодезической разбивочной основы") ||
+                has("освидетельствования разбивочной основы") {Some("1.2")}
+            else if has("акт разбивки осей") || has("акт о разбивке осей") ||
+                has("акт разбивки основных осей") {Some("1.3")}
+            else if has("акт освидетельствования скрытых работ") ||
+                has("акты освидетельствования скрытых работ") ||
+                path.contains("аоср") {Some("1.4")}
+            else if has("акт приемки основания") || has("акт приёмки основания") ||
+                has("акт приемки грунтового основания") || has("акт приёмки грунтового основания") {Some("1.6")}
+            else if (has("исполнительная геодезическая схема") ||
+                has("исполнительные геодезические схемы") ||
+                (has("исполнительная схема") &&
+                 (has("геодезическ") || has("котлован") || has("землян") || has("грунта") || has("планово высотн")))) &&
+                !has("акт освидетельствования скрытых работ") {Some("1.5")}
+            else if (has("протокол") || has("заключение")) &&
+                (has("уплотнения грунта") || has("коэффициента уплотнения") ||
+                 has("испытания грунта") || has("плотности грунта")) &&
+                (path.contains("протокол") || path.contains("испытан") ||
+                 header.starts_with("протокол") || header.starts_with("заключение")) {Some("1.7")}
+            else {None};
+            if let Some(code)=direct {
+                return work.items.iter().find(|i|i.code==code)
+                    .map(|i|(i.code.clone(),i.title.clone()));
+            }
+            // No fuzzy fallback: earthworks' act and scheme codes are easy to
+            // confuse. Prefer a visible unclassified file to a false positive.
+            return None;
+        }
+
         let aliases = [
             ("реестр исполнительной документации", vec!["реестр исполнительной документации"]),
             ("акты освидетельствования скрытых работ",vec!["освидетельствования скрытых работ", "аоср"]),
@@ -80,7 +125,7 @@ impl Catalog {
         ];
         for (title, phrases) in aliases {
             for item in &work.items {
-                if normalize(&item.title).contains(title) && phrases.iter().any(|s| hay.contains(s)) {
+                if normalize(&item.title).contains(title) && phrases.iter().any(|s|has(s)) {
                     return Some((item.code.clone(),item.title.clone()));
                 }
             }
@@ -97,6 +142,7 @@ impl Catalog {
         }
         None
     }
+
 }
 
 #[cfg(test)]
@@ -108,6 +154,31 @@ mod tests {
         assert_eq!(c.work_types.len(), 14);
         assert_eq!(c.work_types.iter().map(|w|w.items.len()).sum::<usize>(),169);
         assert_eq!(c.errors.len(),34);
+    }
+    #[test]
+    fn earthworks_differentiates_seven_document_types(){
+        let c=Catalog::load().unwrap();
+        let w=c.work_type("Земляные работы").unwrap();
+        let tests=[
+            ("scan.pdf","Акт освидетельствования геодезической разбивочной основы объекта", "1.2"),
+            ("scan.pdf","Акт разбивки осей объекта на местности", "1.3"),
+            ("АОСР_07.pdf","", "1.4"),
+            ("ИД.pdf","Исполнительная геодезическая схема котлована", "1.5"),
+            ("Акт приёмки основания.pdf","", "1.6"),
+            ("Протокол_1.pdf","Протокол определения коэффициента уплотнения грунта", "1.7"),
+        ];
+        for (filename,ocr,code) in tests {
+            assert_eq!(c.classify(filename,ocr,Some(w)).unwrap().0,code,"{filename}: {ocr}");
+        }
+    }
+    #[test]
+    fn earthworks_does_not_confuse_references_with_document_type(){
+        let c=Catalog::load().unwrap();
+        let w=c.work_type("Земляные работы").unwrap();
+        // A generic cover/index and a generic scheme should not be
+        // automatically counted as a specific acceptance/geodetic act.
+        assert!(c.classify("scan.pdf","Перечень документов по земляным работам",Some(w)).is_none());
+        assert!(c.classify("ИС_12.pdf","Исполнительная схема железобетонной плиты",Some(w)).is_none());
     }
     #[test]
     fn earthworks_and_reestr() {

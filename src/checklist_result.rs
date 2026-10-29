@@ -27,13 +27,13 @@ pub struct View<'a> {
 }
 
 #[derive(Debug,PartialEq,Eq,Clone,Copy)]
-enum Verdict {Passed,Missing,NeedsReview,NotRequired}
+enum Verdict {Passed,Missing,NeedsMapping,NeedsReview,NotRequired}
 impl Verdict {
     fn caption(self)->&'static str {match self {
-        Self::Passed=>"Пройдено",Self::Missing=>"Не подтверждено",Self::NeedsReview=>"Проверить",Self::NotRequired=>"Не применяется",
+        Self::Passed=>"Пройдено",Self::Missing=>"Не подтверждено",Self::NeedsMapping=>"Не сопоставлено",Self::NeedsReview=>"Проверить",Self::NotRequired=>"Не применяется",
     }}
     fn class(self)->&'static str {match self {
-        Self::Passed=>"passed",Self::Missing=>"missing",Self::NeedsReview=>"review",Self::NotRequired=>"optional",
+        Self::Passed=>"passed",Self::Missing=>"missing",Self::NeedsMapping=>"review",Self::NeedsReview=>"review",Self::NotRequired=>"optional",
     }}
 }
 fn esc(s:&str)->String {html_escape::encode_safe(s).to_string()}
@@ -44,9 +44,9 @@ fn ready_for_count(v:&View<'_>,code:&str, found:usize, expected:usize, recognize
     if found<expected {
         let gap=expected-found;
         let reason=if unclassified>0 {
-            format!("Не хватает подтверждённых документов: {gap}. Есть {unclassified} файлов без типа; сначала назначьте им позицию чек-листа")
+            format!("Не сопоставлено документов: {gap}. В выбранной поставке {unclassified} файлов без кода чек-листа. Это не доказательство отсутствия документов: проверьте возможные совпадения и назначьте тип")
         }else{format!("Не хватает подтверждённых документов: {gap} (учтены только файлы выбранной поставки и уникальные SHA-256)")};
-        return (Verdict::Missing,reason)
+        return (if unclassified>0 {Verdict::NeedsMapping}else{Verdict::Missing},reason)
     }
     if !recognized {return (Verdict::NeedsReview,"Количество найдено, но OCR части доказательств не завершён или требует проверки".into());}
     if !v.checklist_approved || !v.scope_approved || v.project_approval_needed {
@@ -72,13 +72,42 @@ fn evidence_list<'a>(docs:impl Iterator<Item=&'a Document>)->String {
 pub fn render(v:&View<'_>)->String {
     let counts=block1::counted_unique_codes(v.files.iter().copied());
     let unclassified=v.files.iter().filter(|d|d.catalog_code.is_none()).count();
+    // Document-type candidates are separate from credited counts. A suggestion
+    // must never turn a missing item green without an explicit mapping.
+    let mut candidates:HashMap<String,Vec<&Document>>=HashMap::new();
+    if let Some(work)=v.catalog.work_type(v.work_type) {
+        for d in v.files.iter().copied().filter(|d|d.catalog_code.is_none() &&
+            !d.recognized_text.trim().is_empty() &&
+            matches!(d.recognition_status.as_str(),"extracted"|"ocr"|"ocr_vibe"|"ocr_local")) {
+            let filename=d.relative_path.rsplit('/').next().unwrap_or(&d.relative_path);
+            if let Some((code,_))=v.catalog.classify(filename,&d.recognized_text,Some(work)) {
+                let entries=candidates.entry(code).or_default();
+                if !entries.iter().any(|p|p.sha256.eq_ignore_ascii_case(&d.sha256)) {
+                    entries.push(d);
+                }
+            }
+        }
+    }
+    let candidate_evidence=|code:&str|->String{
+        let Some(docs)=candidates.get(code)else{return String::new()};
+        let mut entries=String::new();
+        for d in docs {
+            entries.push_str(&format!("<li><a href='/documents/{}/download'>{}</a> <small>не засчитан, пока тип не подтверждён</small></li>",
+                d.id,esc(&d.relative_path)));
+        }
+        format!("<details class='check-evidence'><summary>Возможные совпадения по OCR: {} (не засчитаны)</summary><ul>{}</ul></details>",docs.len(),entries)
+    };
     let mut body=String::from("<section class='completion-panel' id='completion' aria-labelledby='completion-title'><div class='completion-head'><div><h2 id='completion-title'>Блок 1 · Комплектность по чек-листу</h2><p>Для каждого пункта показано: сколько требуется, сколько засчитано из текущей поставки, результат и причина. Это <b>не</b> семантическая экспертиза.</p></div><a class='buttonlink' href='#checklist'>Настроить чек-лист</a></div>");
+    if !candidates.is_empty() {
+        let total:usize=candidates.values().map(Vec::len).sum();
+        body.push_str(&format!("<p class='completion-alert'>По уже сохранённому OCR найдены <b>{total} возможных соответствий</b> в {} позициях чек-листа среди файлов без привязки. Они <b>не засчитаны</b>: ниже видны исходные файлы. Инженер может сопоставить их без повторного OCR.</p>",candidates.len()));
+    }
     if v.historical {body.push_str("<p class='completion-alert'>Открыта историческая проверка. Здесь показан пересчёт выбранной поставки по <b>нынешнему</b> чек-листу, а не сохранённый результат старого запуска. Для старого запуска используйте его замечания и метрики.</p>");}
     if !v.has_delivery {body.push_str("<p class='completion-alert'>Нет опубликованной поставки подрядчика. Отображаемые значения не могут считаться итогом.</p>");}
     if v.project_approval_needed {body.push_str("<p class='completion-alert'>Есть неутверждённые проектные требования. До утверждения инженер не может считать чек-лист окончательным.</p>");}
     let mut passed=0usize;let mut failed=0usize;let mut review=0usize;let mut not_required=0usize;let mut rows=String::new();
     let mut row=|code:&str,title:&str,needed:usize,found:usize,verdict:Verdict,why:String,evidence:String,basis:&str|{
-        match verdict{Verdict::Passed=>passed+=1,Verdict::Missing=>failed+=1,Verdict::NeedsReview=>review+=1,Verdict::NotRequired=>not_required+=1};
+        match verdict{Verdict::Passed=>passed+=1,Verdict::Missing=>failed+=1,Verdict::NeedsMapping|Verdict::NeedsReview=>review+=1,Verdict::NotRequired=>not_required+=1};
         rows.push_str(&format!("<tr data-checklist-status='{}'><td><strong>{}</strong><div class='check-item-title'>{}</div><small>{}</small></td><td class='check-num'>{}</td><td class='check-num'>{}</td><td><span class='check-verdict check-{}'>{}</span></td><td><span class='check-reason'>{}</span>{}</td></tr>",
             verdict.class(),esc(code),esc(title),esc(basis),if verdict==Verdict::NotRequired{"—".into()}else{needed.to_string()},found,verdict.class(),verdict.caption(),esc(&why),evidence));
     };
@@ -92,7 +121,7 @@ pub fn render(v:&View<'_>)->String {
             let (verdict,reason)=if !required {(Verdict::NotRequired,"Не включено в обязательный перечень. Включите при необходимости и утвердите чек-лист".into())}
                else{ready_for_count(v,&item.code,found,expected,recognized,unclassified)};
             let project_basis=v.project_approved.iter().find(|p|p.code==item.code).map(|p|p.basis.as_str());
-            row(&item.code,&item.title,expected,found,verdict,reason,evidence_list(proofs.into_iter()),project_basis.unwrap_or(&item.norm_reference));
+            row(&item.code,&item.title,expected,found,verdict,reason,format!("{}{}",evidence_list(proofs.into_iter()),candidate_evidence(&item.code)),project_basis.unwrap_or(&item.norm_reference));
         }
     }else{
         body.push_str("<p class='completion-alert'>Вид работ не выбран или отсутствует в каталоге. Настройте вид работ, иначе чек-лист не определён.</p>");
@@ -105,7 +134,7 @@ pub fn render(v:&View<'_>)->String {
         let docs:Vec<&Document>=v.files.iter().copied().filter(|d|d.catalog_code.as_deref()==Some(c.code.as_str())).collect();
         let recognized=docs.iter().all(|d|matches!(d.recognition_status.as_str(),"extracted"|"ocr"|"ocr_vibe"|"ocr_local"));
         let (verdict,reason)=if !c.required {(Verdict::NotRequired,"Дополнительная позиция не отмечена как обязательная".into())}else{ready_for_count(v,&c.code,found,expected,recognized,unclassified)};
-        row(&c.code,&c.title,expected,found,verdict,reason,evidence_list(docs.into_iter()),"Дополнительная позиция комплекта");
+        row(&c.code,&c.title,expected,found,verdict,reason,format!("{}{}",evidence_list(docs.into_iter()),candidate_evidence(&c.code)),"Дополнительная позиция комплекта");
     }
     // Approved project rules can reference a code that no longer exists in the catalogue.
     for code in v.required {
@@ -142,7 +171,7 @@ pub fn render(v:&View<'_>)->String {
     body.push_str(&rows);
     body.push_str("</tbody></table></div>");
     if unclassified>0 {
-        body.push_str(&format!("<details class='completion-unclassified'><summary>Требуют классификации: {unclassified} файлов — это не замечания о комплектности</summary><ul>"));
+        body.push_str(&format!("<details class='completion-unclassified'><summary>Нет привязки к пунктам чек-листа: {unclassified} файлов — это не доказательство их отсутствия</summary><ul>"));
         for d in v.files.iter().filter(|d|d.catalog_code.is_none()){
             let name=d.relative_path.rsplit('/').next().unwrap_or(&d.relative_path);
             body.push_str(&format!("<li><a href='/documents/{}/download'>{}</a> · <a href='#documents'>Назначить тип</a></li>",d.id,esc(name)));
@@ -163,6 +192,6 @@ pub fn render(v:&View<'_>)->String {
  #[test] fn shortfall_with_unclassified_is_not_a_definitive_missing_file(){
   let v=View {catalog: &Catalog{work_types:vec![],errors:vec![]},work_type:"",required:&HashSet::new(),minima:&HashMap::new(),files:&[],custom:&[],operations:&[],work_links:&HashMap::new(),support:&[],support_links:&HashMap::new(),project_approved:&[],has_delivery:true,manifest_ok:true,checklist_approved:true,scope_approved:true,project_approval_needed:false,historical:false};
   let (status,reason)=ready_for_count(&v,"1.4",0,2,true,3);
-  assert_eq!(status,Verdict::Missing);assert!(reason.contains("3 файлов без типа"));
+  assert_eq!(status,Verdict::NeedsMapping);assert!(reason.contains("3 файлов без кода"));
  }
 }
