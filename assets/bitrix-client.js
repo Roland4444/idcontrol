@@ -40,11 +40,12 @@
   if (typeof BX24 === 'undefined') { fail('Библиотека Bitrix24 не загрузилась.'); return; }
   timeout = setTimeout(function () { fail('Нет ответа от Bitrix24.'); }, 15000);
 
-  // Bitrix24 install handler runs before BX24.init on first launch.
-  // Calling installFinish unconditionally from every BX24.init is incorrect.
-  BX24.install(function () { BX24.installFinish(); });
+  // One shared entrypoint for initial app installation and regular launches.
+  // During installation installFinish completes the portal-wide setup.
+  // Bitrix24 ignores this call on ordinary launches of an installed app.
   BX24.init(function () {
     if (stopped) return;
+    BX24.installFinish();
     BX24.callMethod('user.current', {}, function (result) {
       if (stopped) return;
       if (result.error()) { fail('Bitrix24 не вернул текущего сотрудника.'); return; }
