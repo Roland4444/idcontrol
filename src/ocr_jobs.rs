@@ -11,6 +11,11 @@ use tokio::sync::mpsc;
 use tracing::{error,info,warn};
 
 
+use chrono::NaiveDate;
+use regex::{Regex, RegexSet};
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 
 //// Номер документа, дату документа, контрагента инн и название и нашего контрагента ИНН и название.
 /// 
@@ -20,6 +25,28 @@ use tracing::{error,info,warn};
 /// 
 /// 
 /// 
+/// 
+/// 
+/// 
+/// 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecognizedField {
+
+    DateDocum,
+    NumberDocum,
+    Name,
+    Inn
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Party {
+    pub name: String,
+    pub inn: Option<String>,
+    /// Метка из текста: «Рекламораспространитель», «Рекламодатель», «Заказчик» и т.п.
+    pub role: Option<String>,
+}
+
 
 #[derive(Debug,Clone,FromRow,Serialize)]
 pub struct OcrJob {
@@ -53,6 +80,271 @@ const JOB_COLUMNS:&str="id,document_id,package_id,status,stage,current_step,tota
 pub fn needs_retry(status:&str)->bool {
     status.starts_with("error:") || matches!(status,"manual"|"partial")
 }
+
+fn re_inn() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"(?i)[ИIНHNМMÉÈ]{2,3}[\s:№#\-]*(\d[\d\s]{8,15}\d)").unwrap())
+}
+
+fn re_date_text() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(
+            r#"(?i)«?\s*(\d{1,2})\s*»?\s+(январ[яь]|феврал[яь]|марта?|апрел[яь]|ма[йя]|июн[яь]|июл[яь]|августа?|сентябр[яь]|октябр[яь]|ноябр[яь]|декабр[яь])\s+(\d{4})"#,
+        )
+        .unwrap()
+    })
+}
+
+fn re_date_num() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"\b(\d{2})\.(\d{2})\.(\d{4})").unwrap())
+}
+
+fn re_number() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"(?i)(?:№|N)\s*([0-9]+(?:[\-/][0-9]+)*)").unwrap())
+}
+
+fn re_org() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r#"(?i)(ООО|АО|ПАО|ЗАО|ОАО|ИП)\s*[«"]\s*([^»\n]+?)\s*»"#).unwrap()
+    })
+}
+
+fn re_role() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(
+            r"(?i)(Рекламораспространитель|Рекламодатель|Заказчик|Застройщик|Генподрядчик|Подрядчик|Субподрядчик|Исполнитель|Поставщик|Покупатель|Продавец|Арендодатель|Арендатор|Лицензиар|Лицензиат)",
+        )
+        .unwrap()
+    })
+}
+
+fn field_presence_set() -> &'static RegexSet {
+    static S: OnceLock<RegexSet> = OnceLock::new();
+    S.get_or_init(|| {
+        RegexSet::new([
+            r"(?i)[ИIНHNМMÉÈ]{2,3}[\s:№#\-]*\d{10,12}",
+            r#"(?i)«?\d{1,2}»?\s+\w+[яь]\s+\d{4}"#,
+            r"\d{2}\.\d{2}\.\d{4}",                  // ← было (?<!\d)...(?!\d)
+            r"(?i)(?:№|N)\s*\d+",
+            r#"(?i)(?:ООО|АО|ПАО|ЗАО|ОАО|ИП)\s*[«"]"#,
+        ])
+        .unwrap()
+    })
+}
+
+// ---------- Коллекторы ----------
+
+fn collect_inns(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for cap in re_inn().captures_iter(text) {
+        let digits: String = cap[1].chars().filter(|c| c.is_ascii_digit()).collect();
+        if (digits.len() == 10 || digits.len() == 12) && !out.contains(&digits) {
+            out.push(digits);
+        }
+    }
+    out
+}
+
+fn month_from_rus(s: &str) -> Option<u32> {
+    let base = s.to_lowercase();
+    let base = base.trim_end_matches(['а', 'я', 'ь']);
+    Some(match base {
+        "январ" => 1,
+        "феврал" => 2,
+        "март" => 3,
+        "апрел" => 4,
+        "ма" | "май" => 5,
+        "июн" => 6,
+        "июл" => 7,
+        "август" => 8,
+        "сентябр" => 9,
+        "октябр" => 10,
+        "ноябр" => 11,
+        "декабр" => 12,
+        _ => return None,
+    })
+}
+
+fn collect_dates(text: &str) -> Vec<NaiveDate> {
+    let mut out = Vec::new();
+    for cap in re_date_text().captures_iter(text) {
+        let day: u32 = cap[1].parse().unwrap_or(0);
+        let month = month_from_rus(&cap[2]).unwrap_or(0);
+        let year: i32 = cap[3].parse().unwrap_or(0);
+        if let Some(d) = NaiveDate::from_ymd_opt(year, month, day) {
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+    }
+    for cap in re_date_num().captures_iter(text) {
+        let day: u32 = cap[1].parse().unwrap_or(0);
+        let month: u32 = cap[2].parse().unwrap_or(0);
+        let year: i32 = cap[3].parse().unwrap_or(0);
+        if let Some(d) = NaiveDate::from_ymd_opt(year, month, day) {
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+    }
+    out
+}
+
+fn collect_numbers(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for cap in re_number().captures_iter(text) {
+        let n = cap[1].to_string();
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+fn normalize_org_name(s: &str) -> String {
+    s.replace("- ", "-")
+        .replace(" -", "-")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn collect_org_names(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for cap in re_org().captures_iter(text) {
+        let name = normalize_org_name(&format!("{} «{}»", &cap[1], cap[2].trim()));
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+// ---------- Публичный API ----------
+
+pub fn get_fields(
+    text: &str,
+    fields: &[RecognizedField],
+) -> HashMap<RecognizedField, Vec<String>> {
+    let present: Vec<usize> = field_presence_set().matches(text).iter().collect();
+
+    let mut out = HashMap::with_capacity(fields.len());
+    for &field in fields {
+        let values = match field {
+            RecognizedField::Inn => {
+                if present.contains(&0) { collect_inns(text) } else { Vec::new() }
+            }
+            RecognizedField::DateDocum => {
+                if present.contains(&1) || present.contains(&2) {
+                    collect_dates(text)
+                        .into_iter()
+                        .map(|d: NaiveDate| d.format("%d-%m-%Y").to_string())
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            RecognizedField::NumberDocum => {
+                if present.contains(&3) { collect_numbers(text) } else { Vec::new() }
+            }
+            RecognizedField::Name => {
+                if present.contains(&4) { collect_org_names(text) } else { Vec::new() }
+            }
+        };
+        out.insert(field, values);
+    }
+    out
+}
+
+pub fn pair_parties(text: &str, names: &[String], _inns: &[String]) -> Vec<Party> {
+    let mut parties = Vec::new();
+    for name in names {
+        let Some(pos) = text.find(name.as_str()) else { continue };
+        let ctx_start = pos.saturating_sub(80);
+        let ctx = &text[ctx_start..pos];
+        let role = re_role().captures(ctx).map(|c| c[1].to_string());
+
+        let forward_end = (pos + 400).min(text.len());
+        let forward = &text[pos..forward_end];
+        let inn = re_inn().captures(forward).and_then(|c| {
+            let d: String = c[1].chars().filter(|c| c.is_ascii_digit()).collect();
+            (d.len() == 10 || d.len() == 12).then_some(d)
+        });
+
+        parties.push(Party { name: name.clone(), inn, role });
+    }
+    parties.sort_by(|a, b| a.name.cmp(&b.name));
+    parties.dedup_by(|a, b| a.name == b.name);
+    parties
+}
+
+pub fn parse_parties(text: &str) -> Vec<Party> {
+    let names = collect_org_names(text);
+    pair_parties(text, &names, &[])
+}
+
+// ---------- PDF из байтов ----------
+
+pub fn render_pdf_bytes_to_png(pdf_bytes: &[u8]) -> Result<Vec<u8>> {
+    use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder};
+
+    let pdf = hayro::hayro_syntax::Pdf::new(pdf_bytes.to_vec())
+        .map_err(|e| anyhow!("hayro не смог разобрать PDF: {e:?}"))?;
+    let page = pdf.pages().first().context("PDF не содержит страниц")?;
+
+    let cache = hayro::RenderCache::new();
+    let interpreter = hayro::hayro_interpret::InterpreterSettings::default();
+    let render_settings = hayro::RenderSettings {
+        force_image_interpolation: false,
+        ..Default::default()
+    };
+    let pixmap_settings = hayro::PixmapSettings {
+        x_scale: 2.0,
+        y_scale: 2.0,
+        bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+    };
+    let pixmap = hayro::render(page, &cache, &interpreter, &render_settings, &pixmap_settings);
+
+    let mut png = Vec::new();
+    PngEncoder::new(&mut png)
+        .write_image(
+            pixmap.data_as_u8_slice(),
+            pixmap.width() as u32,
+            pixmap.height() as u32,
+            ExtendedColorType::Rgba8,
+        )
+        .context("Не удалось закодировать PNG")?;
+    Ok(png)
+}
+
+fn recognize_bytes_to_text(img_bytes: Vec<u8>) -> Result<String> {
+    let pages = crate::local_ocr::recognize_pages(
+        vec![img_bytes],
+        PathBuf::from("models/ocr"),
+        1,
+        None,
+    )?;
+    Ok(pages.into_iter().map(|p| p.text).collect::<Vec<_>>().join("\n"))
+}
+
+pub fn parse_pdf_bytes(
+    bytes: &[u8],
+    fields: &[RecognizedField],
+) -> Result<HashMap<RecognizedField, Vec<String>>> {
+    let text = if bytes.starts_with(b"%PDF-") {
+        let png = render_pdf_bytes_to_png(bytes)?;
+        recognize_bytes_to_text(png)?
+    } else {
+        recognize_bytes_to_text(bytes.to_vec())?
+    };
+    Ok(get_fields(&text, fields))
+}
+
 
 pub async fn enqueue_document(db:&PgPool,id:i64,actor:&str)->Result<Option<i64>>{
     // Only current versions of existing documents are reprocessed.
@@ -254,7 +546,6 @@ use rapidocr_core::{
     model::{model_set_by_name, ModelCache, ModelDownloadMode},
     RapidOcr,
 };
-use regex::Regex;
 use tempfile::TempDir;
 
 /// Рендерит первую страницу PDF в PNG и возвращает путь к временному файлу.
@@ -533,6 +824,10 @@ fn extract_inn_from_text(text: &str) -> Option<String> {
 //     Ok(extract_inn_from_text(&text))
 // }
 
+
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,6 +956,133 @@ fn extracts_inn_from_real_pdf1() -> anyhow::Result<()> {
     println!("Время выполнения OCR + парсинг: {:.2?} ({:.1} с)", elapsed, elapsed.as_secs_f64());
     Ok(())
 }
+
+
+
+
+#[test]
+#[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
+fn test_parse_document_date() {
+    let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
+    let result = parse_pdf_bytes(&bytes, &[RecognizedField::DateDocum]).unwrap();
+    let dates = &result[&RecognizedField::DateDocum];
+    println!("DateDocum: {dates:?}");
+    assert_eq!(dates.len(), 1, "Ожидали одну дату, получили: {dates:?}");
+    assert_eq!(dates[0], "03-11-2026", "Дата «03» ноября 2026 г.");
+}
+
+#[test]
+#[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
+fn test_parse_document_number() {
+    let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
+    let result = parse_pdf_bytes(&bytes, &[RecognizedField::NumberDocum]).unwrap();
+    let numbers = &result[&RecognizedField::NumberDocum];
+    println!("NumberDocum: {numbers:?}");
+    assert!(numbers.is_empty(), "В этом PDF номера нет, но нашли: {numbers:?}");
+}
+
+#[test]   /// to repair
+#[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
+fn test_parse_document_inn() {
+    let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
+    let result = parse_pdf_bytes(&bytes, &[RecognizedField::Inn]).unwrap();
+    let inns = &result[&RecognizedField::Inn];
+    println!("Inn: {inns:?}");
+    assert_eq!(inns.len(), 2, "Ожидали два ИНН, получили: {inns:?}");
+    assert!(inns.contains(&"3461070140".to_string()), "ИНН ООО «ИНДОР МАРКЕТИНГ»");
+    assert!(inns.contains(&"3000012604".to_string()), "ИНН ООО «СЗ «РЭС-БАБЕФА»");
+}
+
+#[test]   //to check
+#[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
+fn test_parse_document_names() {
+    let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
+    let result = parse_pdf_bytes(&bytes, &[RecognizedField::Name]).unwrap();
+    let names = &result[&RecognizedField::Name];
+    println!("Name: {names:?}");
+    assert_eq!(names.len(), 2, "Ожидали два названия, получили: {names:?}");
+    assert!(names.iter().any(|n| n.contains("ИНДОР МАРКЕТИНГ")), "Не найдено ООО «ИНДОР МАРКЕТИНГ», names={names:?}");
+    assert!(names.iter().any(|n| n.contains("РЭС-БАБЕФА")), "Не найдено ООО «СЗ «РЭС-БАБЕФА», names={names:?}");
+    assert!(!names.iter().any(|n| n.contains("РЭС- БАБЕФА")), "Название не нормализовано (пробел после дефиса)");
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+#[test]
+#[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
+fn test_parse_document_pdf_bytes() -> anyhow::Result<()> {
+    let bytes = std::fs::read("test_data/parse_doc.pdf")?;
+
+    let result = parse_pdf_bytes(
+        &bytes,
+        &[
+            RecognizedField::Inn,
+            RecognizedField::Name,
+            RecognizedField::NumberDocum,
+            RecognizedField::DateDocum,
+        ],
+    )?;
+
+    println!("--- Результат парсинга ---");
+    for (field, values) in &result {
+        println!("{:?}: {:?}", field, values);
+    }
+
+    // Достаём поля через .get() — так тип &Vec<String> известен сразу
+    let dates = result.get(&RecognizedField::DateDocum)
+        .expect("DateDocum должен быть в запросе");
+    let numbers = result.get(&RecognizedField::NumberDocum)
+        .expect("NumberDocum должен быть в запросе");
+    let inns = result.get(&RecognizedField::Inn)
+        .expect("Inn должен быть в запросе");
+    let names = result.get(&RecognizedField::Name)
+        .expect("Name должен быть в запросе");
+
+    // --- Дата ---
+    assert_eq!(dates.len(), 1, "Должна быть одна дата, получили: {dates:?}");
+    assert_eq!(dates[0], "2026-11-03", "Дата «03» ноября 2026 г.");
+
+    // --- Номер ---
+    assert!(
+        numbers.is_empty(),
+        "В этом PDF номера нет, но нашли: {numbers:?}"
+    );
+
+    // --- ИНН ---
+    assert_eq!(inns.len(), 2, "Ожидали два ИНН, получили: {inns:?}");
+    assert!(inns.contains(&"3461070140".to_string()), "ИНН ИНДОР");
+    assert!(inns.contains(&"3000012604".to_string()), "ИНН РЭС-БАБЕФА");
+
+    // --- Названия ---
+    assert_eq!(names.len(), 2, "Ожидали два названия, получили: {names:?}");
+    assert!(
+        names.iter().any(|n| n.contains("ИНДОР МАРКЕТИНГ")),
+        "Не найдено ООО «ИНДОР МАРКЕТИНГ», names={names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.contains("РЭС-БАБЕФА")),
+        "Не найдено ООО «СЗ «РЭС-БАБЕФА», names={names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("РЭС- БАБЕФА")),
+        "Название не нормализовано (пробел после дефиса)"
+    );
+
+    Ok(())
+}
+
+
+
 }
     
     
