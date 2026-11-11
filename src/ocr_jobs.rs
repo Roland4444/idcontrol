@@ -2,6 +2,7 @@
 //! Only non-sensitive metadata is logged: no key, document text, or image bytes.
 use crate::{catalog::Catalog, config::Config, docs, engine, repo};
 use anyhow::{anyhow, Context, Result};
+
 use chrono::{DateTime,Utc};
 use serde::Serialize;
 use sqlx::{FromRow,PgPool};
@@ -235,7 +236,6 @@ pub async fn print_status(db:&PgPool,cfg:&Config)->Result<()> {
 }
 
 
-use anyhow::{Context, Result};
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder};
 use rapidocr_core::{
@@ -244,10 +244,56 @@ use rapidocr_core::{
     RapidOcr,
 };
 use regex::Regex;
-use std::path::Path;
 use tempfile::TempDir;
 
 /// Рендерит первую страницу PDF в PNG и возвращает путь к временному файлу.
+// fn render_first_pdf_page_to_png(pdf_path: &Path, work_dir: &Path) -> Result<std::path::PathBuf> {
+//     let bytes = std::fs::read(pdf_path)
+//         .with_context(|| format!("не удалось прочитать PDF: {}", pdf_path.display()))?;
+
+//     let pdf = hayro::hayro_syntax::Pdf::new(bytes)
+//         .map_err(|e| anyhow::anyhow!("hayro не смог разобрать PDF: {e:?}"))?;
+
+//     let page = pdf.pages().first()
+//         .context("PDF не содержит страниц")?;
+
+//     let cache = hayro::RenderCache::new();
+//     let interpreter = hayro::hayro_interpret::InterpreterSettings::default();
+
+//     // 2.0 ≈ 144 DPI — достаточно для OCR, но без огромных PNG.
+//     let pixmap = hayro::render(
+//         page,
+//         &cache,
+//         &interpreter,
+//         &hayro::RenderSettings {
+//             x_scale: 2.0,
+//             y_scale: 2.0,
+//             bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+//             ..Default::default()
+//         },
+//     );
+
+//     let width = pixmap.width() as u32;
+//     let height = pixmap.height() as u32;
+
+//     let png_path = work_dir.join("page-0.png");
+//     let file = std::fs::File::create(&png_path)
+//         .with_context(|| format!("не удалось создать PNG: {}", png_path.display()))?;
+
+//     PngEncoder::new(file)
+//         .write_image(
+//             pixmap.data_as_u8_slice(),
+//             width,
+//             height,
+//             ExtendedColorType::Rgba8,
+//         )
+//         .context("не удалось закодировать PNG")?;
+
+//     Ok(png_path)
+// }
+
+use hayro::{PixmapSettings, RenderSettings};
+
 fn render_first_pdf_page_to_png(pdf_path: &Path, work_dir: &Path) -> Result<std::path::PathBuf> {
     let bytes = std::fs::read(pdf_path)
         .with_context(|| format!("не удалось прочитать PDF: {}", pdf_path.display()))?;
@@ -261,17 +307,24 @@ fn render_first_pdf_page_to_png(pdf_path: &Path, work_dir: &Path) -> Result<std:
     let cache = hayro::RenderCache::new();
     let interpreter = hayro::hayro_interpret::InterpreterSettings::default();
 
-    // 2.0 ≈ 144 DPI — достаточно для OCR, но без огромных PNG.
+    let render_settings = RenderSettings {
+        force_image_interpolation: false,
+        ..Default::default()
+    };
+
+    // В hayro 0.8 масштаб и фон относятся уже к PixmapSettings.
+    let pixmap_settings = PixmapSettings {
+        x_scale: 2.0, // ≈ 144 DPI
+        y_scale: 2.0,
+        bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+    };
+
     let pixmap = hayro::render(
         page,
         &cache,
         &interpreter,
-        &hayro::RenderSettings {
-            x_scale: 2.0,
-            y_scale: 2.0,
-            bg_color: hayro::vello_cpu::color::palette::css::WHITE,
-            ..Default::default()
-        },
+        &render_settings,
+        &pixmap_settings,
     );
 
     let width = pixmap.width() as u32;
@@ -292,6 +345,10 @@ fn render_first_pdf_page_to_png(pdf_path: &Path, work_dir: &Path) -> Result<std:
 
     Ok(png_path)
 }
+
+
+
+
 
 /// Создаёт OCR-движок RapidOCR. Модели должны лежать в `models/`
 /// или будут скачаны при первом запуске.
@@ -328,17 +385,47 @@ fn extract_inn_from_text(text: &str) -> Option<String> {
 }
 
 /// Основная функция: принимает путь к PDF и возвращает ИНН, если он найден.
+// pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
+//     let work_dir = TempDir::new().context("не удалось создать временную директорию")?;
+
+//     let png_path = render_first_pdf_page_to_png(pdf_path, work_dir.path())?;
+
+//     let mut ocr = build_ocr()?;
+//     let result = ocr
+//         .run_path(png_path.to_str().context("путь к PNG не является UTF-8")?)
+//         .context("OCR не смог обработать изображение")?;
+
+//     // Склеиваем строки с достаточной уверенностью.
+//     let text: String = result
+//         .lines
+//         .into_iter()
+//         .filter(|line| line.score > 0.3)
+//         .map(|line| line.text)
+//         .collect::<Vec<_>>()
+//         .join("\n");
+
+//     Ok(extract_inn_from_text(&text))
+// }
+
 pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
     let work_dir = TempDir::new().context("не удалось создать временную директорию")?;
 
     let png_path = render_first_pdf_page_to_png(pdf_path, work_dir.path())?;
+
+    // Сохраняем PNG рядом с проектом для визуальной проверки
+    std::fs::copy(&png_path, "debug_page0.png")
+        .context("не удалось сохранить debug_page0.png")?;
 
     let mut ocr = build_ocr()?;
     let result = ocr
         .run_path(png_path.to_str().context("путь к PNG не является UTF-8")?)
         .context("OCR не смог обработать изображение")?;
 
-    // Склеиваем строки с достаточной уверенностью.
+    // Печатаем все строки с их confidence, без фильтра
+    for line in &result.lines {
+        println!("[{:.3}] {}", line.score, line.text);
+    }
+
     let text: String = result
         .lines
         .into_iter()
@@ -347,10 +434,11 @@ pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
         .collect::<Vec<_>>()
         .join("\n");
 
+    std::fs::write("debug_ocr.txt", &text)
+        .context("не удалось сохранить debug_ocr.txt")?;
+
     Ok(extract_inn_from_text(&text))
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -401,7 +489,27 @@ mod tests {
     #[test]
     #[ignore = "требует models/ и test_data/sample_invoice.pdf"]
     fn extracts_inn_from_real_pdf() -> anyhow::Result<()> {
-        let path = std::path::Path::new("test_data/sample_invoice.pdf");
+        let path = std::path::Path::new("test_data/file-114098.pdf");
+        let inn = extract_inn_from_pdf(path)?;
+        assert_eq!(inn.as_deref(), Some("7707083893"));
+        Ok(())
+    }
+
+
+    #[test]
+    #[ignore = "требует models/ и test_data/sample_invoice.pdf"]
+    fn extracts_inn_from_direct_pdf() -> anyhow::Result<()> {
+        let path = std::path::Path::new("test_data/dirext.pdf");
+        let inn = extract_inn_from_pdf(path)?;
+        assert_eq!(inn.as_deref(), Some("7707083893"));
+        Ok(())
+    }
+
+
+    #[test]
+    #[ignore = "требует models/ и test_data/sample_invoice.pdf"]
+    fn extracts_inn_from_1t_pdf() -> anyhow::Result<()> {
+        let path = std::path::Path::new("test_data/1.pdf");
         let inn = extract_inn_from_pdf(path)?;
         assert_eq!(inn.as_deref(), Some("7707083893"));
         Ok(())
