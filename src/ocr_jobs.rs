@@ -234,6 +234,124 @@ pub async fn print_status(db:&PgPool,cfg:&Config)->Result<()> {
     Ok(())
 }
 
+
+use anyhow::{Context, Result};
+use image::codecs::png::PngEncoder;
+use image::{ExtendedColorType, ImageEncoder};
+use rapidocr_core::{
+    config::{InferenceOptions, PipelineConfig},
+    model::{model_set_by_name, ModelCache, ModelDownloadMode},
+    RapidOcr,
+};
+use regex::Regex;
+use std::path::Path;
+use tempfile::TempDir;
+
+/// Рендерит первую страницу PDF в PNG и возвращает путь к временному файлу.
+fn render_first_pdf_page_to_png(pdf_path: &Path, work_dir: &Path) -> Result<std::path::PathBuf> {
+    let bytes = std::fs::read(pdf_path)
+        .with_context(|| format!("не удалось прочитать PDF: {}", pdf_path.display()))?;
+
+    let pdf = hayro::hayro_syntax::Pdf::new(bytes)
+        .map_err(|e| anyhow::anyhow!("hayro не смог разобрать PDF: {e:?}"))?;
+
+    let page = pdf.pages().first()
+        .context("PDF не содержит страниц")?;
+
+    let cache = hayro::RenderCache::new();
+    let interpreter = hayro::hayro_interpret::InterpreterSettings::default();
+
+    // 2.0 ≈ 144 DPI — достаточно для OCR, но без огромных PNG.
+    let pixmap = hayro::render(
+        page,
+        &cache,
+        &interpreter,
+        &hayro::RenderSettings {
+            x_scale: 2.0,
+            y_scale: 2.0,
+            bg_color: hayro::vello_cpu::color::palette::css::WHITE,
+            ..Default::default()
+        },
+    );
+
+    let width = pixmap.width() as u32;
+    let height = pixmap.height() as u32;
+
+    let png_path = work_dir.join("page-0.png");
+    let file = std::fs::File::create(&png_path)
+        .with_context(|| format!("не удалось создать PNG: {}", png_path.display()))?;
+
+    PngEncoder::new(file)
+        .write_image(
+            pixmap.data_as_u8_slice(),
+            width,
+            height,
+            ExtendedColorType::Rgba8,
+        )
+        .context("не удалось закодировать PNG")?;
+
+    Ok(png_path)
+}
+
+/// Создаёт OCR-движок RapidOCR. Модели должны лежать в `models/`
+/// или будут скачаны при первом запуске.
+fn build_ocr() -> Result<RapidOcr> {
+    let model_set = model_set_by_name("ppocrv6-small")
+        .context("неизвестный набор моделей RapidOCR")?;
+
+    let cache = ModelCache::new("models");
+
+    cache.ensure_model_set_for_pipeline(
+        model_set,
+        PipelineConfig::without_cls(),
+        ModelDownloadMode::Missing,
+    )?;
+
+    let cfg = cache
+        .config_for(model_set)
+        .with_pipeline(PipelineConfig::without_cls())
+        .with_inference_options(InferenceOptions {
+            intra_threads: 1,
+            inter_threads: 1,
+            parallel_execution: false,
+            ..Default::default()
+        });
+
+    RapidOcr::from_config(cfg).context("не удалось создать RapidOCR")
+}
+
+/// Извлекает ИНН из распознанного текста.
+/// Поддерживает 10- и 12-значный ИНН, метки «ИНН» / «INN».
+fn extract_inn_from_text(text: &str) -> Option<String> {
+    let re = Regex::new(r"(?i)(?:ИНН|INN)[\s:№#]*(\d{10}|\d{12})").unwrap();
+    re.captures(text).map(|c| c[1].to_string())
+}
+
+/// Основная функция: принимает путь к PDF и возвращает ИНН, если он найден.
+pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
+    let work_dir = TempDir::new().context("не удалось создать временную директорию")?;
+
+    let png_path = render_first_pdf_page_to_png(pdf_path, work_dir.path())?;
+
+    let mut ocr = build_ocr()?;
+    let result = ocr
+        .run_path(png_path.to_str().context("путь к PNG не является UTF-8")?)
+        .context("OCR не смог обработать изображение")?;
+
+    // Склеиваем строки с достаточной уверенностью.
+    let text: String = result
+        .lines
+        .into_iter()
+        .filter(|line| line.score > 0.3)
+        .map(|line| line.text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(extract_inn_from_text(&text))
+}
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,4 +362,52 @@ mod tests {
         assert!(!needs_retry("ocr_vibe"));
         assert!(!needs_retry("extracted"));
     }
+
+
+
+
+    #[test]
+    fn extracts_10_digit_inn() {
+        assert_eq!(
+            extract_inn_from_text("ИНН 7707083893"),
+            Some("7707083893".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_12_digit_inn() {
+        assert_eq!(
+            extract_inn_from_text("ИНН: 770708389312"),
+            Some("770708389312".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_inn_with_latin_label() {
+        assert_eq!(
+            extract_inn_from_text("INN 1234567890"),
+            Some("1234567890".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_inn() {
+        assert_eq!(extract_inn_from_text("Договор № 42"), None);
+    }
+
+    /// Интеграционный тест: требует скачанных моделей RapidOCR
+    /// и файла `test_data/sample_invoice.pdf` с известным ИНН.
+    /// Запуск: `cargo test -- --ignored`
+    #[test]
+    #[ignore = "требует models/ и test_data/sample_invoice.pdf"]
+    fn extracts_inn_from_real_pdf() -> anyhow::Result<()> {
+        let path = std::path::Path::new("test_data/sample_invoice.pdf");
+        let inn = extract_inn_from_pdf(path)?;
+        assert_eq!(inn.as_deref(), Some("7707083893"));
+        Ok(())
+    }
 }
+    
+    
+
+
