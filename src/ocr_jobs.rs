@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime,Utc};
 use serde::Serialize;
 use sqlx::{FromRow,PgPool};
-use std::{path::Path, sync::Arc};
+use std::{path::{Path, PathBuf},  sync::Arc};
 use tokio::sync::mpsc;
 use tracing::{error,info,warn};
 
@@ -380,10 +380,17 @@ fn build_ocr() -> Result<RapidOcr> {
 /// Извлекает ИНН из распознанного текста.
 /// Поддерживает 10- и 12-значный ИНН, метки «ИНН» / «INN».
 fn extract_inn_from_text(text: &str) -> Option<String> {
-    let re = Regex::new(r"(?i)(?:ИНН|INN)[\s:№#]*(\d{10}|\d{12})").unwrap();
-    re.captures(text).map(|c| c[1].to_string())
+    // OCR путает: И→I/H/N/É/È, Н→H/N, М→M.
+    // Ищем 2–3 «похожих» символа, потом разделители и 10/12 цифр.
+    let re = Regex::new(r"(?i)[ИIНHNМMÉÈ]{2,3}[\s:№#\-]*(\d[\d\s]{8,15}\d)").unwrap();
+    re.captures(text).and_then(|c| {
+        let digits: String = c[1].chars().filter(|ch| ch.is_ascii_digit()).collect();
+        match digits.len() {
+            10 | 12 => Some(digits),
+            _ => None,
+        }
+    })
 }
-
 /// Основная функция: принимает путь к PDF и возвращает ИНН, если он найден.
 // pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
 //     let work_dir = TempDir::new().context("не удалось создать временную директорию")?;
@@ -409,36 +416,61 @@ fn extract_inn_from_text(text: &str) -> Option<String> {
 
 pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
     let work_dir = TempDir::new().context("не удалось создать временную директорию")?;
-
     let png_path = render_first_pdf_page_to_png(pdf_path, work_dir.path())?;
+    let png_bytes = std::fs::read(&png_path)
+        .with_context(|| format!("не удалось прочитать PNG: {}", png_path.display()))?;
 
-    // Сохраняем PNG рядом с проектом для визуальной проверки
-    std::fs::copy(&png_path, "debug_page0.png")
-        .context("не удалось сохранить debug_page0.png")?;
+    // Продакшен-путь: local_ocr с eslav-моделями из models/ocr/
+    let model_dir = PathBuf::from("models/ocr");
+    let pages = crate::local_ocr::recognize_pages(
+        vec![png_bytes],
+        model_dir,
+        1,    // один поток
+        None,
+    )?;
 
-    let mut ocr = build_ocr()?;
-    let result = ocr
-        .run_path(png_path.to_str().context("путь к PNG не является UTF-8")?)
-        .context("OCR не смог обработать изображение")?;
-
-    // Печатаем все строки с их confidence, без фильтра
-    for line in &result.lines {
-        println!("[{:.3}] {}", line.score, line.text);
-    }
-
-    let text: String = result
-        .lines
-        .into_iter()
-        .filter(|line| line.score > 0.3)
-        .map(|line| line.text)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    std::fs::write("debug_ocr.txt", &text)
-        .context("не удалось сохранить debug_ocr.txt")?;
+    let text = pages.into_iter().map(|p| p.text).collect::<Vec<_>>().join("\n");
+    std::fs::write("debug_ocr.txt", &text).ok();
+    println!("--- OCR ---\n{}\n--- /OCR ---", text);
 
     Ok(extract_inn_from_text(&text))
 }
+
+
+
+
+// pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
+//     let work_dir = TempDir::new().context("не удалось создать временную директорию")?;
+
+//     let png_path = render_first_pdf_page_to_png(pdf_path, work_dir.path())?;
+
+//     // Сохраняем PNG рядом с проектом для визуальной проверки
+//     std::fs::copy(&png_path, "debug_page0.png")
+//         .context("не удалось сохранить debug_page0.png")?;
+
+//     let mut ocr = build_ocr()?;
+//     let result = ocr
+//         .run_path(png_path.to_str().context("путь к PNG не является UTF-8")?)
+//         .context("OCR не смог обработать изображение")?;
+
+//     // Печатаем все строки с их confidence, без фильтра
+//     for line in &result.lines {
+//         println!("[{:.3}] {}", line.score, line.text);
+//     }
+
+//     let text: String = result
+//         .lines
+//         .into_iter()
+//         .filter(|line| line.score > 0.3)
+//         .map(|line| line.text)
+//         .collect::<Vec<_>>()
+//         .join("\n");
+
+//     std::fs::write("debug_ocr.txt", &text)
+//         .context("не удалось сохранить debug_ocr.txt")?;
+
+//     Ok(extract_inn_from_text(&text))
+// }
 
 #[cfg(test)]
 mod tests {
