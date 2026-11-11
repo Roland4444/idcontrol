@@ -1,7 +1,7 @@
 //! DB-backed OCR queue, single claim per document, persisted progress.
 //! Only non-sensitive metadata is logged: no key, document text, or image bytes.
 use crate::{catalog::Catalog, config::Config, docs, engine, repo};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context, Result, bail};
 
 use chrono::{DateTime,Utc};
 use serde::Serialize;
@@ -379,18 +379,6 @@ fn build_ocr() -> Result<RapidOcr> {
 
 /// Извлекает ИНН из распознанного текста.
 /// Поддерживает 10- и 12-значный ИНН, метки «ИНН» / «INN».
-fn extract_inn_from_text(text: &str) -> Option<String> {
-    // OCR путает: И→I/H/N/É/È, Н→H/N, М→M.
-    // Ищем 2–3 «похожих» символа, потом разделители и 10/12 цифр.
-    let re = Regex::new(r"(?i)[ИIНHNМMÉÈ]{2,3}[\s:№#\-]*(\d[\d\s]{8,15}\d)").unwrap();
-    re.captures(text).and_then(|c| {
-        let digits: String = c[1].chars().filter(|ch| ch.is_ascii_digit()).collect();
-        match digits.len() {
-            10 | 12 => Some(digits),
-            _ => None,
-        }
-    })
-}
 /// Основная функция: принимает путь к PDF и возвращает ИНН, если он найден.
 // pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
 //     let work_dir = TempDir::new().context("не удалось создать временную директорию")?;
@@ -437,7 +425,69 @@ pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
 }
 
 
+fn get_correct_inn_vec(text: &str) -> Result<Vec<String>> {
+    let re = Regex::new(r"(?i)[ИIНHNМMÉÈ]{2,3}[\s:№#\-]*(\d[\d\s]{8,15}\d)")?;
 
+    let mut valid:   Vec<String>   = Vec::new();
+    let mut invalid: Vec<String>   = Vec::new();
+
+    for cap in re.captures_iter(text){
+        let digits: String = cap[1].chars().filter(|c| c.is_ascii_digit()).collect();
+        match digits.len() {
+            10 | 12 => {
+                if !valid.contains(&digits){
+                    valid.push(digits);
+                }
+            }
+
+            _ => {
+                if !invalid.contains(&digits){
+                    invalid.push(digits);
+                }
+            }
+        }
+    } 
+
+ match (valid.is_empty(), invalid.is_empty()) {
+        (true, true) => bail!("ИНН не найден в распознанном тексте"),
+        (true, false) => bail!(
+            "Корректных ИНН нет; найдены битые (вероятно, ошибка OCR): {invalid:?}"
+        ),
+        (false, false) => {
+            tracing::warn!(
+                ?invalid,
+                ?valid,
+                "Часть ИНН имеет неверную длину (вероятно, ошибка OCR), они отброшены"
+            );
+            Ok(valid)
+        }
+        (false, true) => Ok(valid),
+    }
+}
+
+
+pub fn get_correct_inn_vec_from_pdf(pdf_path: &Path) -> Result<Vec<String>> {
+    let work_dir = TempDir::new().context("не удалось создать временную директорию")?;
+    let png_path = render_first_pdf_page_to_png(pdf_path, work_dir.path())?;
+    let png_bytes = std::fs::read(&png_path)?;
+
+    let pages = crate::local_ocr::recognize_pages(
+        vec![png_bytes],
+        PathBuf::from("models/ocr"),
+        1,
+        None,
+    )?;
+    let text = pages.into_iter().map(|p| p.text).collect::<Vec<_>>().join("\n");
+    std::fs::write("debug_ocr.txt", &text).ok();
+    println!("--- OCR ---\n{text}\n--- /OCR ---");
+
+    get_correct_inn_vec(&text)
+}
+
+
+fn extract_inn_from_text(text: &str) -> Option<String> {
+    get_correct_inn_vec(text).ok().and_then(|v| v.into_iter().next())
+}
 
 // pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
 //     let work_dir = TempDir::new().context("не удалось создать временную директорию")?;
@@ -523,7 +573,7 @@ mod tests {
     fn extracts_inn_from_real_pdf() -> anyhow::Result<()> {
         let path = std::path::Path::new("test_data/file-114098.pdf");
         let inn = extract_inn_from_pdf(path)?;
-        assert_eq!(inn.as_deref(), Some("7707083893"));
+        assert_eq!(inn.as_deref(), Some("30000011230"));  ///!!!must failed 10, 12 INN!!!
         Ok(())
     }
 
@@ -546,6 +596,60 @@ mod tests {
         assert_eq!(inn.as_deref(), Some("7707083893"));
         Ok(())
     }
+
+
+    #[test]
+fn get_correct_inn_vec_returns_all_valid() {
+    let text = "ИHH: 3000004184 KПП: 300001001\nИНН 7707083893";
+    assert_eq!(
+        get_correct_inn_vec(text).unwrap(),
+        vec!["3000004184".to_string(), "7707083893".to_string()]
+    );
+}
+
+#[test]
+fn get_correct_inn_vec_rejects_11_digit_inn() {
+    let err = get_correct_inn_vec("ИHH 30000011230 KПП 300001001").unwrap_err();
+    assert!(err.to_string().contains("битые"), "сообщение: {err}");
+}
+
+#[test]
+fn get_correct_inn_vec_errors_when_no_inn() {
+    let err = get_correct_inn_vec("Договор № 42").unwrap_err();
+    assert!(err.to_string().contains("не найден"));
+}
+
+#[test]
+fn get_correct_inn_vec_keeps_valid_drops_invalid() {
+    let text = "ИHH 30000011230 KПП 300001001\nИHH: 3000004184";
+    assert_eq!(
+        get_correct_inn_vec(text).unwrap(),
+        vec!["3000004184".to_string()]
+    );
+}
+
+#[test]
+#[ignore = "требует models/ocr/ и test_data/file-114098.pdf"]
+fn extracts_inn_from_real_pdf1() -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+
+    let inns = get_correct_inn_vec_from_pdf(Path::new("test_data/file-114098.pdf"))?;
+
+
+    let elapsed = started.elapsed();
+
+    println!("Found INNs: {inns:?}");
+    assert!(inns.contains(&"3000004184".to_string()), "ИНН Исполнителя не найден");
+    assert!(
+        !inns.iter().any(|i| i == "30000011230"),
+        "11-значный ИНН не должен проходить"
+    );
+
+    
+    println!("Found INNs: {inns:?}");
+    println!("Время выполнения OCR + парсинг: {:.2?} ({:.1} с)", elapsed, elapsed.as_secs_f64());
+    Ok(())
+}
 }
     
     
