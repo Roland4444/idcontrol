@@ -10,6 +10,17 @@ use std::{path::{Path, PathBuf},  sync::Arc};
 use tokio::sync::mpsc;
 use tracing::{error,info,warn};
 
+
+
+//// Номер документа, дату документа, контрагента инн и название и нашего контрагента ИНН и название.
+/// 
+/// 
+/// 
+/// 
+/// 
+/// 
+/// 
+
 #[derive(Debug,Clone,FromRow,Serialize)]
 pub struct OcrJob {
     pub id:i64,
