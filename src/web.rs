@@ -1,49 +1,127 @@
-use crate::{block1,checklist_result,access,portal,project_sources,project_requirements,semantic,contractor,ui_version,catalog::Catalog,classification,config::Config,engine,models::{Finding,Package},norms,ocr_jobs,repo,reports,scanner};
+use crate::{
+    access, block1,
+    catalog::Catalog,
+    checklist_result, classification,
+    config::Config,
+    contractor, engine,
+    models::{Finding, Package},
+    norms, ocr_jobs, portal, project_requirements, project_sources, repo, reports, scanner,
+    semantic, ui_version,
+};
 use anyhow::Result;
 use axum::{
-    body::{Body,Bytes},
-    extract::{DefaultBodyLimit,Multipart,Path,Query,State},Extension,
-    http::{header,HeaderMap,StatusCode,Request},
+    body::{Body, Bytes},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    http::{header, HeaderMap, Request, StatusCode},
     middleware,
-    response::{Html,IntoResponse,Redirect,Response},
-    routing::{get,post}, Form,Json,Router,
+    response::{Html, IntoResponse, Redirect, Response},
+    routing::{get, post},
+    Extension, Form, Json, Router,
 };
 use serde::Deserialize;
 use sqlx::PgPool;
-use std::{collections::{HashMap,HashSet},io::Write,path::PathBuf,sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Write,
+    path::PathBuf,
+    sync::Arc,
+};
 use subtle::ConstantTimeEq;
 use tracing::error;
 
 pub struct AppState {
-    pub debug_login:bool,
-    pub cfg:Config, pub db:PgPool, pub catalog:Catalog,
-    pub nas:crate::synology::SynologyClient, pub csrf:String,
+    pub debug_login: bool,
+    pub cfg: Config,
+    pub db: PgPool,
+    pub catalog: Catalog,
+    pub nas: crate::synology::SynologyClient,
+    pub csrf: String,
 }
-pub type Shared=Arc<AppState>;
+pub type Shared = Arc<AppState>;
 
-pub struct WebError {status:StatusCode, detail:String}
+pub struct WebError {
+    status: StatusCode,
+    detail: String,
+}
 impl WebError {
-    pub(crate) fn bad(s:impl Into<String>)->Self{Self{status:StatusCode::BAD_REQUEST,detail:s.into()}}
-    pub(crate) fn not_found()->Self{Self{status:StatusCode::NOT_FOUND,detail:"Not found".into()}}
-    pub(crate) fn forbidden()->Self{Self{status:StatusCode::FORBIDDEN,detail:"Недостаточно прав или неверный защитный токен формы".into()}}
+    pub(crate) fn bad(s: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            detail: s.into(),
+        }
+    }
+    pub(crate) fn not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            detail: "Not found".into(),
+        }
+    }
+    pub(crate) fn forbidden() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            detail: "Недостаточно прав или неверный защитный токен формы".into(),
+        }
+    }
 }
 impl From<anyhow::Error> for WebError {
-    fn from(err:anyhow::Error)->Self{error!("Request failed: {err:#}");Self{status:StatusCode::INTERNAL_SERVER_ERROR,detail:"Internal server error (check server logs)".into()}}
+    fn from(err: anyhow::Error) -> Self {
+        error!("Request failed: {err:#}");
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            detail: "Internal server error (check server logs)".into(),
+        }
+    }
 }
-impl From<sqlx::Error> for WebError { fn from(err:sqlx::Error)->Self {Self::from(anyhow::Error::from(err))} }
-impl From<std::io::Error> for WebError { fn from(err:std::io::Error)->Self {Self::from(anyhow::Error::from(err))} }
-impl From<http::Error> for WebError { fn from(err:http::Error)->Self {Self::from(anyhow::Error::from(err))} }
-impl From<serde_json::Error> for WebError { fn from(err:serde_json::Error)->Self {Self::from(anyhow::Error::from(err))} }
-impl From<tokio::task::JoinError> for WebError { fn from(err:tokio::task::JoinError)->Self {Self::from(anyhow::Error::from(err))} }
-impl IntoResponse for WebError {fn into_response(self)->Response{(self.status,self.detail).into_response()}}
-type WebResult<T>=std::result::Result<T,WebError>;
-fn h(s:&str)->String {html_escape::encode_safe(s).to_string()}
-pub(crate) fn hidden(csrf:&str)->String {format!("<input type=\"hidden\" name=\"csrf\" value=\"{}\">",h(csrf))}
-pub(crate) fn verify(csrf:&str,state:&Shared)->WebResult<()> {
-    if bool::from(csrf.as_bytes().ct_eq(state.csrf.as_bytes())) {Ok(())}else{Err(WebError::forbidden())}
+impl From<sqlx::Error> for WebError {
+    fn from(err: sqlx::Error) -> Self {
+        Self::from(anyhow::Error::from(err))
+    }
 }
-pub(crate) fn layout(title:&str,body:String)->Html<String>{
-    Html(format!(r#"<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title} — Контроль ИД</title>
+impl From<std::io::Error> for WebError {
+    fn from(err: std::io::Error) -> Self {
+        Self::from(anyhow::Error::from(err))
+    }
+}
+impl From<http::Error> for WebError {
+    fn from(err: http::Error) -> Self {
+        Self::from(anyhow::Error::from(err))
+    }
+}
+impl From<serde_json::Error> for WebError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::from(anyhow::Error::from(err))
+    }
+}
+impl From<tokio::task::JoinError> for WebError {
+    fn from(err: tokio::task::JoinError) -> Self {
+        Self::from(anyhow::Error::from(err))
+    }
+}
+impl IntoResponse for WebError {
+    fn into_response(self) -> Response {
+        (self.status, self.detail).into_response()
+    }
+}
+type WebResult<T> = std::result::Result<T, WebError>;
+fn h(s: &str) -> String {
+    html_escape::encode_safe(s).to_string()
+}
+pub(crate) fn hidden(csrf: &str) -> String {
+    format!(
+        "<input type=\"hidden\" name=\"csrf\" value=\"{}\">",
+        h(csrf)
+    )
+}
+pub(crate) fn verify(csrf: &str, state: &Shared) -> WebResult<()> {
+    if bool::from(csrf.as_bytes().ct_eq(state.csrf.as_bytes())) {
+        Ok(())
+    } else {
+        Err(WebError::forbidden())
+    }
+}
+pub(crate) fn layout(title: &str, body: String) -> Html<String> {
+    Html(format!(
+        r#"<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title} — Контроль ИД</title>
 {version_meta}<style>body{{background:#f4f7fa;color:#1d334a;font:15px system-ui,Arial;margin:0}}header{{padding:17px 5%;background:#223851;color:white}}header a{{color:white;margin-right:24px;text-decoration:none}}main{{max-width:1550px;margin:28px auto;padding:0 16px}}article{{background:white;border:1px solid #d8e0e8;border-radius:10px;padding:18px;margin:18px 0;overflow-x:auto}}table{{width:100%;border-collapse:collapse}}td,th{{padding:9px;border-bottom:1px solid #dae1e8;text-align:left;vertical-align:top}}th{{background:#eef3f7}}input,select,textarea,button{{padding:8px;border-radius:5px;border:1px solid #bbc7d2;font:inherit;margin:3px}}button{{background:#224a69;color:white;border:0;cursor:pointer}}a{{color:#116caa}}small,.muted{{color:#536778}}.warn{{color:#8b4d17}}.ok{{color:#386e4c}}.row{{display:flex;gap:12px;flex-wrap:wrap;align-items:center}}.chips{{display:flex;gap:8px;flex-wrap:wrap}}.chip{{background:#e8eff5;border-radius:15px;padding:5px 9px}}.status{{font-weight:600}}.job{{padding:12px;margin:10px 0;border:1px solid #dce4ed;border-radius:8px;background:#fafcfe}}.job-running{{border-left:4px solid #2379a1}}.job-failed{{border-left:4px solid #c34d4d}}.job-done{{border-left:4px solid #45936e}}.job-partial{{border-left:4px solid #c99a3a}}progress{{width:220px;max-width:100%;height:14px}}.toolbox{{display:flex;gap:10px;flex-wrap:wrap;align-items:center}}.toolbox form{{display:inline-flex}}.secondary{{background:#e8f0f7;color:#153b56}}.warnbutton{{background:#a0532c}}
 :root{{color-scheme:light}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{line-height:1.45}}main{{max-width:1440px}}article{{scroll-margin-top:76px}}header{{position:sticky;top:0;z-index:10;box-shadow:0 1px 6px #071c2d24}}header a{{display:inline-block;padding:3px 0}}.overview{{background:#fff;border:1px solid #d8e0e8;border-radius:12px;padding:23px;margin:18px 0;scroll-margin-top:74px}}.metrics{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:15px}}.metric{{padding:15px;border:1px solid #dae4ed;border-radius:9px;background:#fbfdff;min-width:0}}.metric strong{{font-size:24px;display:block;color:#123b54}}.jump-links{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px;margin-top:18px}}.jump-links a{{display:block;border:1px solid #d2e0e9;border-radius:9px;padding:13px;text-decoration:none;background:#f8fbfe;font-weight:600}}.jump-links a small{{display:block;font-weight:400;margin-top:4px}}.jump-links a:hover{{background:#eaf4fb}}details.collapsible>summary{{font-size:19px;font-weight:650;cursor:pointer;padding:6px 2px;list-style:revert}}details.collapsible>summary::marker{{color:#28719e}}details.collapsible>div{{padding:12px 0}}details.collapsible:not([open]){{padding-bottom:12px}}.summarybar{{height:10px;background:#e6edf3;border-radius:8px;overflow:hidden;margin-top:12px}}.summarybar span{{background:#28719e;display:block;height:100%}}.notice{{border-left:4px solid #288258;padding:10px 14px;background:#edf8f0;margin:15px 0;border-radius:6px}}.privacy{{border:1px solid #d6ab69;background:#fffbf2;border-radius:8px;padding:14px;margin:12px 0}}.uploadfile{{max-width:100%}}.filefilter{{width:min(480px,100%)}}.filelist td{{max-width:530px;overflow-wrap:anywhere}}.filelist tr:target{{outline:2px solid #2183a5}}.minor{{font-size:13px}}.edit-row{{border:1px solid #e0e7ec;padding:10px;border-radius:6px;margin:8px 0}}.sticky-info{{display:inline-block;font-size:13px;color:#d3e7f4;margin-left:16px}}.resultlink{{text-decoration:none}}.buttonlink{{display:inline-block;background:#e8f0f7;color:#153b56;text-decoration:none;border-radius:6px;padding:9px}}.sr-only{{position:absolute;left:-9999px}}@media(max-width:800px){{.metrics{{grid-template-columns:repeat(2,minmax(0,1fr))}}.jump-links{{grid-template-columns:repeat(2,minmax(0,1fr))}}header a{{margin-right:8px}}article{{padding:12px}}td,th{{padding:6px}}}}@media(max-width:480px){{.jump-links{{grid-template-columns:1fr}}}}.attention-panel{{background:#fff;border:1px solid #d7e2eb;border-radius:12px;padding:22px;margin:18px 0 28px}}.attention-list{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}}.attention-item{{border:1px solid #d9e3eb;border-radius:9px;padding:16px;background:#fafcfe;min-width:0}}.attention-item strong{{display:block;font-size:21px;margin-bottom:6px}}.attention-item a{{display:inline-block;margin-top:8px}}.detail-sections{{border-top:3px solid #d7e2eb;margin-top:38px;padding-top:22px;scroll-margin-top:90px}}.detail-sections>h2{{margin:8px 0}}.detail-group{{margin:27px 0 36px}}.detail-group>h3{{color:#244965;margin:0 0 6px}}.detail-group>p{{margin:0 0 12px;color:#536778}}.detail-group article{{margin:10px 0}}article.highlight-section{{outline:3px solid #2b82a5;outline-offset:3px;box-shadow:0 8px 22px #2b82a51c}}.jump-links a.active{{border-color:#28719e;background:#dceefa}}.backline{{text-align:right;margin:0 0 14px}}.backline a{{font-weight:600}}.detail-intro{{color:#536778}}@media(max-width:850px){{.attention-list{{grid-template-columns:1fr}}}}
 {portal_style}</style></head>
@@ -162,124 +240,264 @@ fetch('/api/me',{{credentials:'same-origin'}}).then(r=>r.ok?r.json():null).then(
   document.querySelectorAll('.ocr-live').forEach(refresh);
 }})();
 </script><script>{package_actions}</script><script>{semantic_progress_js}</script>{version_watch}</body></html>"#,
-        title=h(title),body=body,portal_style=include_str!("../assets/portal.css"),
-        version_meta=ui_version::meta_tags(),version_watch=ui_version::watcher_tag(),
-        package_actions=include_str!("../assets/package-actions.js"),semantic_progress_js=include_str!("../assets/semantic-progress.js")))
+        title = h(title),
+        body = body,
+        portal_style = include_str!("../assets/portal.css"),
+        version_meta = ui_version::meta_tags(),
+        version_watch = ui_version::watcher_tag(),
+        package_actions = include_str!("../assets/package-actions.js"),
+        semantic_progress_js = include_str!("../assets/semantic-progress.js")
+    ))
 }
 
 // Even a cached iframe URL is revalidated. Do not cache dynamically rendered HTML
 // (including the /bitrix bootstrap page), while versioned images remain cacheable.
-async fn ui_no_cache(req:Request<Body>,next:middleware::Next)->Response {
-    let mut response=next.run(req).await;
-    let is_html=response.headers().get(header::CONTENT_TYPE)
-        .and_then(|v|v.to_str().ok()).map(|s|s.starts_with("text/html")).unwrap_or(false);
+async fn ui_no_cache(req: Request<Body>, next: middleware::Next) -> Response {
+    let mut response = next.run(req).await;
+    let is_html = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.starts_with("text/html"))
+        .unwrap_or(false);
     if is_html {
-        response.headers_mut().insert(header::CACHE_CONTROL,
-            header::HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"));
-        response.headers_mut().insert(header::PRAGMA,header::HeaderValue::from_static("no-cache"));
-        response.headers_mut().insert(header::EXPIRES,header::HeaderValue::from_static("0"));
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+        );
+        response
+            .headers_mut()
+            .insert(header::PRAGMA, header::HeaderValue::from_static("no-cache"));
+        response
+            .headers_mut()
+            .insert(header::EXPIRES, header::HeaderValue::from_static("0"));
     }
     response
 }
 
-pub fn router(state:Shared)->Router{
+pub fn router(state: Shared) -> Router {
     Router::new()
-        .route("/",get(portal::projects))
-        .route("/bitrix",get(access::bitrix_bootstrap).post(access::bitrix_bootstrap))
-        .route("/auth/bitrix",post(access::login))
-        .route("/assets/bitrix-client.js",get(access::bitrix_client_js))
-        .route("/assets/ui-version-watch.js",get(ui_version::watcher_js))
-        .route("/api/ui-version",get(ui_version::version))
-        .route("/auth/logout",post(access::logout))
-        .route("/api/me",get(whoami))
-        .route("/assets/projects/{filename}",get(portal::project_image))
-        .route("/projects/{id}",get(portal::project))
-        .route("/projects/{id}/sources/upload",post(project_sources::upload))
-        .route("/projects/{id}/project-requirements/generate",post(project_requirements::generate))
-        .route("/projects/{id}/project-requirements/status",get(project_requirements::status))
-        .route("/projects/{id}/sources/status",get(project_sources::status))
-        .route("/projects/{id}/sources/{source_id}/retry",post(project_sources::retry))
-        .route("/projects/{id}/sources/{source_id}/download",get(project_sources::download))
-        .route("/projects/{id}/works",post(portal::create_work))
-        .route("/projects/{id}/works/all",post(portal::create_all))
-        .route("/projects/{id}/assign",post(portal::assign_work))
-        .route("/contractor/{token}",get(contractor::public_form).post(contractor::public_upload))
-        .route("/contractor/{token}/status",get(contractor::public_status))
-        .route("/administration/storage",get(contractor::storage_view).post(contractor::storage_save))
-        .route("/packages/{id}/contractor-links",post(contractor::create_link))
-        .route("/packages/{id}/contractor-links/{link_id}/revoke",post(contractor::revoke_link))
-        .route("/packages/{id}/submissions/{submission_id}/review",post(contractor::review_submission))
-        .route("/administration",get(portal::administration))
-        .route("/administration/superadmins",post(portal::assign_superadmin))
-        .route("/api/employees/known",get(portal::known_employees))
-        .route("/administration/managers",post(portal::assign_manager))
-        .route("/administration/projects/access",post(portal::assign_project_access))
-        .route("/administration/synology-map",post(portal::save_synology_mapping))
-        .route("/health",get(health))
-        .route("/diagnostics",get(diagnostics))
-        .route("/diagnostics/reprocess-errors",post(diagnostics_reprocess_errors))
-        .route("/api/ocr/jobs",get(ocr_jobs_json))
-        .route("/api/ocr/status",get(ocr_status_json))
-        .route("/ocr/jobs/fragment",get(ocr_jobs_fragment))
-        .route("/ocr/jobs/{id}/cancel",post(cancel_ocr_job))
-        .route("/documents/{id}/reprocess",post(reprocess_document))
-        .route("/packages/{id}/reprocess-errors",post(reprocess_package_errors))
-        .route("/packages/{id}/reprocess-all",post(reprocess_package_all))
-        .route("/catalog/errors",get(errors))
-        .route("/norms",get(norms_view).post(create_norm_rule))
-        .route("/norms/export",get(export_norm_rules))
-        .route("/norms/import",post(import_norm_rules))
-        .route("/norms/{id}/status",post(norm_rule_status))
-        .route("/norms/{id}/delete",post(delete_draft_rule))
-
-        .route("/packages/{id}",get(package_view))
-        .route("/packages/{id}/catalog",post(set_catalog))
-        .route("/packages/{id}/checklist/approve",post(approve_block1))
-        .route("/packages/{id}/project-requirements/{candidate_id}/decision",post(project_requirements::decide))
-        .route("/packages/{id}/project-requirements/approve",post(project_requirements::approve))
-        .route("/packages/{id}/work-register",post(add_work_operation))
-        .route("/packages/{id}/work-register/{work_id}/disable",post(disable_work_operation))
-        .route("/packages/{id}/work-register/{work_id}/evidence",post(add_work_evidence))
-        .route("/packages/{id}/work-register/{work_id}/evidence/{doc_id}/remove",post(remove_work_evidence))
-        .route("/packages/{id}/work-register/approve",post(approve_work_register))
-        .route("/packages/{id}/support",post(add_support_requirement))
-        .route("/packages/{id}/support/from-template",post(add_template_requirement))
-        .route("/packages/{id}/support/{req_id}/disable",post(disable_support_requirement))
-        .route("/packages/{id}/support/{req_id}/evidence",post(add_support_evidence))
-        .route("/packages/{id}/support/{req_id}/evidence/{doc_id}/remove",post(remove_support_evidence))
-        .route("/packages/{id}/support/{req_id}/parent",post(set_support_parent))
-        .route("/packages/{id}/checklist/custom",post(create_custom_checklist))
-        .route("/packages/{id}/checklist/custom/{item_id}",post(edit_custom_checklist))
-        .route("/packages/{id}/check",post(run_package_check))
-        .route("/packages/{id}/semantic/extract",post(semantic::extract))
-        .route("/packages/{id}/semantic/compare",post(semantic::compare))
-        .route("/packages/{id}/semantic/status",get(semantic::status))
-        .route("/packages/{id}/semantic/evidence/{evidence_id}/review",post(semantic::review))
-        .route("/packages/{id}/ai-consent",post(set_ai_consent))
-        .route("/packages/{id}/ai-check",post(queue_ai_check))
-        .route("/ai-suggestions/{id}/review",post(review_ai_suggestion))
-        .route("/packages/{id}/upload",post(upload))
-        .route("/packages/{id}/references/upload",post(upload))
-        .route("/documents/{id}/classify",post(classify))
-        .route("/packages/{id}/classification/provider",post(set_classify_provider))
-        .route("/packages/{id}/classification/all",post(queue_classify_all))
-        .route("/packages/{id}/classification/unclassified",post(queue_classify_unclassified))
-        .route("/packages/{id}/classification/reconcile",post(reconcile_catalog_codes))
-        .route("/packages/{id}/classification/fragment",get(classification_fragment))
-        .route("/documents/{id}/ai-classify",post(queue_classify_one))
-        .route("/documents/{id}/ai-classify/confirm",post(confirm_classification))
-        .route("/documents/{id}/ai-classify/reject",post(reject_classification))
-        .route("/documents/{id}/download",get(download))
-        .route("/findings/{id}/review",post(review))
-        .route("/packages/{id}/report/{fmt}",get(report))
-        .layer(DefaultBodyLimit::max((state.cfg.max_file_mb.saturating_mul(20).saturating_mul(1024*1024).saturating_add(1024*1024)) as usize))
-        .layer(middleware::from_fn_with_state(state.clone(),access::authorize))
+        .route("/", get(portal::projects))
+        .route(
+            "/bitrix",
+            get(access::bitrix_bootstrap).post(access::bitrix_bootstrap),
+        )
+        .route("/auth/bitrix", post(access::login))
+        .route("/assets/bitrix-client.js", get(access::bitrix_client_js))
+        .route("/assets/ui-version-watch.js", get(ui_version::watcher_js))
+        .route("/api/ui-version", get(ui_version::version))
+        .route("/auth/logout", post(access::logout))
+        .route("/api/me", get(whoami))
+        .route("/assets/projects/{filename}", get(portal::project_image))
+        .route("/projects/{id}", get(portal::project))
+        .route(
+            "/projects/{id}/sources/upload",
+            post(project_sources::upload),
+        )
+        .route(
+            "/projects/{id}/project-requirements/generate",
+            post(project_requirements::generate),
+        )
+        .route(
+            "/projects/{id}/project-requirements/status",
+            get(project_requirements::status),
+        )
+        .route(
+            "/projects/{id}/sources/status",
+            get(project_sources::status),
+        )
+        .route(
+            "/projects/{id}/sources/{source_id}/retry",
+            post(project_sources::retry),
+        )
+        .route(
+            "/projects/{id}/sources/{source_id}/download",
+            get(project_sources::download),
+        )
+        .route("/projects/{id}/works", post(portal::create_work))
+        .route("/projects/{id}/works/all", post(portal::create_all))
+        .route("/projects/{id}/assign", post(portal::assign_work))
+        .route(
+            "/contractor/{token}",
+            get(contractor::public_form).post(contractor::public_upload),
+        )
+        .route("/contractor/{token}/status", get(contractor::public_status))
+        .route(
+            "/administration/storage",
+            get(contractor::storage_view).post(contractor::storage_save),
+        )
+        .route(
+            "/packages/{id}/contractor-links",
+            post(contractor::create_link),
+        )
+        .route(
+            "/packages/{id}/contractor-links/{link_id}/revoke",
+            post(contractor::revoke_link),
+        )
+        .route(
+            "/packages/{id}/submissions/{submission_id}/review",
+            post(contractor::review_submission),
+        )
+        .route("/administration", get(portal::administration))
+        .route(
+            "/administration/superadmins",
+            post(portal::assign_superadmin),
+        )
+        .route("/api/employees/known", get(portal::known_employees))
+        .route("/administration/managers", post(portal::assign_manager))
+        .route(
+            "/administration/projects/access",
+            post(portal::assign_project_access),
+        )
+        .route(
+            "/administration/synology-map",
+            post(portal::save_synology_mapping),
+        )
+        .route("/health", get(health))
+        .route("/diagnostics", get(diagnostics))
+        .route(
+            "/diagnostics/reprocess-errors",
+            post(diagnostics_reprocess_errors),
+        )
+        .route("/api/ocr/jobs", get(ocr_jobs_json))
+        .route("/api/ocr/status", get(ocr_status_json))
+        .route("/ocr/jobs/fragment", get(ocr_jobs_fragment))
+        .route("/ocr/jobs/{id}/cancel", post(cancel_ocr_job))
+        .route("/documents/{id}/reprocess", post(reprocess_document))
+        .route(
+            "/packages/{id}/reprocess-errors",
+            post(reprocess_package_errors),
+        )
+        .route("/packages/{id}/reprocess-all", post(reprocess_package_all))
+        .route("/catalog/errors", get(errors))
+        .route("/norms", get(norms_view).post(create_norm_rule))
+        .route("/norms/export", get(export_norm_rules))
+        .route("/norms/import", post(import_norm_rules))
+        .route("/norms/{id}/status", post(norm_rule_status))
+        .route("/norms/{id}/delete", post(delete_draft_rule))
+        .route("/packages/{id}", get(package_view))
+        .route("/packages/{id}/catalog", post(set_catalog))
+        .route("/packages/{id}/checklist/approve", post(approve_block1))
+        .route(
+            "/packages/{id}/project-requirements/{candidate_id}/decision",
+            post(project_requirements::decide),
+        )
+        .route(
+            "/packages/{id}/project-requirements/approve",
+            post(project_requirements::approve),
+        )
+        .route("/packages/{id}/work-register", post(add_work_operation))
+        .route(
+            "/packages/{id}/work-register/{work_id}/disable",
+            post(disable_work_operation),
+        )
+        .route(
+            "/packages/{id}/work-register/{work_id}/evidence",
+            post(add_work_evidence),
+        )
+        .route(
+            "/packages/{id}/work-register/{work_id}/evidence/{doc_id}/remove",
+            post(remove_work_evidence),
+        )
+        .route(
+            "/packages/{id}/work-register/approve",
+            post(approve_work_register),
+        )
+        .route("/packages/{id}/support", post(add_support_requirement))
+        .route(
+            "/packages/{id}/support/from-template",
+            post(add_template_requirement),
+        )
+        .route(
+            "/packages/{id}/support/{req_id}/disable",
+            post(disable_support_requirement),
+        )
+        .route(
+            "/packages/{id}/support/{req_id}/evidence",
+            post(add_support_evidence),
+        )
+        .route(
+            "/packages/{id}/support/{req_id}/evidence/{doc_id}/remove",
+            post(remove_support_evidence),
+        )
+        .route(
+            "/packages/{id}/support/{req_id}/parent",
+            post(set_support_parent),
+        )
+        .route(
+            "/packages/{id}/checklist/custom",
+            post(create_custom_checklist),
+        )
+        .route(
+            "/packages/{id}/checklist/custom/{item_id}",
+            post(edit_custom_checklist),
+        )
+        .route("/packages/{id}/check", post(run_package_check))
+        .route("/packages/{id}/semantic/extract", post(semantic::extract))
+        .route("/packages/{id}/semantic/compare", post(semantic::compare))
+        .route("/packages/{id}/semantic/status", get(semantic::status))
+        .route(
+            "/packages/{id}/semantic/evidence/{evidence_id}/review",
+            post(semantic::review),
+        )
+        .route("/packages/{id}/ai-consent", post(set_ai_consent))
+        .route("/packages/{id}/ai-check", post(queue_ai_check))
+        .route("/ai-suggestions/{id}/review", post(review_ai_suggestion))
+        .route("/packages/{id}/upload", post(upload))
+        .route("/packages/{id}/references/upload", post(upload))
+        .route("/documents/{id}/classify", post(classify))
+        .route(
+            "/packages/{id}/classification/provider",
+            post(set_classify_provider),
+        )
+        .route(
+            "/packages/{id}/classification/all",
+            post(queue_classify_all),
+        )
+        .route(
+            "/packages/{id}/classification/unclassified",
+            post(queue_classify_unclassified),
+        )
+        .route(
+            "/packages/{id}/classification/reconcile",
+            post(reconcile_catalog_codes),
+        )
+        .route(
+            "/packages/{id}/classification/fragment",
+            get(classification_fragment),
+        )
+        .route("/documents/{id}/ai-classify", post(queue_classify_one))
+        .route(
+            "/documents/{id}/ai-classify/confirm",
+            post(confirm_classification),
+        )
+        .route(
+            "/documents/{id}/ai-classify/reject",
+            post(reject_classification),
+        )
+        .route("/documents/{id}/download", get(download))
+        .route("/findings/{id}/review", post(review))
+        .route("/packages/{id}/report/{fmt}", get(report))
+        .layer(DefaultBodyLimit::max(
+            (state
+                .cfg
+                .max_file_mb
+                .saturating_mul(20)
+                .saturating_mul(1024 * 1024)
+                .saturating_add(1024 * 1024)) as usize,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            access::authorize,
+        ))
         .layer(middleware::from_fn(ui_no_cache))
         .with_state(state)
 }
 
-async fn whoami(Extension(actor):Extension<access::Principal>)->Json<serde_json::Value>{
-    Json(serde_json::json!({"name":actor.name,"id":actor.user_id,"superadmin":actor.superuser,"debug":actor.debug}))
+async fn whoami(Extension(actor): Extension<access::Principal>) -> Json<serde_json::Value> {
+    Json(
+        serde_json::json!({"name":actor.name,"id":actor.user_id,"superadmin":actor.superuser,"debug":actor.debug}),
+    )
 }
 
 // Reference materials are evidence supplied by the responsible employee, never
@@ -295,119 +513,265 @@ const REFERENCE_CATEGORIES: &[(&str, &str)] = &[
     ("JOURNALS", "Журналы работ для сверки"),
     ("OTHER", "Прочие документы-основания"),
 ];
-fn reference_category_label(code:&str)->&'static str {
-    REFERENCE_CATEGORIES.iter().find(|(c,_)|*c==code)
-        .map(|(_,label)|*label).unwrap_or("Ранее загруженный справочный документ")
+fn reference_category_label(code: &str) -> &'static str {
+    REFERENCE_CATEGORIES
+        .iter()
+        .find(|(c, _)| *c == code)
+        .map(|(_, label)| *label)
+        .unwrap_or("Ранее загруженный справочный документ")
 }
 
 #[derive(sqlx::FromRow)]
-struct CustomChecklist {id:i64,code:String,title:String,required:bool,note:String}
-#[derive(Deserialize,Default)]struct RunQuery{run_id:Option<i64>,notice:Option<String>,doc:Option<i64>}
-async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,Query(params):Query<RunQuery>)->WebResult<Html<String>>{
-    let pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    let projects=sqlx::query_as::<_,crate::models::Project>("SELECT id,name FROM projects WHERE id=$1")
-        .bind(pkg.project_id).fetch_one(&st.db).await?;
-    let docs=repo::documents(&st.db,id).await?;
-    let all_latest=block1::latest(&docs);
-    let runs=repo::runs(&st.db,id).await?;
-    let selected=match params.run_id {Some(run_id)=>runs.iter().find(|r|r.id==run_id).ok_or_else(WebError::not_found).map(Some)?,None=>runs.first()};
-    let findings=if let Some(run)=selected{repo::findings(&st.db,run.id).await?}else{vec![]};
-    let norm_checks=if let Some(run)=selected{norms::checks_for_run(&st.db,run.id).await?}else{vec![]};
-    let previous_metric:Option<(i32,i32,Option<i32>,bool)>=if let Some(run)=selected{
+struct CustomChecklist {
+    id: i64,
+    code: String,
+    title: String,
+    required: bool,
+    note: String,
+}
+#[derive(Deserialize, Default)]
+struct RunQuery {
+    run_id: Option<i64>,
+    notice: Option<String>,
+    doc: Option<i64>,
+}
+async fn package_view(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path(id): Path<i64>,
+    Query(params): Query<RunQuery>,
+) -> WebResult<Html<String>> {
+    let pkg = repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let projects =
+        sqlx::query_as::<_, crate::models::Project>("SELECT id,name FROM projects WHERE id=$1")
+            .bind(pkg.project_id)
+            .fetch_one(&st.db)
+            .await?;
+    let docs = repo::documents(&st.db, id).await?;
+    let all_latest = block1::latest(&docs);
+    let runs = repo::runs(&st.db, id).await?;
+    let selected = match params.run_id {
+        Some(run_id) => runs
+            .iter()
+            .find(|r| r.id == run_id)
+            .ok_or_else(WebError::not_found)
+            .map(Some)?,
+        None => runs.first(),
+    };
+    let findings = if let Some(run) = selected {
+        repo::findings(&st.db, run.id).await?
+    } else {
+        vec![]
+    };
+    let norm_checks = if let Some(run) = selected {
+        norms::checks_for_run(&st.db, run.id).await?
+    } else {
+        vec![]
+    };
+    let previous_metric: Option<(i32, i32, Option<i32>, bool)> = if let Some(run) = selected {
         sqlx::query_as("SELECT required_total,confirmed_total,coverage_pct,ready_for_engineer_review FROM check_run_block1_metrics WHERE run_id=$1")
             .bind(run.id).fetch_optional(&st.db).await?
-    }else{None};
-    let selected_codes:HashSet<String>=serde_json::from_str::<Vec<String>>(&pkg.required_codes_json).unwrap_or_default().into_iter().collect();
+    } else {
+        None
+    };
+    let selected_codes: HashSet<String> =
+        serde_json::from_str::<Vec<String>>(&pkg.required_codes_json)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
     let custom_items:Vec<CustomChecklist>=sqlx::query_as("SELECT id,code,title,required,note FROM package_custom_checklist WHERE package_id=$1 AND active=true ORDER BY id")
         .bind(id).fetch_all(&st.db).await?;
     // Historical runs keep their own delivery. Current view always uses the last
     // successfully published submission, never documents from previous revisions.
-    let selected_delivery=if let Some(run_id)=params.run_id {
-        block1::delivery_for_run(&st.db,run_id).await?
-    }else{block1::current_delivery(&st.db,id).await?};
-    let history_exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM contractor_submissions WHERE package_id=$1)")
-        .bind(id).fetch_one(&st.db).await?;
-    let mut latest:Vec<_>=all_latest.into_iter().filter(|d|d.source_kind=="REFERENCE" ||
-        (!history_exists || selected_delivery.is_some()) && block1::is_delivery_id(d,selected_delivery.as_ref())).collect();
-    latest.sort_by(|a,b|a.relative_path.cmp(&b.relative_path));
-    let id_files:Vec<_>=latest.iter().filter(|d|d.source_kind=="ID").copied().collect();
-    let id_docs=id_files.len();
-    let ref_docs=latest.iter().filter(|d|d.source_kind=="REFERENCE").count();
-    let required_codes:HashSet<String>=selected_codes.iter().cloned().chain(custom_items.iter().filter(|i|i.required).map(|i|i.code.clone())).collect();
-    let operations=block1::work_operations(&st.db,id).await?;
-    let min_counts=block1::effective_minimums(&block1::minimums(&st.db,id).await?,&operations);
-    let code_counts=block1::counted_unique_codes(id_files.iter().copied());
-    let work_links=block1::work_evidence(&st.db,id).await?;
-    let support=block1::support_requirements(&st.db,id).await?;
-    let support_links=block1::linked_evidence(&st.db,id).await?;
-    let project_state=project_requirements::checklist(&st.db,id).await?;
-    let mut with_project=required_codes.clone();
-    let mut project_minimums=min_counts.clone();
+    let selected_delivery = if let Some(run_id) = params.run_id {
+        block1::delivery_for_run(&st.db, run_id).await?
+    } else {
+        block1::current_delivery(&st.db, id).await?
+    };
+    let history_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM contractor_submissions WHERE package_id=$1)",
+    )
+    .bind(id)
+    .fetch_one(&st.db)
+    .await?;
+    let mut latest: Vec<_> = all_latest
+        .into_iter()
+        .filter(|d| {
+            d.source_kind == "REFERENCE"
+                || (!history_exists || selected_delivery.is_some())
+                    && block1::is_delivery_id(d, selected_delivery.as_ref())
+        })
+        .collect();
+    latest.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    let id_files: Vec<_> = latest
+        .iter()
+        .filter(|d| d.source_kind == "ID")
+        .copied()
+        .collect();
+    let id_docs = id_files.len();
+    let ref_docs = latest
+        .iter()
+        .filter(|d| d.source_kind == "REFERENCE")
+        .count();
+    let required_codes: HashSet<String> = selected_codes
+        .iter()
+        .cloned()
+        .chain(
+            custom_items
+                .iter()
+                .filter(|i| i.required)
+                .map(|i| i.code.clone()),
+        )
+        .collect();
+    let operations = block1::work_operations(&st.db, id).await?;
+    let min_counts = block1::effective_minimums(&block1::minimums(&st.db, id).await?, &operations);
+    let code_counts = block1::counted_unique_codes(id_files.iter().copied());
+    let work_links = block1::work_evidence(&st.db, id).await?;
+    let support = block1::support_requirements(&st.db, id).await?;
+    let support_links = block1::linked_evidence(&st.db, id).await?;
+    let project_state = project_requirements::checklist(&st.db, id).await?;
+    let mut with_project = required_codes.clone();
+    let mut project_minimums = min_counts.clone();
     if project_state.signed {
         for item in &project_state.approved {
             with_project.insert(item.code.clone());
-            let count=project_minimums.entry(item.code.clone()).or_insert(1);
-            *count=(*count).max(item.count);
+            let count = project_minimums.entry(item.code.clone()).or_insert(1);
+            *count = (*count).max(item.count);
         }
     }
-    let completed_catalog=with_project.iter().filter(|code|code_counts.get(*code).copied().unwrap_or(0)>=project_minimums.get(*code).copied().unwrap_or(1).max(1) as usize).count();
-    let completed_support=support.iter().filter(|r|block1::requirement_parent_valid(r,&id_files) &&
-        block1::evidence_count(r.id,&support_links,&id_files)>=r.min_count as usize).count();
-    let completed_work=operations.iter().filter(|op|block1::work_evidence_count(op,&work_links,&id_files)>=op.required_count as usize).count();
-    let completed=completed_catalog+completed_support+completed_work;
-    let checklist_total=with_project.len()+support.len()+operations.len();
-    let approval:Option<String>=sqlx::query_scalar("SELECT block1_approved_by FROM packages WHERE id=$1")
-        .bind(id).fetch_one(&st.db).await?;
-    let work_approved:Option<String>=sqlx::query_scalar("SELECT block1_scope_approved_by FROM packages WHERE id=$1")
-        .bind(id).fetch_one(&st.db).await?;
-    let unresolved=findings.iter().filter(|f|f.review_status=="pending" || f.review_status=="confirmed").count();
-    let nonclassified=id_files.iter().filter(|d|d.catalog_code.is_none()).count();
+    let completed_catalog = with_project
+        .iter()
+        .filter(|code| {
+            code_counts.get(*code).copied().unwrap_or(0)
+                >= project_minimums.get(*code).copied().unwrap_or(1).max(1) as usize
+        })
+        .count();
+    let completed_support = support
+        .iter()
+        .filter(|r| {
+            block1::requirement_parent_valid(r, &id_files)
+                && block1::evidence_count(r.id, &support_links, &id_files) >= r.min_count as usize
+        })
+        .count();
+    let completed_work = operations
+        .iter()
+        .filter(|op| {
+            block1::work_evidence_count(op, &work_links, &id_files) >= op.required_count as usize
+        })
+        .count();
+    let completed = completed_catalog + completed_support + completed_work;
+    let checklist_total = with_project.len() + support.len() + operations.len();
+    let approval: Option<String> =
+        sqlx::query_scalar("SELECT block1_approved_by FROM packages WHERE id=$1")
+            .bind(id)
+            .fetch_one(&st.db)
+            .await?;
+    let work_approved: Option<String> =
+        sqlx::query_scalar("SELECT block1_scope_approved_by FROM packages WHERE id=$1")
+            .bind(id)
+            .fetch_one(&st.db)
+            .await?;
+    let unresolved = findings
+        .iter()
+        .filter(|f| f.review_status == "pending" || f.review_status == "confirmed")
+        .count();
+    let nonclassified = id_files.iter().filter(|d| d.catalog_code.is_none()).count();
     // The checklist is mutable, while findings in a historical run are immutable.
     // Never display today's checklist coverage as if it were the old run's result.
-    let manifest_ok=selected_delivery.as_ref().map(|scope|block1::manifest_problems(scope,&id_files).is_empty()).unwrap_or(false);
-    let no_revisions=selected_delivery.is_none();
-    let metadata_ok=block1::complete_metadata(&id_files);
+    let manifest_ok = selected_delivery
+        .as_ref()
+        .map(|scope| block1::manifest_problems(scope, &id_files).is_empty())
+        .unwrap_or(false);
+    let no_revisions = selected_delivery.is_none();
+    let metadata_ok = block1::complete_metadata(&id_files);
     // This is strictly a *quantitative* progress indication, never an approval.
     // An unapproved checklist, pending project sources or some unclassified files
     // must not hide the count of already linked documents from the engineer.
-    let pct=if params.run_id.is_some() || checklist_total==0 || no_revisions || !manifest_ok
-        {None}else{Some((completed*100/checklist_total).min(100))};
-    let actor_role=access::package_role(&st,&actor,id).await.unwrap_or_else(||"viewer".into());
-    let mut sidebar=String::new();
+    let pct = if params.run_id.is_some() || checklist_total == 0 || no_revisions || !manifest_ok {
+        None
+    } else {
+        Some((completed * 100 / checklist_total).min(100))
+    };
+    let actor_role = access::package_role(&st, &actor, id)
+        .await
+        .unwrap_or_else(|| "viewer".into());
+    let mut sidebar = String::new();
     let sibling_packages:Vec<Package>=sqlx::query_as("SELECT id,project_id,name,catalog_name,required_codes_json FROM packages WHERE project_id=$1 ORDER BY name")
         .bind(pkg.project_id).fetch_all(&st.db).await?;
     for p in &sibling_packages {
-        if access::package_role(&st,&actor,p.id).await.is_none(){continue;}
-        sidebar.push_str(&format!("<a class='sidebar-work {}' href='/packages/{}'>▧ {}</a>",if p.id==id{"active"}else{""},p.id,h(&p.name)));
+        if access::package_role(&st, &actor, p.id).await.is_none() {
+            continue;
+        }
+        sidebar.push_str(&format!(
+            "<a class='sidebar-work {}' href='/packages/{}'>▧ {}</a>",
+            if p.id == id { "active" } else { "" },
+            p.id,
+            h(&p.name)
+        ));
     }
-    let (address,slug)=portal::project_info(&projects.name).unwrap_or(("Адрес не указан","tetris"));
-    let mut body=format!(r##"<div class="crumb"><a href="/">Выбор объектов</a> › <a href="/projects/{}">{}</a> › {}</div>
+    let (address, slug) =
+        portal::project_info(&projects.name).unwrap_or(("Адрес не указан", "tetris"));
+    let mut body = format!(
+        r##"<div class="crumb"><a href="/">Выбор объектов</a> › <a href="/projects/{}">{}</a> › {}</div>
       <section class="package-hero" style="--hero-image:url('/assets/projects/{}.webp?v={}')"><div><h1>{}</h1><p>⌖ {} · {} · Комплект исполнительной документации</p></div></section>
       <div class="package-shell"><aside class="package-sidebar"><div class="sidebar-project"><img src="/assets/projects/{}.webp?v={}" alt="Объект"><div><strong>{}</strong><small>{}</small></div></div><h3>Комплекты исполнительной документации</h3>{}</aside><div class="package-content role-{}">
       <nav class="package-tabs" aria-label="Разделы проверки"><a href="#upload">Сдача ИД</a><a href="#references">Материалы для проверки</a><a href="#documents">Список документов</a><a href="#project-requirements">Требования из проекта</a><a href="#semantic-block1">Семантический анализ</a><a href="#work-register">Реестр работ</a><a href="#block1-evidence">Приложения и испытания</a><a href="#completion">Комплектность по чек-листу</a><a href="#checks">Отчёты</a><a href="#remarks">Замечания</a><a href="#history">История проверок</a></nav>"##,
-      pkg.project_id,h(&projects.name),h(&pkg.name),slug,ui_version::images_id(),h(&pkg.name),h(address),h(&projects.name),slug,ui_version::images_id(),h(&projects.name),h(address),sidebar,h(&actor_role));
-    if let Some(notice)=params.notice.as_deref() {
+        pkg.project_id,
+        h(&projects.name),
+        h(&pkg.name),
+        slug,
+        ui_version::images_id(),
+        h(&pkg.name),
+        h(address),
+        h(&projects.name),
+        slug,
+        ui_version::images_id(),
+        h(&projects.name),
+        h(address),
+        sidebar,
+        h(&actor_role)
+    );
+    if let Some(notice) = params.notice.as_deref() {
         let msg=match notice {"classified"=>"Тип документа сохранён, комплект перепроверен.","uploaded"=>"Материалы проверки загружены; официальная версия ИД подрядчика не изменилась. Для сверки запустите новую проверку.","checklist"=>"Изменения чек-листа сохранены, комплект перепроверен.","checked"=>"Проверка завершена. Результат сохранён в истории.","reconciled"=>"Выполнено сопоставление по сохранённому OCR. Количества пересчитаны, неопределённые документы оставлены на проверку инженеру.",_=>""};
-        if !msg.is_empty(){body.push_str(&format!("<p class=notice role=status>{msg} {}</p>",params.doc.map(|d|format!("Документ #{d}")).unwrap_or_default()));}
+        if !msg.is_empty() {
+            body.push_str(&format!(
+                "<p class=notice role=status>{msg} {}</p>",
+                params
+                    .doc
+                    .map(|d| format!("Документ #{d}"))
+                    .unwrap_or_default()
+            ));
+        }
     }
     // A visible start button and explicit result location; engine::analyze
     // creates a persisted check_runs row and a findings snapshot (not OCR).
     let approved_rules:i64=sqlx::query_scalar("SELECT count(*) FROM normative_rules WHERE approval_status='approved' AND (work_type='' OR work_type=$1)")
         .bind(pkg.catalog_name.as_deref().unwrap_or("")).fetch_one(&st.db).await?;
-    let last_check=selected.map(|run|format!("Проверка #{} от {}",run.id,run.started_at.format("%d.%m.%Y %H:%M")))
-        .unwrap_or_else(||"Проверок пока не было".into());
-    let checker=matches!(actor_role.as_str(),"manager"|"engineer");
+    let last_check = selected
+        .map(|run| {
+            format!(
+                "Проверка #{} от {}",
+                run.id,
+                run.started_at.format("%d.%m.%Y %H:%M")
+            )
+        })
+        .unwrap_or_else(|| "Проверок пока не было".into());
+    let checker = matches!(actor_role.as_str(), "manager" | "engineer");
     body.push_str(&format!(r#"<section class="check-control" aria-label="Запуск проверки документации">
       <div><h2>Проверка комплекта «{}»</h2><p>Загружено файлов ИД: <b>{id_docs}</b> · Применимых утверждённых нормативных правил: <b>{approved_rules}</b></p>
       <p class="check-meta">{}</p><p class="check-meta">Результаты сохраняются в истории этого вида работ, внутри ЖК «{}».</p></div>"#,
       h(&pkg.name),h(&last_check),h(&projects.name)));
     if checker {
         body.push_str(&format!(r##"<div class="section-entry-actions"><form method="post" action="/packages/{id}/check">{}<button class="primary">▶ Запустить проверку комплекта</button></form><a href="#checks">Результаты ↓</a><a href="#history">История ↓</a></div>"##,hidden(&st.csrf)));
-    }else {body.push_str("<p class=muted>Запуск проверки доступен инженеру ПТО и администратору проекта. Вы можете просмотреть результаты.</p>");}
-    if let Some((total,done,percentage,ready))=previous_metric {
+    } else {
+        body.push_str("<p class=muted>Запуск проверки доступен инженеру ПТО и администратору проекта. Вы можете просмотреть результаты.</p>");
+    }
+    if let Some((total, done, percentage, ready)) = previous_metric {
         body.push_str(&format!("<p class=check-meta><b>Блок 1 по выбранному запуску:</b> {done} из {total} требований; покрытие: {}. {}</p>",percentage.map(|p|format!("{p}%")).unwrap_or_else(||"не подтверждено (нужна классификация/опись/утверждение)".into()),if ready{"Все количественные условия выполнены. Требуется итоговое решение инженера."}else{"Есть недостачи или не завершены обязательные проверки."}));
     }
-    if approved_rules==0 {
+    if approved_rules == 0 {
         body.push_str("<p class=muted><strong>Внимание:</strong> нет утверждённых правил НТД. Проверка сможет выявить только ошибки комплектности и встроенные формальные несоответствия; нормативное соответствие не подтверждается.</p>");
     }
     body.push_str("</section><nav class='package-steps' aria-label='Последовательность проверки'><a href='#upload'>1. Сдача ИД подрядчиком</a><a href='#references'>2. Материалы для проверки</a><a href='#checklist'>3. Настроить перечень</a><a href='#completion'>4. Комплектность</a><a href='#remarks'>5. Замечания</a><a href='#history'>6. История</a></nav>");
@@ -417,53 +781,71 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     let scope_label=selected_delivery.as_ref()
         .map(|d|format!("Проверяемая поставка: ревизия {} / запись #{}. Только документы этой поставки учитываются в показателях.",d.revision,d.id))
         .unwrap_or_else(||"Поставок подрядчика с опубликованными файлами пока нет. Учитываются зарегистрированные ИД без привязки к поставке.".to_string());
-    body.push_str(&format!("<p class=notice role=status>{}</p>",h(&scope_label)));
-    let coverage=match pct {
-        Some(n)=>format!("{n}% сопоставлено (предварительно; не оценка правильности документов)"),
-        None if params.run_id.is_some()=>"Историческая проверка: см. сохранённые замечания".to_string(),
-        None if no_revisions=>"Нет опубликованной поставки подрядчика".to_string(),
-        None if !manifest_ok=>"Опись поставки требует проверки".to_string(),
-        None=>"Чек-лист ещё не настроен".to_string(),
+    body.push_str(&format!(
+        "<p class=notice role=status>{}</p>",
+        h(&scope_label)
+    ));
+    let coverage = match pct {
+        Some(n) => format!("{n}% сопоставлено (предварительно; не оценка правильности документов)"),
+        None if params.run_id.is_some() => {
+            "Историческая проверка: см. сохранённые замечания".to_string()
+        }
+        None if no_revisions => "Нет опубликованной поставки подрядчика".to_string(),
+        None if !manifest_ok => "Опись поставки требует проверки".to_string(),
+        None => "Чек-лист ещё не настроен".to_string(),
     };
     body.push_str(&format!("<section class=overview id=summary><h2>Результат проверки комплекта</h2><p class=muted>Прогресс показывает покрытие обязательных позиций файлами, <b>не</b> соответствие ГОСТ/СП. Рассматривается только выбранный комплект.</p><div class=metrics><div class=metric>Файлы ИД<strong>{id_docs}</strong><small>Материалы проверки: {ref_docs}</small></div><div class=metric>Чек-лист<strong>{completed}/{}</strong><small>Обязательных позиций и приложений</small></div><div class=metric>Замечания<strong>{unresolved}</strong><small>Требуют рассмотрения</small></div><div class=metric>Не привязаны<strong>{nonclassified}</strong><small>Файлов ИД</small></div></div>",checklist_total));
-    body.push_str(&format!("<p><b>Комплектность: <span data-completion-label>{coverage}</span></b></p>"));
-    if !metadata_ok && id_docs>0 && params.run_id.is_none() {
+    body.push_str(&format!(
+        "<p><b>Комплектность: <span data-completion-label>{coverage}</span></b></p>"
+    ));
+    if !metadata_ok && id_docs > 0 && params.run_id.is_none() {
         body.push_str("<p class='muted'>Есть файлы с незавершённым OCR или без подтверждённого типа. Количественный прогресс предварительный; эти файлы не считаются доказательством отсутствия документов.</p>");
     }
-    if let Some(n)=pct {body.push_str(&format!("<div class=summarybar role=progressbar aria-valuemin=0 aria-valuemax=100 aria-valuenow={n} aria-label='Покрытие чек-листа'><span style='width:{n}%'></span></div>"));}
+    if let Some(n) = pct {
+        body.push_str(&format!("<div class=summarybar role=progressbar aria-valuemin=0 aria-valuemax=100 aria-valuenow={n} aria-label='Покрытие чек-листа'><span style='width:{n}%'></span></div>"));
+    }
     body.push_str("<nav class=jump-links aria-label='Разделы комплекта'><a href=#completion>Комплектность<small>По каждому пункту чек-листа: да / нет / почему</small></a><a href=#remarks>Замечания<small>Решения инженера и технические вопросы отдельно</small></a><a href=#documents>Документы<small>Файлы, типы и вложения</small></a><a href=#checklist>Чек-лист<small>Изменение обязательных позиций</small></a><a href=#project-requirements>Требования из проекта<small>КР, ПЗУ, ПОС и ППР с источниками</small></a><a href=#work-register>Реестр работ<small>Фактические объёмы, зоны и акты</small></a><a href=#block1-evidence>Приложения и испытания<small>Сертификаты, протоколы, приложения</small></a><a href=#upload>Сдача ИД<small>Одноразовая ссылка и версии подрядчика</small></a><a href=#references>Материалы для проверки<small>ПД, РД, НТД, приказы, СРО и документы-основания</small></a><a href=#classification>ИИ-классификация<small>Предложения модели и подтверждение</small></a><a href=#ocr>Обработка и прогресс<small>Фоновые задания OCR</small></a><a href=#norms-check>Нормативные правила<small>Подробные результаты</small></a></nav></section>");
     // Main user-facing result: catalogue checklist and quantitative evidence.
     // Keep semantic analysis and technical OCR/classification findings separate.
-    let checklist_custom:Vec<checklist_result::CustomEntry>=custom_items.iter().map(|c|checklist_result::CustomEntry{
-        code:c.code.clone(),title:c.title.clone(),required:c.required
-    }).collect();
-    let checklist_html=checklist_result::render(&checklist_result::View{
-        catalog:&st.catalog,
-        work_type:pkg.catalog_name.as_deref().unwrap_or(""),
-        required:&with_project,
-        minima:&project_minimums,
-        files:&id_files,
-        custom:&checklist_custom,
-        operations:&operations,
-        work_links:&work_links,
-        support:&support,
-        support_links:&support_links,
-        project_approved:&project_state.approved,
-        has_delivery:selected_delivery.is_some(),
+    let checklist_custom: Vec<checklist_result::CustomEntry> = custom_items
+        .iter()
+        .map(|c| checklist_result::CustomEntry {
+            code: c.code.clone(),
+            title: c.title.clone(),
+            required: c.required,
+        })
+        .collect();
+    let checklist_html = checklist_result::render(&checklist_result::View {
+        catalog: &st.catalog,
+        work_type: pkg.catalog_name.as_deref().unwrap_or(""),
+        required: &with_project,
+        minima: &project_minimums,
+        files: &id_files,
+        custom: &checklist_custom,
+        operations: &operations,
+        work_links: &work_links,
+        support: &support,
+        support_links: &support_links,
+        project_approved: &project_state.approved,
+        has_delivery: selected_delivery.is_some(),
         manifest_ok,
-        checklist_approved:approval.is_some(),
-        scope_approved:work_approved.is_some(),
-        project_approval_needed:project_state.candidates>0 && !project_state.signed,
-        historical:params.run_id.is_some(),
+        checklist_approved: approval.is_some(),
+        scope_approved: work_approved.is_some(),
+        project_approval_needed: project_state.candidates > 0 && !project_state.signed,
+        historical: params.run_id.is_some(),
     });
     body.push_str(&checklist_html);
-    if !id_files.is_empty() && params.run_id.is_none() &&
-        matches!(actor_role.as_str(),"manager"|"engineer") &&
-        id_files.iter().any(|d|d.catalog_code.is_none() && !d.recognized_text.trim().is_empty()) {
+    if !id_files.is_empty()
+        && params.run_id.is_none()
+        && matches!(actor_role.as_str(), "manager" | "engineer")
+        && id_files
+            .iter()
+            .any(|d| d.catalog_code.is_none() && !d.recognized_text.trim().is_empty())
+    {
         body.push_str(&format!("<section class='completion-reconcile'><h3>Найти документы, которые не попали в чек-лист</h3><p>Повторно сравнить заголовки и сохранённый OCR-текст файлов с пунктами чек-листа. <b>Без ИИ, без платных запросов и без повторного OCR.</b> Однозначные соответствия будут привязаны; остальные файлы останутся без типа для ручной проверки. Оригиналы и версии не изменяются.</p><form method='post' action='/packages/{id}/classification/reconcile'>{}<button>Сопоставить документы по OCR</button></form></section>",hidden(&st.csrf)));
     }
     // A compact action-oriented summary stays above ALL detailed menus.
-    let missing=checklist_total.saturating_sub(completed);
+    let missing = checklist_total.saturating_sub(completed);
     body.push_str("<section class=attention-panel aria-labelledby=attention-title><h2 id=attention-title>Что требует внимания</h2><p class=muted>Ниже перечислены только сводные результаты. Подробные таблицы находятся внизу страницы: нажмите на ссылку, чтобы открыть нужный раздел.</p><div class=attention-list>");
     if required_codes.is_empty() {
         body.push_str("<div class=attention-item><strong>Чек-лист не настроен</strong><span>Выберите обязательные позиции, чтобы оценить комплектность.</span><br><a href=#checklist>Настроить чек-лист ↓</a></div>");
@@ -473,42 +855,73 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
     body.push_str(&format!("<div class=attention-item><strong>{unresolved} замечаний</strong><span>Ожидают решения или подтверждены инженером</span><br><a href=#remarks>Открыть замечания ↓</a></div>"));
     body.push_str(&format!("<div class=attention-item><strong>{nonclassified} не привязаны</strong><span>Файлы ИД без позиции чек-листа</span><br><a href=#documents>Перейти к документам ↓</a></div>"));
     body.push_str("</div></section>");
-    if actor_role=="manager" || actor_role=="engineer" {
+    if actor_role == "manager" || actor_role == "engineer" {
         body.push_str(&format!("<section class=attention-panel aria-label='Действия OCR'><h3>Повторное распознавание</h3><div class=toolbox><form method=post action='/packages/{id}/reprocess-errors'>{}<button class=primary>Распознать документы с ошибками</button></form><a class=buttonlink href='#ocr'>Подробнее: очередь и журнал OCR ↓</a></div></section>",hidden(&st.csrf)));
     }
     // Build detail panels separately; they are emitted only at the BOTTOM of the page.
-    let mut panels:HashMap<&'static str,String>=HashMap::new();
-    let mut panel_html=String::new();
+    let mut panels: HashMap<&'static str, String> = HashMap::new();
+    let mut panel_html = String::new();
     // Start primary sections. Detailed tables are intentionally folded away.
     panel_html.push_str("<article id='upload'><details class=collapsible><summary>Официальная сдача ИД подрядчиком</summary><div><p><b>Официальные версии ИД принимаются только через одноразовую ссылку подрядчика.</b> Архив ZIP, контрольная сумма, номер поставки и исходные файлы сохраняются отдельно. Загрузка сотрудников в этот поток отключена.</p><p><a class=buttonlink href='#contractor'>Выдать ссылку подрядчику / история поставок →</a></p><p class=muted>Если нужны ПД/РД, нормативные документы или приказы для сверки, откройте соседний раздел «Материалы для проверки».</p></div></details></article>");
-    panels.insert("upload",std::mem::take(&mut panel_html));
+    panels.insert("upload", std::mem::take(&mut panel_html));
     panel_html.push_str(&format!("<article id='references'><details class=collapsible open><summary>Материалы для проверки (не ИД подрядчика)</summary><div><p><b>Общие проектные источники</b> КР, ПЗУ, ПОС и ППР загружаются <a href='/projects/{}#project-sources'>в библиотеку ЖК</a> один раз и автоматически становятся доступными в каждом виде работ. Здесь добавляются только дополнительные контрольные файлы <b>этого конкретного комплекта</b>.</p><p><b>Нормативные PDF</b> служат источниками. Для автоматической нормативной проверки правило отдельно утверждается в <a href='/norms'>каталоге правил НТД</a>.</p>",pkg.project_id));
-    if matches!(actor_role.as_str(),"manager"|"engineer") {
+    if matches!(actor_role.as_str(), "manager" | "engineer") {
         panel_html.push_str(&format!("<form data-package-upload action='/packages/{id}/references/upload' method='post' enctype='multipart/form-data'>{}<input type=hidden name=kind value=REFERENCE><label>Категория документа <select name=reference_type required>",hidden(&st.csrf)));
-        for (code,title) in REFERENCE_CATEGORIES {
-            panel_html.push_str(&format!("<option value='{}'>{}</option>",h(code),h(title)));
+        for (code, title) in REFERENCE_CATEGORIES {
+            panel_html.push_str(&format!(
+                "<option value='{}'>{}</option>",
+                h(code),
+                h(title)
+            ));
         }
         panel_html.push_str("</select></label><label>Примечание / назначение документа <input name=reference_note maxlength=500 placeholder='Например: редакция проекта или дата приказа' style='width:min(580px,100%)'></label><div class=drop-zone id=upload-drop><strong class=upload-mark>⇧</strong><h3>Выберите контрольные файлы</h3><p class=muted>PDF, DOC, DOCX, XLS, XLSX и изображения; до 20 файлов за раз. Никакой подмены поставки подрядчика.</p><input class=uploadfile type=file name=file multiple required accept='.pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.tif,.tiff,.bmp,.gif,.webp'><small id=upload-count>Файлы не выбраны</small></div><button type=submit class=primary data-upload-button>Добавить материалы для проверки</button><div class=operation-feedback data-upload-feedback role=status aria-live=polite></div><progress data-upload-progress max=100 value=0 hidden></progress></form>");
     } else {
         panel_html.push_str("<p class=muted>Добавление исходных документов доступно только инженеру или администратору проекта. Доступ на просмотр не позволяет изменять их.</p>");
     }
     panel_html.push_str("<p>Все уже загруженные контрольные файлы отображаются ниже в <a href='#documents'>списке документов</a> с категорией, версией и оригиналом.</p></div></details></article>");
-    panels.insert("references",std::mem::take(&mut panel_html));
+    panels.insert("references", std::mem::take(&mut panel_html));
     panel_html.push_str(&format!("<article id=checklist><details class=collapsible><summary>Чек-лист и вид работ</summary><div><form method=post action=\"/packages/{id}/catalog\">{}<select name=work_type>",hidden(&st.csrf)));
-    for wt in &st.catalog.work_types{let sel=if pkg.catalog_name.as_deref()==Some(wt.name.as_str()){ "selected" }else{""};panel_html.push_str(&format!("<option {sel} value=\"{}\">{}</option>",h(&wt.name),h(&wt.name)));}
+    for wt in &st.catalog.work_types {
+        let sel = if pkg.catalog_name.as_deref() == Some(wt.name.as_str()) {
+            "selected"
+        } else {
+            ""
+        };
+        panel_html.push_str(&format!(
+            "<option {sel} value=\"{}\">{}</option>",
+            h(&wt.name),
+            h(&wt.name)
+        ));
+    }
     panel_html.push_str("</select><p class=muted>Выберите применимые документы и необходимое количество отдельных экземпляров каждого типа. Сохранение настроек НЕ означает утверждение инженером.</p>");
 
-    if let Some(wt)=pkg.catalog_name.as_deref().and_then(|n|st.catalog.work_type(n)){
-        for item in &wt.items{
-            let checked=if selected_codes.contains(&item.code){"checked"}else{""};
-            let minimum=min_counts.get(&item.code).copied().unwrap_or(1);
-            let found=code_counts.get(&item.code).copied().unwrap_or(0);
+    if let Some(wt) = pkg
+        .catalog_name
+        .as_deref()
+        .and_then(|n| st.catalog.work_type(n))
+    {
+        for item in &wt.items {
+            let checked = if selected_codes.contains(&item.code) {
+                "checked"
+            } else {
+                ""
+            };
+            let minimum = min_counts.get(&item.code).copied().unwrap_or(1);
+            let found = code_counts.get(&item.code).copied().unwrap_or(0);
             panel_html.push_str(&format!("<p><label><input type=checkbox name=required_codes value=\"{}\" {checked}> <b>{}</b> {} <small>({})</small></label> <label style='display:inline-block'>Требуется <input type=number name='minimum_{}' min=1 max=999 value='{}' style='width:75px'></label> <small>Найдено в поставке: {found}</small></p>",h(&item.code),h(&item.code),h(&item.title),h(&item.norm_reference),h(&item.code),minimum));
         }
     }
     panel_html.push_str("<button>Сохранить состав и количество</button></form>");
-    panel_html.push_str(&format!("<p><b>Утверждение инженером:</b> {}</p>",approval.as_deref().map(|v|format!("Утверждено: {}",h(v))).unwrap_or_else(||"Не утверждено. Итоговый процент комплектности не выводится.".into())));
-    if matches!(actor_role.as_str(),"manager"|"engineer") {
+    panel_html.push_str(&format!(
+        "<p><b>Утверждение инженером:</b> {}</p>",
+        approval
+            .as_deref()
+            .map(|v| format!("Утверждено: {}", h(v)))
+            .unwrap_or_else(
+                || "Не утверждено. Итоговый процент комплектности не выводится.".into()
+            )
+    ));
+    if matches!(actor_role.as_str(), "manager" | "engineer") {
         panel_html.push_str(&format!("<form method=post action='/packages/{id}/checklist/approve'>{}<button class=primary>Утвердить перечень первого блока</button><small>После изменения обязательных позиций или требований утверждение потребуется повторить.</small></form>",hidden(&st.csrf)));
     }
     panel_html.push_str("<h3>Дополнительные позиции этого комплекта</h3>");
@@ -516,28 +929,41 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
         panel_html.push_str(&format!("<form class=edit-row method=post action='/packages/{id}/checklist/custom/{}'>{}<label>Название <input name=title required maxlength=300 size=47 value=\"{}\"></label><label>Примечание <input name=note maxlength=500 size=28 value=\"{}\"></label><label><input type=checkbox name=required value=yes {}> Обязательный</label><button>Сохранить</button><button class=warnbutton name=remove value=yes onclick=\"return confirm('Убрать позицию из чек-листа? Приложенные документы останутся в архиве.')\">Убрать</button></form>",item.id,hidden(&st.csrf),h(&item.title),h(&item.note),if item.required {"checked"}else{""}));
     }
     panel_html.push_str(&format!("<form method=post action='/packages/{id}/checklist/custom'>{}<label>Добавить позицию <input name=title required minlength=2 maxlength=300 placeholder='Например: Протокол испытания сваи' size=48></label><label>Примечание <input name=note maxlength=500 placeholder='Необязательно'></label><label><input type=checkbox name=required value=yes checked> Обязательная</label><button>Добавить</button></form></div></details></article>",hidden(&st.csrf)));
-    panels.insert("checklist",std::mem::take(&mut panel_html));
-    let project_requirement_panel=project_requirements::panel(&st,id,&actor_role).await?;
-    panels.insert("project-requirements",project_requirement_panel);
-    panels.insert("semantic-block1",semantic::panel(&st,id,&actor_role).await?);
+    panels.insert("checklist", std::mem::take(&mut panel_html));
+    let project_requirement_panel = project_requirements::panel(&st, id, &actor_role).await?;
+    panels.insert("project-requirements", project_requirement_panel);
+    panels.insert(
+        "semantic-block1",
+        semantic::panel(&st, id, &actor_role).await?,
+    );
     panel_html.push_str("<article id=work-register><details class=collapsible open><summary>Блок 1 — реестр фактически выполненных работ и необходимого количества ИД</summary><div><p>Фиксируйте каждую зону, этап СМР и количество актов по ПД/РД. Без подтверждённого реестра система не выводит итоговый процент. Количество одинаковых документов суммируется по зонам; прошлые ревизии не засчитываются.</p>");
-    panel_html.push_str(&format!("<p><b>Реестр работ:</b> {}</p>",work_approved.as_ref().map(|v|format!("Подтверждён: {}",h(v))).unwrap_or_else(||"Не подтверждён".into())));
+    panel_html.push_str(&format!(
+        "<p><b>Реестр работ:</b> {}</p>",
+        work_approved
+            .as_ref()
+            .map(|v| format!("Подтверждён: {}", h(v)))
+            .unwrap_or_else(|| "Не подтверждён".into())
+    ));
     if !operations.is_empty() {
         panel_html.push_str("<table><thead><tr><th>Работа / зона</th><th>Документ / кол-во</th><th>Основание</th><th>Доказательства</th></tr></thead><tbody>");
         for op in &operations {
-            let linked=block1::work_evidence_count(op,&work_links,&id_files);
+            let linked = block1::work_evidence_count(op, &work_links, &id_files);
             panel_html.push_str(&format!("<tr><td>{}<br><small>{}</small></td><td>{}: {} шт. <small>Привязано {}</small></td><td>{}</td><td>",h(&op.description),h(&op.location),h(&op.catalog_code),op.required_count,linked,h(&op.basis)));
-            if matches!(actor_role.as_str(),"manager"|"engineer") {
+            if matches!(actor_role.as_str(), "manager" | "engineer") {
                 panel_html.push_str(&format!("<form method=post action='/packages/{id}/work-register/{}/evidence'>{}<label>Акт этой зоны <select name=document_id required><option value=''>Выберите документ</option>",op.id,hidden(&st.csrf)));
                 for doc in &id_files {
-                    if doc.catalog_code.as_deref()==Some(op.catalog_code.as_str()) {
-                        panel_html.push_str(&format!("<option value='{}'>{}</option>",doc.id,h(&doc.relative_path)));
+                    if doc.catalog_code.as_deref() == Some(op.catalog_code.as_str()) {
+                        panel_html.push_str(&format!(
+                            "<option value='{}'>{}</option>",
+                            doc.id,
+                            h(&doc.relative_path)
+                        ));
                     }
                 }
                 panel_html.push_str("</select></label><button>Привязать</button></form>");
-                if let Some(linked_ids)=work_links.get(&op.id) {
+                if let Some(linked_ids) = work_links.get(&op.id) {
                     for doc in &id_files {
-                        if linked_ids.contains(&doc.id){
+                        if linked_ids.contains(&doc.id) {
                             panel_html.push_str(&format!("<form method=post action='/packages/{id}/work-register/{}/evidence/{}/remove'>{}<small>{}</small><button class=secondary>Открепить акт</button></form>",op.id,doc.id,hidden(&st.csrf),h(&doc.relative_path)));
                         }
                     }
@@ -548,40 +974,81 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
         }
         panel_html.push_str("</tbody></table>");
     }
-    if matches!(actor_role.as_str(),"manager"|"engineer") {
+    if matches!(actor_role.as_str(), "manager" | "engineer") {
         panel_html.push_str(&format!("<form method=post action='/packages/{id}/work-register'>{}<label>Работа/этап <input name=description required maxlength=400 placeholder='Например: обратная засыпка траншеи №2'></label><label>Зона/оси <input name=location maxlength=250 placeholder='Секции, этаж, оси'></label><label>Вид документа <select name=catalog_code required>",hidden(&st.csrf)));
-        if let Some(wt)=pkg.catalog_name.as_deref().and_then(|n|st.catalog.work_type(n)) {
-            for item in &wt.items { panel_html.push_str(&format!("<option value='{}'>{} — {}</option>",h(&item.code),h(&item.code),h(&item.title))); }
+        if let Some(wt) = pkg
+            .catalog_name
+            .as_deref()
+            .and_then(|n| st.catalog.work_type(n))
+        {
+            for item in &wt.items {
+                panel_html.push_str(&format!(
+                    "<option value='{}'>{} — {}</option>",
+                    h(&item.code),
+                    h(&item.code),
+                    h(&item.title)
+                ));
+            }
         }
         panel_html.push_str("</select></label><label>Количество <input type=number name=required_count min=1 max=999 value=1 required></label><label>Основание (лист ПД/РД, журнал работ, ведомость объёмов) <input name=basis required maxlength=500 placeholder='Например: РД-АР лист 12, журнал №3'></label><button class=primary>Добавить выполненную работу</button></form>");
         panel_html.push_str(&format!("<form method=post action='/packages/{id}/work-register/approve'>{}<button>Подтвердить реестр выполненных работ</button></form>",hidden(&st.csrf)));
     }
     panel_html.push_str("</div></details></article>");
-    panels.insert("work-register",std::mem::take(&mut panel_html));
+    panels.insert("work-register", std::mem::take(&mut panel_html));
     panel_html.push_str("<article id=block1-evidence><details class=collapsible open><summary>Блок 1 — сертификаты, лабораторные испытания и приложения</summary><div><p class=muted>ТЗ предусматривает 19 категорий документов качества поставщиков и 12 групп испытаний. Добавляйте только применимые к фактическим работам и материалам требования. Позиции не создаются автоматически и должны подтверждаться документами текущей поставки.</p>");
-    if support.is_empty(){panel_html.push_str("<p>Дополнительные требования пока не заданы.</p>");}
-    else {panel_html.push_str("<table><thead><tr><th>Вид / основание</th><th>Необходимо</th><th>Приложено</th><th>Подтверждение</th></tr></thead><tbody>");}
+    if support.is_empty() {
+        panel_html.push_str("<p>Дополнительные требования пока не заданы.</p>");
+    } else {
+        panel_html.push_str("<table><thead><tr><th>Вид / основание</th><th>Необходимо</th><th>Приложено</th><th>Подтверждение</th></tr></thead><tbody>");
+    }
     for req in &support {
-        let done=if block1::requirement_parent_valid(req,&id_files) {
-            block1::evidence_count(req.id,&support_links,&id_files)
-        }else{0};
-        let title_kind=match req.kind.as_str(){"supplier"=>"Документы качества материалов","laboratory"=>"Лабораторные испытания",_=>"Приложения к актам"};
-        let parent_name=req.parent_document_id.and_then(|pid|id_files.iter().find(|d|d.id==pid).map(|d|d.relative_path.as_str())).unwrap_or("не выбран / нет в текущей поставке");
+        let done = if block1::requirement_parent_valid(req, &id_files) {
+            block1::evidence_count(req.id, &support_links, &id_files)
+        } else {
+            0
+        };
+        let title_kind = match req.kind.as_str() {
+            "supplier" => "Документы качества материалов",
+            "laboratory" => "Лабораторные испытания",
+            _ => "Приложения к актам",
+        };
+        let parent_name = req
+            .parent_document_id
+            .and_then(|pid| {
+                id_files
+                    .iter()
+                    .find(|d| d.id == pid)
+                    .map(|d| d.relative_path.as_str())
+            })
+            .unwrap_or("не выбран / нет в текущей поставке");
         panel_html.push_str(&format!("<tr><td><b>{}</b><p>{}</p><small>Применимость: {}. Основание: {}. Приложение к акту: {}</small></td><td>{}</td><td>{}</td><td>",h(title_kind),h(&req.title),h(&req.applies_when),h(&req.basis),h(parent_name),req.min_count,done));
-        if matches!(actor_role.as_str(),"manager"|"engineer") {
+        if matches!(actor_role.as_str(), "manager" | "engineer") {
             panel_html.push_str(&format!("<form method=post action='/packages/{id}/support/{}/parent'>{}<label>Акт, к которому относится приложение <select name=parent_id required><option value=''>Выбрать акт из поставки</option>",req.id,hidden(&st.csrf)));
             for doc in &id_files {
-                panel_html.push_str(&format!("<option value='{}' {}>{}</option>",doc.id,if req.parent_document_id==Some(doc.id){"selected"}else{""},h(&doc.relative_path)));
+                panel_html.push_str(&format!(
+                    "<option value='{}' {}>{}</option>",
+                    doc.id,
+                    if req.parent_document_id == Some(doc.id) {
+                        "selected"
+                    } else {
+                        ""
+                    },
+                    h(&doc.relative_path)
+                ));
             }
             panel_html.push_str("</select></label><button>Привязать к акту</button></form>");
             panel_html.push_str(&format!("<form method=post action='/packages/{id}/support/{}/evidence'>{}<select name=document_id required><option value=''>Выберите файл ИД</option>",req.id,hidden(&st.csrf)));
             for doc in &id_files {
-                panel_html.push_str(&format!("<option value='{}'>{}</option>",doc.id,h(&doc.relative_path)));
+                panel_html.push_str(&format!(
+                    "<option value='{}'>{}</option>",
+                    doc.id,
+                    h(&doc.relative_path)
+                ));
             }
             panel_html.push_str("</select><button>Привязать доказательство</button></form>");
-            if let Some(linked_ids)=support_links.get(&req.id){
+            if let Some(linked_ids) = support_links.get(&req.id) {
                 for doc in &id_files {
-                    if linked_ids.contains(&doc.id){
+                    if linked_ids.contains(&doc.id) {
                         panel_html.push_str(&format!("<form method=post action='/packages/{id}/support/{}/evidence/{}/remove'>{}<small>{}</small><button class=secondary>Открепить</button></form>",req.id,doc.id,hidden(&st.csrf),h(&doc.relative_path)));
                     }
                 }
@@ -590,22 +1057,31 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
         }
         panel_html.push_str("</td></tr>");
     }
-    if !support.is_empty(){panel_html.push_str("</tbody></table>");}
-    if matches!(actor_role.as_str(),"manager"|"engineer") {
+    if !support.is_empty() {
+        panel_html.push_str("</tbody></table>");
+    }
+    if matches!(actor_role.as_str(), "manager" | "engineer") {
         panel_html.push_str(&format!("<h3>Добавить применимое требование</h3><form method=post action='/packages/{id}/support'>{}<label>Группа <select name=kind><option value=supplier>Сертификат / паспорт / документ качества</option><option value=laboratory>Лабораторное испытание / протокол</option><option value=attachment>Приложение к акту</option></select></label><label>Какой документ необходим? <input name=title required maxlength=300 size=55 placeholder='Например: протокол уплотнения грунта'></label><label>Когда требование применимо? <input name=applies_when maxlength=500 size=55 placeholder='Например: при обратной засыпке траншей'></label><label>Нормативное основание <input name=basis maxlength=500 size=55 placeholder='Пункт СП / ТЗ / проектной документации'></label><label>Сколько отдельных файлов требуется? <input name=min_count type=number min=1 max=999 value=1></label><button class=primary>Добавить требование</button></form>",hidden(&st.csrf)));
     }
-    if matches!(actor_role.as_str(),"manager"|"engineer") {
+    if matches!(actor_role.as_str(), "manager" | "engineer") {
         panel_html.push_str(&format!("<h3>Добавить типовое требование из ТЗ</h3><p class=muted>Ни одна из 31 позиции не становится обязательной автоматически. Перед добавлением специалист проверяет применимость к проекту.</p><form method=post action='/packages/{id}/support/from-template'>{}<label>Позиция ТЗ <select name=template required><option value=''>Выбрать…</option>",hidden(&st.csrf)));
         for template in block1::SUPPORT_TEMPLATES {
-            panel_html.push_str(&format!("<option value='{}'>{} — {}</option>",template.code,template.code,h(template.title)));
+            panel_html.push_str(&format!(
+                "<option value='{}'>{} — {}</option>",
+                template.code,
+                template.code,
+                h(template.title)
+            ));
         }
         panel_html.push_str("</select></label><label>Необходимое число отдельных файлов <input type=number name=min_count value=1 min=1 max=999 required></label><button>Добавить применимую позицию</button></form>");
     }
     panel_html.push_str("</div></details></article>");
-    panels.insert("block1-evidence",std::mem::take(&mut panel_html));
+    panels.insert("block1-evidence", std::mem::take(&mut panel_html));
     // AI review is explicitly opted in per package; never triggered by Synology polling.
-    let ai_consent:(bool,)=sqlx::query_as("SELECT ai_consent FROM packages WHERE id=$1")
-        .bind(id).fetch_one(&st.db).await?;
+    let ai_consent: (bool,) = sqlx::query_as("SELECT ai_consent FROM packages WHERE id=$1")
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
     panel_html.push_str("<article id=ai-check><details class=collapsible><summary>Внешняя ИИ-проверка (ограничена)</summary><div><p class=privacy><b>Не передавайте ПД/РД внешним ИИ!</b> На сервере передача проектной/рабочей документации в VibeCode, GigaCowork и другие внешние сервисы запрещена. ИИ-классификация доступна только для файлов ИД.</p>");
     panel_html.push_str(&format!("<p>Режим ИИ: <b>{}</b>. Передавать можно только разрешённые выдержки ИД; ПД/РД обрабатываются исключительно локально.</p>",h(&st.cfg.ai_mode)));
     panel_html.push_str(&format!("<form method=post action=\"/packages/{id}/ai-consent\">{}<label><input type=checkbox name=consent value=yes {}> Разрешаю передавать выдержки из исполнительной документации для ИИ-классификации. ПД/РД никогда не передавать</label><button>Сохранить разрешение</button></form>",hidden(&st.csrf),if ai_consent.0 {"checked"} else {""}));
@@ -616,8 +1092,14 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
        .bind(id).fetch_all(&st.db).await?;
     if !jobs.is_empty() {
         panel_html.push_str("<p><b>Задания ИИ:</b> ");
-        for (job_id,provider,status,count) in jobs {
-            panel_html.push_str(&format!(" #{} [{}: {}, {} предложений] ",job_id,h(&provider),h(&status),count));
+        for (job_id, provider, status, count) in jobs {
+            panel_html.push_str(&format!(
+                " #{} [{}: {}, {} предложений] ",
+                job_id,
+                h(&provider),
+                h(&status),
+                count
+            ));
         }
         panel_html.push_str("</p>");
     }
@@ -628,8 +1110,16 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
         panel_html.push_str("<table><tr><th>Документы/цитаты</th><th>Предложение ИИ</th><th>Решение инженера</th></tr>");
         for s in suggestions {
             panel_html.push_str(&format!("<tr><td>ИД #{} / РД #{}<p>{}</p><p>{}</p></td><td>{}<p><small>{}</small></p></td><td><form method=post action=\"/ai-suggestions/{}/review\">{}<select name=status>",s.document_id,s.reference_document_id.unwrap_or(0),h(&s.source_quote),h(&s.reference_quote),h(&s.description),h(&s.proposed_action),s.id,hidden(&st.csrf)));
-            for (value,label) in [("pending","На рассмотрении"),("confirmed","Подтверждено"),("rejected","Отклонено")] {
-                let sel=if s.review_status==value {"selected"}else{""};
+            for (value, label) in [
+                ("pending", "На рассмотрении"),
+                ("confirmed", "Подтверждено"),
+                ("rejected", "Отклонено"),
+            ] {
+                let sel = if s.review_status == value {
+                    "selected"
+                } else {
+                    ""
+                };
                 panel_html.push_str(&format!("<option value={value} {sel}>{label}</option>"));
             }
             panel_html.push_str(&format!("</select><input name=comment maxlength=2000 placeholder=Комментарий value=\"{}\"><button>Сохранить</button></form></td></tr>",h(&s.comment)));
@@ -637,88 +1127,179 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
         panel_html.push_str("</table>");
     }
     panel_html.push_str("</div></details></article>");
-    panels.insert("ai-check",std::mem::take(&mut panel_html));
+    panels.insert("ai-check", std::mem::take(&mut panel_html));
     // Classification provider is selected PER PACKAGE, independent of the OCR provider.
-    let provider_options:Option<(String,bool)>=sqlx::query_as("SELECT provider,auto_queue FROM classification_settings WHERE package_id=$1")
-        .bind(id).fetch_optional(&st.db).await?;
-    let (provider,auto_queue)=provider_options.unwrap_or_else(||("vibecode".into(),false));
+    let provider_options: Option<(String, bool)> = sqlx::query_as(
+        "SELECT provider,auto_queue FROM classification_settings WHERE package_id=$1",
+    )
+    .bind(id)
+    .fetch_optional(&st.db)
+    .await?;
+    let (provider, auto_queue) = provider_options.unwrap_or_else(|| ("vibecode".into(), false));
     panel_html.push_str("<article id=classification><details class=collapsible><summary>ИИ-классификация документов</summary><div><p class=muted>После OCR анализируется распознанный текст. Это не нормативная проверка. ИИ предлагает тип документа; инженер подтверждает или отклоняет предложение. Оригиналы не изменяются.</p>");
     panel_html.push_str(&format!("<form method=post action='/packages/{id}/classification/provider'>{}<label>Языковая модель <select name=provider>",hidden(&st.csrf)));
-    for (v,label) in [("vibecode","Bitrix VibeCode"),("gigacowork","GigaCowork (через корпоративный адаптер)")] {
-        panel_html.push_str(&format!("<option value='{v}' {}>{label}</option>",if provider==v {"selected"}else{""}));
+    for (v, label) in [
+        ("vibecode", "Bitrix VibeCode"),
+        ("gigacowork", "GigaCowork (через корпоративный адаптер)"),
+    ] {
+        panel_html.push_str(&format!(
+            "<option value='{v}' {}>{label}</option>",
+            if provider == v { "selected" } else { "" }
+        ));
     }
     panel_html.push_str(&format!("</select></label><label><input type=checkbox name=auto_queue value=yes {}> Автоматически ставить в очередь новые распознанные документы (только при наличии согласия)</label><button>Сохранить настройки</button></form>", if auto_queue {"checked"} else {""}));
-    panel_html.push_str(&format!("<p>VibeCode: {}. GigaCowork: {}. <b>Выбран:</b> {}.</p>",
-       if classification::configured(&st.cfg,"vibecode") {"ключ настроен"} else {"нет VIBE_OCR_KEY"},
-       if classification::configured(&st.cfg,"gigacowork") {"адаптер настроен"} else {"нет CLASSIFY_COWORK_URL"},
-       h(&provider)));
+    panel_html.push_str(&format!(
+        "<p>VibeCode: {}. GigaCowork: {}. <b>Выбран:</b> {}.</p>",
+        if classification::configured(&st.cfg, "vibecode") {
+            "ключ настроен"
+        } else {
+            "нет VIBE_OCR_KEY"
+        },
+        if classification::configured(&st.cfg, "gigacowork") {
+            "адаптер настроен"
+        } else {
+            "нет CLASSIFY_COWORK_URL"
+        },
+        h(&provider)
+    ));
     if !ai_consent.0 {
         panel_html.push_str("<p class=warn>Перед внешней ИИ-классификацией включи согласие на передачу текстовых фрагментов в блоке выше.</p>");
     }
-    if !classification::configured(&st.cfg,&provider) {
-        panel_html.push_str("<p class=warn>Выбранный провайдер пока не настроен: запросы не отправляются.</p>");
+    if !classification::configured(&st.cfg, &provider) {
+        panel_html.push_str(
+            "<p class=warn>Выбранный провайдер пока не настроен: запросы не отправляются.</p>",
+        );
     }
-    let disabled=if ai_consent.0 && classification::configured(&st.cfg,&provider) {""} else {"disabled"};
+    let disabled = if ai_consent.0 && classification::configured(&st.cfg, &provider) {
+        ""
+    } else {
+        "disabled"
+    };
     panel_html.push_str(&format!("<div class=toolbox><form method=post action='/packages/{id}/classification/unclassified'>{}<button {disabled}>Классифицировать неопределённые</button></form><form method=post action='/packages/{id}/classification/all'>{}<button class=secondary {disabled}>Переклассифицировать все</button></form></div>",hidden(&st.csrf),hidden(&st.csrf)));
     panel_html.push_str(&format!("<div class='classification-live' data-url='/packages/{id}/classification/fragment'>Загрузка журнала классификации...</div>"));
     panel_html.push_str("<p class=muted>В GigaCowork нет подтверждённого публичного REST API: нужен собственный адаптер по контракту docs/GIGACOWORK_CLASSIFIER_ADAPTER_RU.md. Ключи только в .env; никакого автоматического переключения или отправки документов без согласия.</p></div></details></article>");
-    panels.insert("classification",std::mem::take(&mut panel_html));
+    panels.insert("classification", std::mem::take(&mut panel_html));
     let classification_rows:Vec<(i64,String,String,f64,String,String,serde_json::Value)>=sqlx::query_as(
         "SELECT document_id,provider,predicted_type,confidence,explanation,review_status,evidence_json FROM classification_results WHERE document_id IN (SELECT id FROM documents WHERE package_id=$1)")
         .bind(id).fetch_all(&st.db).await?;
-    let classification_by_document:HashMap<i64,(String,String,f64,String,String,serde_json::Value)>=classification_rows
-        .into_iter().map(|(did,p,t,c,e,r,q)|(did,(p,t,c,e,r,q))).collect();
+    let classification_by_document: HashMap<
+        i64,
+        (String, String, f64, String, String, serde_json::Value),
+    > = classification_rows
+        .into_iter()
+        .map(|(did, p, t, c, e, r, q)| (did, (p, t, c, e, r, q)))
+        .collect();
     panel_html.push_str(&format!("<article id=ocr><details class=collapsible><summary>Повторное распознавание и задания</summary><div><p class=muted>Работает фоновая очередь. Статусы обновляются каждые 4 секунды без перезагрузки страницы. Оригиналы и версии файлов не изменяются.</p><div class=toolbox><form method=post action='/packages/{id}/reprocess-errors'>{}<button>Распознать все с ошибками</button></form><form method=post action='/packages/{id}/reprocess-all'>{}<button class=secondary onclick=\"return confirm('Повторно обработать ВСЕ документы комплекта? При OCR_MODE=vibecode возможны платные запросы VibeCode.')\">Перераспознать весь комплект</button></form><a href='/diagnostics'>Журнал и диагностика</a> <small id=ocr-poll-state></small></div><div class='ocr-live' data-url='/ocr/jobs/fragment?package_id={id}'>Загрузка очереди...</div></div></details></article>",hidden(&st.csrf),hidden(&st.csrf)));
-    panels.insert("ocr",std::mem::take(&mut panel_html));
+    panels.insert("ocr", std::mem::take(&mut panel_html));
     panel_html.push_str("<article id=documents><details class=collapsible><summary>Документы и вложения</summary><div><p>Документы, назначенные одной позиции чек-листа, считаются подтверждающими её вложениями. Можно прикреплять любое количество файлов.</p><label>Поиск по файлам и типам <input type=search class=filefilter data-table-search=doc-table placeholder='Название, тип, статус'></label><table class=filelist id=doc-table><thead><tr><th>Файл</th><th>Тип и распознавание</th><th>Версия</th><th>Действия</th></tr></thead><tbody>");
     let reference_meta:HashMap<i64,(String,String)>=sqlx::query_as::<_,(i64,String,String)>(
         "SELECT document_id,category,note FROM reference_materials WHERE document_id IN (SELECT id FROM documents WHERE package_id=$1)")
         .bind(id).fetch_all(&st.db).await?.into_iter()
         .map(|(doc,category,note)|(doc,(category,note))).collect();
-    let mut shown=latest.clone();
-    shown.sort_by(|a,b| a.source_kind.cmp(&b.source_kind)
-        .then(a.catalog_code.cmp(&b.catalog_code)).then(a.relative_path.cmp(&b.relative_path)));
-    let mut last_group=String::new();
-    for doc in shown{
-        let group=if doc.source_kind=="REFERENCE" {"Материалы для проверки (не поставка подрядчика)".to_string()}
-        else if let Some(code)=&doc.catalog_code {
-            let title=pkg.catalog_name.as_deref().and_then(|n|st.catalog.work_type(n))
-                .and_then(|wt|wt.items.iter().find(|i|i.code==*code)).map(|i|i.title.as_str())
-                .or_else(||custom_items.iter().find(|i|i.code==*code).map(|i|i.title.as_str()));
-            format!("{} — {}",code,title.unwrap_or("Позиция чек-листа"))
-        }else{"Без привязки к чек-листу".to_string()};
-        if group!=last_group {
-            panel_html.push_str(&format!("<tr class=group-row><th colspan=4>{}</th></tr>",h(&group)));
-            last_group=group;
+    let mut shown = latest.clone();
+    shown.sort_by(|a, b| {
+        a.source_kind
+            .cmp(&b.source_kind)
+            .then(a.catalog_code.cmp(&b.catalog_code))
+            .then(a.relative_path.cmp(&b.relative_path))
+    });
+    let mut last_group = String::new();
+    for doc in shown {
+        let group = if doc.source_kind == "REFERENCE" {
+            "Материалы для проверки (не поставка подрядчика)".to_string()
+        } else if let Some(code) = &doc.catalog_code {
+            let title = pkg
+                .catalog_name
+                .as_deref()
+                .and_then(|n| st.catalog.work_type(n))
+                .and_then(|wt| wt.items.iter().find(|i| i.code == *code))
+                .map(|i| i.title.as_str())
+                .or_else(|| {
+                    custom_items
+                        .iter()
+                        .find(|i| i.code == *code)
+                        .map(|i| i.title.as_str())
+                });
+            format!("{} — {}", code, title.unwrap_or("Позиция чек-листа"))
+        } else {
+            "Без привязки к чек-листу".to_string()
+        };
+        if group != last_group {
+            panel_html.push_str(&format!(
+                "<tr class=group-row><th colspan=4>{}</th></tr>",
+                h(&group)
+            ));
+            last_group = group;
         }
-        let delete_msg=if !doc.is_present{" <span class=warn>(отсутствует на NAS)</span>"}else{""};
+        let delete_msg = if !doc.is_present {
+            " <span class=warn>(отсутствует на NAS)</span>"
+        } else {
+            ""
+        };
         panel_html.push_str(&format!("<tr id=doc-{}><td>{}{}<br><small>{}</small></td><td>{}<br><small>{}</small></td><td>v{}</td><td><a href=\"/documents/{}/download\">Оригинал</a>",doc.id,h(&doc.relative_path),delete_msg,h(&doc.sha256[..12]),h(reference_meta.get(&doc.id).map(|(cat,_)|reference_category_label(cat)).unwrap_or_else(||doc.document_type.as_deref().unwrap_or("не классифицирован"))),h(&doc.recognition_status),doc.version,doc.id));
-        if let Some((_,note))=reference_meta.get(&doc.id) {
-            if !note.is_empty() {panel_html.push_str(&format!("<div><small>Назначение: {}</small></div>",h(note)));}
+        if let Some((_, note)) = reference_meta.get(&doc.id) {
+            if !note.is_empty() {
+                panel_html.push_str(&format!(
+                    "<div><small>Назначение: {}</small></div>",
+                    h(note)
+                ));
+            }
         }
-        panel_html.push_str(&format!(" <span class='ocr-inline' data-doc='{}'></span>",doc.id));
-        if let Some((ai_provider,ai_label,score,explanation,review_status,evidence))=classification_by_document.get(&doc.id) {
+        panel_html.push_str(&format!(
+            " <span class='ocr-inline' data-doc='{}'></span>",
+            doc.id
+        ));
+        if let Some((ai_provider, ai_label, score, explanation, review_status, evidence)) =
+            classification_by_document.get(&doc.id)
+        {
             panel_html.push_str(&format!("<div class=job><small>ИИ ({}) — <b>{}</b> · уверенность {:.0}% · {}</small><div><small>{}</small></div>",
                 h(ai_provider),h(ai_label),(*score)*100.0,h(review_status),h(explanation)));
-            if let Some(items)=evidence.as_array() {
-                for quote in items.iter().filter_map(|v|v.as_str()).take(3){panel_html.push_str(&format!("<div><small>Цитата: {}</small></div>",h(quote)));}
+            if let Some(items) = evidence.as_array() {
+                for quote in items.iter().filter_map(|v| v.as_str()).take(3) {
+                    panel_html.push_str(&format!("<div><small>Цитата: {}</small></div>", h(quote)));
+                }
             }
-            if review_status=="suggested" {
+            if review_status == "suggested" {
                 panel_html.push_str(&format!("<form method=post action='/documents/{}/ai-classify/confirm'>{}<button>Подтвердить тип ИИ</button></form><form method=post action='/documents/{}/ai-classify/reject'>{}<button class=secondary>Отклонить</button></form>",doc.id,hidden(&st.csrf),doc.id,hidden(&st.csrf)));
             }
             panel_html.push_str("</div>");
         }
-        if doc.source_kind=="ID" {
+        if doc.source_kind == "ID" {
             panel_html.push_str(&format!("<form method=post action='/documents/{}/ai-classify'>{}<button class=secondary>ИИ: повторить классификацию</button></form>",doc.id,hidden(&st.csrf)));
         }
-        if doc.source_kind=="ID"{
+        if doc.source_kind == "ID" {
             panel_html.push_str(&format!("<form method=post action=\"/documents/{}/classify\">{}<select name=catalog_code><option value=\"\">Не определён</option>",doc.id,hidden(&st.csrf)));
-            if let Some(wt)=pkg.catalog_name.as_deref().and_then(|n|st.catalog.work_type(n)){
-                for item in &wt.items{let sel=if doc.catalog_code.as_deref()==Some(item.code.as_str()){"selected"}else{""};panel_html.push_str(&format!("<option {sel} value=\"{}\">{} — {}</option>",h(&item.code),h(&item.code),h(&item.title)));}
+            if let Some(wt) = pkg
+                .catalog_name
+                .as_deref()
+                .and_then(|n| st.catalog.work_type(n))
+            {
+                for item in &wt.items {
+                    let sel = if doc.catalog_code.as_deref() == Some(item.code.as_str()) {
+                        "selected"
+                    } else {
+                        ""
+                    };
+                    panel_html.push_str(&format!(
+                        "<option {sel} value=\"{}\">{} — {}</option>",
+                        h(&item.code),
+                        h(&item.code),
+                        h(&item.title)
+                    ));
+                }
             }
             for item in &custom_items {
-                let sel=if doc.catalog_code.as_deref()==Some(item.code.as_str()){"selected"}else{""};
-                panel_html.push_str(&format!("<option {sel} value=\"{}\">{} — {}</option>",h(&item.code),h(&item.code),h(&item.title)));
+                let sel = if doc.catalog_code.as_deref() == Some(item.code.as_str()) {
+                    "selected"
+                } else {
+                    ""
+                };
+                panel_html.push_str(&format!(
+                    "<option {sel} value=\"{}\">{} — {}</option>",
+                    h(&item.code),
+                    h(&item.code),
+                    h(&item.title)
+                ));
             }
             panel_html.push_str("</select><button>Сохранить тип</button></form>");
         }
@@ -726,65 +1307,104 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
         panel_html.push_str("</td></tr>");
     }
     panel_html.push_str("</tbody></table></div></details></article>");
-    panels.insert("documents",std::mem::take(&mut panel_html));
+    panels.insert("documents", std::mem::take(&mut panel_html));
     panel_html.push_str("<article id=checks><details class=collapsible><summary>Результаты проверки комплекта</summary><div><p class=muted>Ниже доступны сформированные отчёты, сводка актуальной проверки и выгрузки замечаний. Решения инженера находятся во вкладке «Замечания».</p>");
-    if let Some(run)=selected {
-        panel_html.push_str(&format!("<p><strong>Проверка #{} от {}</strong> · Источник: {}</p>",run.id,run.started_at.format("%d.%m.%Y %H:%M"),h(&run.source)));
-        panel_html.push_str(&format!("<p>Зафиксировано замечаний в выбранной проверке: <strong>{}</strong></p>",findings.len()));
+    if let Some(run) = selected {
+        panel_html.push_str(&format!(
+            "<p><strong>Проверка #{} от {}</strong> · Источник: {}</p>",
+            run.id,
+            run.started_at.format("%d.%m.%Y %H:%M"),
+            h(&run.source)
+        ));
+        panel_html.push_str(&format!(
+            "<p>Зафиксировано замечаний в выбранной проверке: <strong>{}</strong></p>",
+            findings.len()
+        ));
         panel_html.push_str(&format!("<p><a href=\"/packages/{id}/report/xlsx?run_id={}\">XLSX</a> · <a href=\"/packages/{id}/report/docx?run_id={}\">DOCX</a> · <a href=\"/packages/{id}/report/pdf?run_id={}\">PDF</a> — официальная выгрузка только подтверждённых/устранённых замечаний. <a href=\"/packages/{id}/report/xlsx?run_id={}&draft=true\">Черновик всех</a></p>",run.id,run.id,run.id,run.id));
     } else {
-        panel_html.push_str("<p>Проверки ещё не выполнялись. Загрузите ИД и настройте чек-лист.</p>");
+        panel_html
+            .push_str("<p>Проверки ещё не выполнялись. Загрузите ИД и настройте чек-лист.</p>");
     }
     panel_html.push_str("<p><a href=#remarks>Просмотреть замечания →</a> · <a href=#history>История проверок →</a></p></div></details></article>");
-    panels.insert("checks",std::mem::take(&mut panel_html));
+    panels.insert("checks", std::mem::take(&mut panel_html));
     // Technical classification/OCR issues must NOT be mixed with checklist verdicts.
     // They remain accessible and actionable without flooding the main screen.
-    let is_technical=|f:&Finding| matches!(f.rule_code.as_str(),
-        "CLASSIFY"|"OCR"|"OCR-CONF"|"E08"|"METADATA-INCOMPLETE");
-    let technical_count=findings.iter().filter(|f|is_technical(f)).count();
-    let issue_count=findings.len()-technical_count;
+    let is_technical = |f: &Finding| {
+        matches!(
+            f.rule_code.as_str(),
+            "CLASSIFY" | "OCR" | "OCR-CONF" | "E08" | "METADATA-INCOMPLETE"
+        )
+    };
+    let technical_count = findings.iter().filter(|f| is_technical(f)).count();
+    let issue_count = findings.len() - technical_count;
     panel_html.push_str(&format!("<article id=remarks><details class=collapsible><summary>Замечания инженера ({issue_count})</summary><div><p class=muted>Замечания по проверке отделены от технических проблем OCR и классификации. Итог по позициям — выше, в разделе <a href='#completion'>«Комплектность по чек-листу»</a>. Семантические доказательства — в отдельном разделе.</p>"));
-    for (group,filter) in [
-        ("Проверочные замечания",false),
-        ("Технические вопросы: распознавание и классификация",true),
+    for (group, filter) in [
+        ("Проверочные замечания", false),
+        ("Технические вопросы: распознавание и классификация", true),
     ] {
-        let count=findings.iter().filter(|f|is_technical(f)==filter).count();
+        let count = findings
+            .iter()
+            .filter(|f| is_technical(f) == filter)
+            .count();
         panel_html.push_str(&format!("<details class='findings-group' {}><summary>{group} · {count}</summary><div class='findings-table-scroll'><table><thead><tr><th>Блок / код</th><th>Источник и причина</th><th>Результат</th><th>Решение инженера</th></tr></thead><tbody>",if !filter {"open"}else{""}));
-        for f in findings.iter().filter(|f|is_technical(f)==filter){
+        for f in findings.iter().filter(|f| is_technical(f) == filter) {
             panel_html.push_str(&format!("<tr><td>{} / {}</td><td><small>{}</small><p>{}</p>{}</td><td class=status>{}</td><td><form method=post action=\"/findings/{}/review\">{}<select name=status>",f.block,h(&f.rule_code),h(&f.source_location),h(&f.description),if f.reference.is_empty(){"".to_string()}else{format!("<small>{}</small>",h(&f.reference))},if f.result=="mismatch"{"Выявлено несоответствие"}else{"Требуется ручная проверка"},f.id,hidden(&st.csrf)));
-            for (value,label) in [("pending","На рассмотрении"),("confirmed","Подтверждено"),("rejected","Отклонено"),("resolved","Устранено")]{
-                let sel=if f.review_status==value {"selected"}else{""};panel_html.push_str(&format!("<option value={value} {sel}>{label}</option>"));
+            for (value, label) in [
+                ("pending", "На рассмотрении"),
+                ("confirmed", "Подтверждено"),
+                ("rejected", "Отклонено"),
+                ("resolved", "Устранено"),
+            ] {
+                let sel = if f.review_status == value {
+                    "selected"
+                } else {
+                    ""
+                };
+                panel_html.push_str(&format!("<option value={value} {sel}>{label}</option>"));
             }
             panel_html.push_str(&format!("</select><input name=comment placeholder=Комментарий value=\"{}\"><button>Сохранить</button></form></td></tr>",h(&f.comment)));
         }
-        if count==0 {panel_html.push_str("<tr><td colspan='4'>Замечаний этой категории нет.</td></tr>");}
+        if count == 0 {
+            panel_html.push_str("<tr><td colspan='4'>Замечаний этой категории нет.</td></tr>");
+        }
         panel_html.push_str("</tbody></table></div></details>");
     }
     panel_html.push_str("<p class=muted>Отсутствие замечаний не подтверждает соответствие всем строительным нормам.</p></div></details></article>");
-    panels.insert("remarks",std::mem::take(&mut panel_html));
+    panels.insert("remarks", std::mem::take(&mut panel_html));
     panel_html.push_str("<article id=history><details class=collapsible><summary>История проверок</summary><div><table><thead><tr><th>Проверка</th><th>Дата и время</th><th>Источник</th><th>Действия</th></tr></thead><tbody>");
     for run in &runs {
         panel_html.push_str(&format!("<tr><td>#{}</td><td>{}</td><td>{}</td><td><a href=\"/packages/{id}?run_id={}#remarks\">Открыть замечания</a></td></tr>",run.id,run.started_at.format("%d.%m.%Y %H:%M"),h(&run.source),run.id));
     }
     panel_html.push_str("</tbody></table><p class=muted>История OCR доступна в разделе «Распознавание и ИИ» ниже.</p><a href=#ocr>Перейти к заданиям OCR →</a></div></details></article>");
-    panels.insert("history",std::mem::take(&mut panel_html));
+    panels.insert("history", std::mem::take(&mut panel_html));
     panel_html.push_str("<article id=norms-check><details class=collapsible><summary>Проверки утверждённых нормативных правил</summary><div><p><strong>Правила проверки настраиваются отдельно суперадминистратором.</strong> Здесь показаны только результаты применения утверждённых правил к выбранной проверке.</p><p class=muted>«Найдено подтверждение» означает обнаружение заданного текста, а не полное соответствие ГОСТ/СП. Настроить правила: <a href=/norms>НТД и пункты</a>.</p><table><tr><th>Документ / правило</th><th>Норматив и источник</th><th>Результат</th></tr>");
-    for check in &norm_checks{
-        let label=match check.result.as_str(){"evidence_found"=>"Найдено подтверждение в тексте","mismatch"=>"Вероятное несоответствие","manual"=>"Требуется проверка инженера",_=>"Неизвестно"};
+    for check in &norm_checks {
+        let label = match check.result.as_str() {
+            "evidence_found" => "Найдено подтверждение в тексте",
+            "mismatch" => "Вероятное несоответствие",
+            "manual" => "Требуется проверка инженера",
+            _ => "Неизвестно",
+        };
         panel_html.push_str(&format!("<tr><td>Документ #{} / правило #{}</td><td>{}<br><small>{}</small></td><td><b>{}</b><p>{}</p></td></tr>",check.document_id,check.rule_id,h(&check.normative_basis),h(&check.source_reference),label,h(&check.details)));
     }
-    if norm_checks.is_empty(){panel_html.push_str("<tr><td colspan=3>Нет записей нормативных проверок для выбранного запуска. Проверьте, утверждены ли правила и выполнено ли распознавание.</td></tr>");}
+    if norm_checks.is_empty() {
+        panel_html.push_str("<tr><td colspan=3>Нет записей нормативных проверок для выбранного запуска. Проверьте, утверждены ли правила и выполнено ли распознавание.</td></tr>");
+    }
     panel_html.push_str("</table></div></details></article>");
-    panels.insert("norms-check",std::mem::take(&mut panel_html));
+    panels.insert("norms-check", std::mem::take(&mut panel_html));
     // Keep checklist outcome visible first; uploads and recent documents are
     // below it, ahead of technical settings. Anchors still link to each section.
-    let mut primary=String::new();
-    if let Some(upload_panel)=panels.remove("upload") {
+    let mut primary = String::new();
+    if let Some(upload_panel) = panels.remove("upload") {
         primary.push_str("<section class='main-upload-panel'>");
-        primary.push_str(&upload_panel.replacen("<details class=collapsible>","<details class=collapsible open>",1));
+        primary.push_str(&upload_panel.replacen(
+            "<details class=collapsible>",
+            "<details class=collapsible open>",
+            1,
+        ));
         primary.push_str("</section>");
     }
-    if let Some(ref_panel)=panels.remove("references") {
+    if let Some(ref_panel) = panels.remove("references") {
         primary.push_str("<section class='main-upload-panel reference-materials'>");
         primary.push_str(&ref_panel);
         primary.push_str("</section>");
@@ -794,42 +1414,93 @@ async fn package_view(State(st):State<Shared>,Extension(actor):Extension<access:
         primary.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td><a href='/documents/{}/download'>Просмотр / оригинал</a></td></tr>",
             h(&d.relative_path),h(d.document_type.as_deref().unwrap_or("Не классифицирован")),h(&d.recognition_status),d.id));
     }
-    if latest.is_empty(){primary.push_str("<tr><td colspan='4'>Документы ещё не загружены.</td></tr>");}
+    if latest.is_empty() {
+        primary.push_str("<tr><td colspan='4'>Документы ещё не загружены.</td></tr>");
+    }
     primary.push_str("</tbody></table></section>");
-    if let Some(pos)=body.find("<section class=detail-sections ") {body.insert_str(pos,&primary);}else{body.push_str(&primary);}
-    let contractor_panel=contractor::package_controls(&st,&actor,id).await?;
-    if let Some(pos)=body.find("<section class=detail-sections ") {body.insert_str(pos,&contractor_panel);}else{body.push_str(&contractor_panel);}
+    if let Some(pos) = body.find("<section class=detail-sections ") {
+        body.insert_str(pos, &primary);
+    } else {
+        body.push_str(&primary);
+    }
+    let contractor_panel = contractor::package_controls(&st, &actor, id).await?;
+    if let Some(pos) = body.find("<section class=detail-sections ") {
+        body.insert_str(pos, &contractor_panel);
+    } else {
+        body.push_str(&contractor_panel);
+    }
     body.push_str("<section class=detail-sections id=detail-sections aria-labelledby=details-title><h2 id=details-title>Подробные разделы и настройки проверок</h2><p class=detail-intro>Нажмите на название раздела, чтобы открыть таблицы и параметры. Из вкладок выше можно сразу перейти к нужной проверке. Для запуска новой проверки используйте кнопку «Запустить проверку комплекта».</p>");
-    for (title,description,ids) in [
-        ("Результаты проверок","Отчёты, замечания, история и утверждённые нормативные правила",vec!["checks","remarks","history","norms-check"]),
-        ("Документы и комплект","Файлы, версии, категории контрольных материалов и чек-лист",vec!["documents","checklist","project-requirements","semantic-block1","work-register","block1-evidence"]),
-        ("Распознавание и ИИ","Предложения классификатора, очередь OCR и настройки внешнего ИИ",vec!["classification","ocr","ai-check"]),
+    for (title, description, ids) in [
+        (
+            "Результаты проверок",
+            "Отчёты, замечания, история и утверждённые нормативные правила",
+            vec!["checks", "remarks", "history", "norms-check"],
+        ),
+        (
+            "Документы и комплект",
+            "Файлы, версии, категории контрольных материалов и чек-лист",
+            vec![
+                "documents",
+                "checklist",
+                "project-requirements",
+                "semantic-block1",
+                "work-register",
+                "block1-evidence",
+            ],
+        ),
+        (
+            "Распознавание и ИИ",
+            "Предложения классификатора, очередь OCR и настройки внешнего ИИ",
+            vec!["classification", "ocr", "ai-check"],
+        ),
     ] {
-        body.push_str(&format!("<div class=detail-group><h3>{title}</h3><p>{description}</p>"));
+        body.push_str(&format!(
+            "<div class=detail-group><h3>{title}</h3><p>{description}</p>"
+        ));
         for key in ids {
-            if let Some(panel)=panels.remove(key) {
+            if let Some(panel) = panels.remove(key) {
                 // Every panel has a way back to the overview without a long manual scroll.
-                let panel=panel.replacen("<div>","<div><p class=backline><a href=#summary>↑ Вернуться к сводке</a></p>",1);
+                let panel = panel.replacen(
+                    "<div>",
+                    "<div><p class=backline><a href=#summary>↑ Вернуться к сводке</a></p>",
+                    1,
+                );
                 body.push_str(&panel);
             }
         }
         body.push_str("</div>");
     }
     body.push_str("</section>");
-    let unique_paths:HashSet<_>=docs.iter().map(|d|d.relative_path.as_str()).collect();
-    if docs.len()>unique_paths.len(){body.push_str(&format!("<p>Предыдущие версии: {} (сохраняются в архиве и доступны по ID).</p>",docs.len()-unique_paths.len()));}
+    let unique_paths: HashSet<_> = docs.iter().map(|d| d.relative_path.as_str()).collect();
+    if docs.len() > unique_paths.len() {
+        body.push_str(&format!(
+            "<p>Предыдущие версии: {} (сохраняются в архиве и доступны по ID).</p>",
+            docs.len() - unique_paths.len()
+        ));
+    }
     body.push_str("</div></div>");
-    Ok(layout("Комплект ИД",body))
+    Ok(layout("Комплект ИД", body))
 }
 
 /// Normative rules must be entered from a source the organisation possesses and explicitly approved.
-async fn norms_view(State(st):State<Shared>)->WebResult<Html<String>> {
-    let rules=norms::list_rules(&st.db).await?;
+async fn norms_view(State(st): State<Shared>) -> WebResult<Html<String>> {
+    let rules = norms::list_rules(&st.db).await?;
     let mut body=String::from("<h1>Нормативные правила (ГОСТ, СП, приказы)</h1><p>Здесь регистрируются <b>проверенные специалистом</b> требования конкретной редакции НТД. Ссылки из исходного ТЗ не считаются автоматически утверждёнными. Пустая база правил означает, что нормативная проверка не пройдена.</p>");
     body.push_str(&format!(r#"<section class="rule-toolbar"><strong>Импорт / экспорт правил:</strong><a class="buttonlink" href="/norms/export">Скачать каталог JSON ↓</a><form action="/norms/import" method="post" enctype="multipart/form-data">{}<label>Импорт JSON <input type="file" name="rules_file" accept=".json,application/json" required></label><button class="secondary" type="submit">Импортировать черновики</button></form><small>Импортированные правила НЕ утверждаются автоматически; требуется проверка специалиста. Архив действующих проверок сохраняется.</small></section>"#,hidden(&st.csrf)));
-    body.push_str(&format!("<article><h2>Добавить правило на утверждение</h2><form method=post action=/norms>{}",hidden(&st.csrf)));
-    body.push_str(r#"<p>Вид работ <select name=work_type><option value="">Все виды работ</option>"#);
-    for wt in &st.catalog.work_types{body.push_str(&format!("<option value=\"{}\">{}</option>",h(&wt.name),h(&wt.name)));}
+    body.push_str(&format!(
+        "<article><h2>Добавить правило на утверждение</h2><form method=post action=/norms>{}",
+        hidden(&st.csrf)
+    ));
+    body.push_str(
+        r#"<p>Вид работ <select name=work_type><option value="">Все виды работ</option>"#,
+    );
+    for wt in &st.catalog.work_types {
+        body.push_str(&format!(
+            "<option value=\"{}\">{}</option>",
+            h(&wt.name),
+            h(&wt.name)
+        ));
+    }
     body.push_str("</select> Код документа по справочнику (необязательно; например 1.4): <input name=document_code placeholder=1.4 maxlength=30></p>");
     body.push_str("<p><input name=norm_name required maxlength=250 placeholder=\"Название ГОСТ / СП / приказа\"> <input name=norm_edition required maxlength=80 placeholder=\"Редакция / год\"> <input name=norm_clause required maxlength=100 placeholder=\"Пункт / приложение НТД\"></p>");
     body.push_str("<p><input name=source_reference required maxlength=500 style=width:80% placeholder=\"Источник: утверждённый PDF / ссылка на файл с нормой\"></p>");
@@ -840,52 +1511,99 @@ async fn norms_view(State(st):State<Shared>)->WebResult<Html<String>> {
     body.push_str("<article><h2>Каталог правил</h2><table><tr><th>Правило</th><th>НТД и источник</th><th>Условие</th><th>Состояние</th></tr>");
     for rule in &rules {
         body.push_str(&format!("<tr><td><b>#{} v{}</b> {}<p><small>Вид работ: {}, код: {}</small></p></td><td>{}<p><small>Источник: {}</small></p></td><td>{}<p><small>Текст: {}</small></p></td><td>{}",rule.id,rule.version,h(&rule.description),h(if rule.work_type.is_empty(){"все"}else{&rule.work_type}),h(if rule.document_code.is_empty(){"все"}else{&rule.document_code}),h(&norms::basis(rule)),h(&rule.source_reference),h(&rule.check_kind),h(&rule.expected_text),h(&rule.approval_status)));
-        if rule.approval_status=="draft" {
+        if rule.approval_status == "draft" {
             body.push_str(&format!("<form method=post action=\"/norms/{}/status\">{}<input type=hidden name=status value=approved><button>Утвердить</button></form>",rule.id,hidden(&st.csrf)));
             body.push_str(&format!("<form method=post action=\"/norms/{}/delete\" onsubmit=\"return confirm('Удалить черновик правила?')\">{}<button class=warnbutton>Удалить черновик</button></form>",rule.id,hidden(&st.csrf)));
-        }else if rule.approval_status=="approved" {
+        } else if rule.approval_status == "approved" {
             body.push_str(&format!("<p><small>Утвердил: {}</small></p><form method=post action=\"/norms/{}/status\">{}<input type=hidden name=status value=revoked><button class=warnbutton>Отключить правило</button></form>",h(rule.approved_by.as_deref().unwrap_or("неизвестно")),rule.id,hidden(&st.csrf)));
         }
         body.push_str("</td></tr>");
     }
     body.push_str("</table><p>Черновик можно удалить. Утверждённое правило отключается, а не удаляется: иначе ссылки на результаты прошлых проверок потеряются. Для изменения утверждённого правила создайте новую версию и отключите старую.</p></article>");
-    Ok(layout("Нормативные правила",body))
+    Ok(layout("Нормативные правила", body))
 }
 #[derive(Deserialize)]
 struct NormForm {
-    csrf:String, work_type:String, document_code:String, norm_name:String, norm_edition:String,
-    norm_clause:String, source_reference:String, description:String, check_kind:String, expected_text:String,
+    csrf: String,
+    work_type: String,
+    document_code: String,
+    norm_name: String,
+    norm_edition: String,
+    norm_clause: String,
+    source_reference: String,
+    description: String,
+    check_kind: String,
+    expected_text: String,
 }
-fn validate_norm_rule(st:&Shared,form:&NormForm)->WebResult<()> {
-    let filled=[(&form.norm_name,250usize),(&form.norm_edition,80),(&form.norm_clause,100),(&form.source_reference,500),(&form.description,500)];
-    if filled.iter().any(|(s,max)|s.trim().is_empty() || s.len()>*max || s.chars().any(char::is_control)) {
+fn validate_norm_rule(st: &Shared, form: &NormForm) -> WebResult<()> {
+    let filled = [
+        (&form.norm_name, 250usize),
+        (&form.norm_edition, 80),
+        (&form.norm_clause, 100),
+        (&form.source_reference, 500),
+        (&form.description, 500),
+    ];
+    if filled
+        .iter()
+        .any(|(s, max)| s.trim().is_empty() || s.len() > *max || s.chars().any(char::is_control))
+    {
         return Err(WebError::bad("Укажите нормативный документ, редакцию, пункт, источник и описание (без управляющих символов)."));
     }
-    if !["required_phrase","forbidden_phrase","required_pattern","manual"].contains(&form.check_kind.as_str()) {
+    if ![
+        "required_phrase",
+        "forbidden_phrase",
+        "required_pattern",
+        "manual",
+    ]
+    .contains(&form.check_kind.as_str())
+    {
         return Err(WebError::bad("Неизвестный тип правила"));
     }
-    if form.expected_text.len()>300 || (form.check_kind!="manual" && form.expected_text.trim().chars().count()<3) {
-        return Err(WebError::bad("Нужен точный проверяемый текст (минимум 3 символа)."));
+    if form.expected_text.len() > 300
+        || (form.check_kind != "manual" && form.expected_text.trim().chars().count() < 3)
+    {
+        return Err(WebError::bad(
+            "Нужен точный проверяемый текст (минимум 3 символа).",
+        ));
     }
-    if form.check_kind=="required_pattern" && regex::Regex::new(&form.expected_text).is_err(){
-        return Err(WebError::bad("Неверное регулярное выражение (используйте синтаксис Rust regex)."));
+    if form.check_kind == "required_pattern" && regex::Regex::new(&form.expected_text).is_err() {
+        return Err(WebError::bad(
+            "Неверное регулярное выражение (используйте синтаксис Rust regex).",
+        ));
     }
     if !form.work_type.is_empty() && st.catalog.work_type(&form.work_type).is_none() {
         return Err(WebError::bad("Неизвестный вид работ"));
     }
-    if !form.document_code.is_empty() && (form.work_type.is_empty() || st.catalog.item(&form.work_type,&form.document_code).is_none()){
-        return Err(WebError::bad("Код документа должен существовать в выбранном виде работ"));
+    if !form.document_code.is_empty()
+        && (form.work_type.is_empty()
+            || st
+                .catalog
+                .item(&form.work_type, &form.document_code)
+                .is_none())
+    {
+        return Err(WebError::bad(
+            "Код документа должен существовать в выбранном виде работ",
+        ));
     }
     Ok(())
 }
-async fn create_norm_rule(State(st):State<Shared>,Form(form):Form<NormForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    validate_norm_rule(&st,&form)?;
+async fn create_norm_rule(
+    State(st): State<Shared>,
+    Form(form): Form<NormForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    validate_norm_rule(&st, &form)?;
     let new:(i64,)=sqlx::query_as("INSERT INTO normative_rules(work_type,document_code,norm_name,norm_edition,norm_clause,source_reference,description,check_kind,expected_text,version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,(SELECT COALESCE(MAX(version),0)+1 FROM normative_rules WHERE work_type=$1 AND document_code=$2 AND norm_name=$3 AND norm_clause=$5)) RETURNING id")
         .bind(&form.work_type).bind(&form.document_code).bind(form.norm_name.trim()).bind(form.norm_edition.trim())
         .bind(form.norm_clause.trim()).bind(form.source_reference.trim()).bind(form.description.trim())
         .bind(&form.check_kind).bind(form.expected_text.trim()).fetch_one(&st.db).await?;
-    repo::audit(&st.db,&st.cfg.app_user,"create_norm_rule",&format!("id={}",new.0)).await?;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "create_norm_rule",
+        &format!("id={}", new.0),
+    )
+    .await?;
     Ok(Redirect::to("/norms"))
 }
 
@@ -894,55 +1612,101 @@ async fn create_norm_rule(State(st):State<Shared>,Form(form):Form<NormForm>)->We
 /// is a DRAFT requiring human approval.
 #[derive(Deserialize)]
 struct ImportedNormRule {
-    #[serde(default)] work_type:String,
-    #[serde(default)] document_code:String,
-    norm_name:String, norm_edition:String, norm_clause:String,
-    source_reference:String, description:String, check_kind:String,
-    #[serde(default)] expected_text:String,
+    #[serde(default)]
+    work_type: String,
+    #[serde(default)]
+    document_code: String,
+    norm_name: String,
+    norm_edition: String,
+    norm_clause: String,
+    source_reference: String,
+    description: String,
+    check_kind: String,
+    #[serde(default)]
+    expected_text: String,
 }
 
-async fn export_norm_rules(State(st):State<Shared>)->WebResult<Response>{
-    let rules=norms::list_rules(&st.db).await?;
-    let body=serde_json::to_vec_pretty(&rules)?;
-    Ok(([
-        (header::CONTENT_TYPE,"application/json; charset=utf-8"),
-        (header::CONTENT_DISPOSITION,"attachment; filename=\"idcontrol-norms.json\""),
-        (header::CACHE_CONTROL,"no-store"),
-    ],body).into_response())
+async fn export_norm_rules(State(st): State<Shared>) -> WebResult<Response> {
+    let rules = norms::list_rules(&st.db).await?;
+    let body = serde_json::to_vec_pretty(&rules)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"idcontrol-norms.json\"",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response())
 }
 
-async fn import_norm_rules(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,mut multipart:Multipart)->WebResult<Redirect>{
-    let mut csrf=String::new();
-    let mut data:Option<Vec<u8>>=None;
-    while let Some(mut field)=multipart.next_field().await.map_err(|e|WebError::bad(e.to_string()))? {
+async fn import_norm_rules(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    mut multipart: Multipart,
+) -> WebResult<Redirect> {
+    let mut csrf = String::new();
+    let mut data: Option<Vec<u8>> = None;
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| WebError::bad(e.to_string()))?
+    {
         match field.name().unwrap_or("") {
-            "csrf"=>csrf=field.text().await.map_err(|e|WebError::bad(e.to_string()))?,
-            "rules_file"=>{
-                let mut raw=Vec::new();
-                while let Some(chunk)=field.chunk().await.map_err(|e|WebError::bad(e.to_string()))? {
-                    if raw.len().saturating_add(chunk.len())>2*1024*1024 {return Err(WebError::bad("Файл правил больше 2 МиБ"));}
+            "csrf" => {
+                csrf = field
+                    .text()
+                    .await
+                    .map_err(|e| WebError::bad(e.to_string()))?
+            }
+            "rules_file" => {
+                let mut raw = Vec::new();
+                while let Some(chunk) = field
+                    .chunk()
+                    .await
+                    .map_err(|e| WebError::bad(e.to_string()))?
+                {
+                    if raw.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 {
+                        return Err(WebError::bad("Файл правил больше 2 МиБ"));
+                    }
                     raw.extend_from_slice(&chunk);
                 }
-                data=Some(raw);
-            },
-            _=>{},
+                data = Some(raw);
+            }
+            _ => {}
         }
     }
-    verify(&csrf,&st)?;
-    let rules:Vec<ImportedNormRule>=serde_json::from_slice(data.as_deref().ok_or_else(||WebError::bad("Файл JSON не выбран"))?)
-        .map_err(|e|WebError::bad(format!("Неверный формат JSON правил: {e}")))?;
-    if rules.is_empty() || rules.len()>200 {return Err(WebError::bad("В JSON должно быть от 1 до 200 правил"));}
+    verify(&csrf, &st)?;
+    let rules: Vec<ImportedNormRule> = serde_json::from_slice(
+        data.as_deref()
+            .ok_or_else(|| WebError::bad("Файл JSON не выбран"))?,
+    )
+    .map_err(|e| WebError::bad(format!("Неверный формат JSON правил: {e}")))?;
+    if rules.is_empty() || rules.len() > 200 {
+        return Err(WebError::bad("В JSON должно быть от 1 до 200 правил"));
+    }
     // Validate ALL rules before touching the database (no partial import).
-    let mut checked=Vec::new();
+    let mut checked = Vec::new();
     for entry in rules {
-        let f=NormForm{csrf:String::new(),work_type:entry.work_type,document_code:entry.document_code,
-            norm_name:entry.norm_name,norm_edition:entry.norm_edition,norm_clause:entry.norm_clause,
-            source_reference:entry.source_reference,description:entry.description,
-            check_kind:entry.check_kind,expected_text:entry.expected_text};
-        validate_norm_rule(&st,&f)?;
+        let f = NormForm {
+            csrf: String::new(),
+            work_type: entry.work_type,
+            document_code: entry.document_code,
+            norm_name: entry.norm_name,
+            norm_edition: entry.norm_edition,
+            norm_clause: entry.norm_clause,
+            source_reference: entry.source_reference,
+            description: entry.description,
+            check_kind: entry.check_kind,
+            expected_text: entry.expected_text,
+        };
+        validate_norm_rule(&st, &f)?;
         checked.push(f);
     }
-    let mut tx=st.db.begin().await?;
+    let mut tx = st.db.begin().await?;
     for f in &checked {
         // Import never activates rules, including those exported as approved.
         sqlx::query("INSERT INTO normative_rules(work_type,document_code,norm_name,norm_edition,norm_clause,source_reference,description,check_kind,expected_text,approval_status,version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'draft',(SELECT COALESCE(MAX(version),0)+1 FROM normative_rules WHERE work_type=$1 AND document_code=$2 AND norm_name=$3 AND norm_clause=$5))")
@@ -951,383 +1715,991 @@ async fn import_norm_rules(State(st):State<Shared>,Extension(actor):Extension<ac
             .bind(&f.check_kind).bind(f.expected_text.trim()).execute(&mut *tx).await?;
     }
     tx.commit().await?;
-    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"import_norm_rules",&format!("count={}",checked.len())).await?;
+    repo::audit(
+        &st.db,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+        "import_norm_rules",
+        &format!("count={}", checked.len()),
+    )
+    .await?;
     Ok(Redirect::to("/norms"))
 }
 
-async fn delete_draft_rule(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
+async fn delete_draft_rule(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
     let changed=sqlx::query("DELETE FROM normative_rules n WHERE n.id=$1 AND n.approval_status='draft' AND NOT EXISTS (SELECT 1 FROM normative_check_results r WHERE r.rule_id=n.id)")
         .bind(id).execute(&st.db).await?.rows_affected();
-    if changed!=1 {return Err(WebError::bad("Удалять можно только неиспользованные черновики. Утверждённые правила отключайте."));}
-    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"delete_draft_rule",&format!("rule={id}")).await?;
+    if changed != 1 {
+        return Err(WebError::bad(
+            "Удалять можно только неиспользованные черновики. Утверждённые правила отключайте.",
+        ));
+    }
+    repo::audit(
+        &st.db,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+        "delete_draft_rule",
+        &format!("rule={id}"),
+    )
+    .await?;
     Ok(Redirect::to("/norms"))
 }
 
-#[derive(Deserialize)]struct NormStatusForm{csrf:String,status:String}
-async fn norm_rule_status(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<NormStatusForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !["approved","revoked"].contains(&form.status.as_str()) {return Err(WebError::bad("Неизвестный статус"));}
-    let count=if form.status=="approved"{
+#[derive(Deserialize)]
+struct NormStatusForm {
+    csrf: String,
+    status: String,
+}
+async fn norm_rule_status(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<NormStatusForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !["approved", "revoked"].contains(&form.status.as_str()) {
+        return Err(WebError::bad("Неизвестный статус"));
+    }
+    let count = if form.status == "approved" {
         sqlx::query("UPDATE normative_rules SET approval_status='approved',approved_by=$1,approved_at=now() WHERE id=$2 AND approval_status='draft'")
             .bind(&st.cfg.app_user).bind(id).execute(&st.db).await?.rows_affected()
-    }else{
+    } else {
         sqlx::query("UPDATE normative_rules SET approval_status='revoked' WHERE id=$1 AND approval_status='approved'")
             .bind(id).execute(&st.db).await?.rows_affected()
     };
-    if count!=1 {return Err(WebError::bad("Правило не найдено или уже изменило статус"));}
-    repo::audit(&st.db,&st.cfg.app_user,"norm_rule_status",&format!("id={id} status={}",form.status)).await?;
+    if count != 1 {
+        return Err(WebError::bad("Правило не найдено или уже изменило статус"));
+    }
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "norm_rule_status",
+        &format!("id={id} status={}", form.status),
+    )
+    .await?;
     Ok(Redirect::to("/norms"))
 }
 
-async fn errors(State(st):State<Shared>)->WebResult<Html<String>>{
+async fn errors(State(st): State<Shared>) -> WebResult<Html<String>> {
     let mut body=String::from("<h1>Справочник 34 типовых ошибок</h1><article><table><tr><th>Код</th><th>Ошибка</th><th>Алгоритм</th><th>Обработка</th></tr>");
-    for err in &st.catalog.errors{body.push_str(&format!("<tr><td>{}</td><td>{}<p><small>{}</small></p></td><td>{}</td><td>{}</td></tr>",h(&err.code),h(&err.title),h(&err.description),h(&err.algorithm),h(&err.check_type)));}
-    body.push_str("</table></article>");Ok(layout("Частые ошибки",body))
+    for err in &st.catalog.errors {
+        body.push_str(&format!(
+            "<tr><td>{}</td><td>{}<p><small>{}</small></p></td><td>{}</td><td>{}</td></tr>",
+            h(&err.code),
+            h(&err.title),
+            h(&err.description),
+            h(&err.algorithm),
+            h(&err.check_type)
+        ));
+    }
+    body.push_str("</table></article>");
+    Ok(layout("Частые ошибки", body))
 }
 
-async fn set_catalog(State(st):State<Shared>,Path(id):Path<i64>,body:Bytes)->WebResult<Redirect>{
-    let mut work=None;let mut csrf=None;let mut selected=HashSet::new();let mut minimums=HashMap::new();
-    for (key,value) in url::form_urlencoded::parse(&body){
-        match key.as_ref(){"csrf"=>csrf=Some(value.into_owned()),"work_type"=>work=Some(value.into_owned()),"required_codes"=>{selected.insert(value.into_owned());},_=>{
-            if let Some(code)=key.strip_prefix("minimum_") {
-                let n=value.parse::<i32>().map_err(|_|WebError::bad("Неверное количество документов"))?;
-                if !(1..=999).contains(&n) {return Err(WebError::bad("Количество должно быть от 1 до 999"));}
-                minimums.insert(code.to_owned(),n);
+async fn set_catalog(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    body: Bytes,
+) -> WebResult<Redirect> {
+    let mut work = None;
+    let mut csrf = None;
+    let mut selected = HashSet::new();
+    let mut minimums = HashMap::new();
+    for (key, value) in url::form_urlencoded::parse(&body) {
+        match key.as_ref() {
+            "csrf" => csrf = Some(value.into_owned()),
+            "work_type" => work = Some(value.into_owned()),
+            "required_codes" => {
+                selected.insert(value.into_owned());
             }
-        }}
+            _ => {
+                if let Some(code) = key.strip_prefix("minimum_") {
+                    let n = value
+                        .parse::<i32>()
+                        .map_err(|_| WebError::bad("Неверное количество документов"))?;
+                    if !(1..=999).contains(&n) {
+                        return Err(WebError::bad("Количество должно быть от 1 до 999"));
+                    }
+                    minimums.insert(code.to_owned(), n);
+                }
+            }
+        }
     }
-    verify(csrf.as_deref().unwrap_or(""),&st)?;
-    let wt=st.catalog.work_type(work.as_deref().unwrap_or("")).ok_or_else(||WebError::bad("Unknown work type"))?;
-    let valid:HashSet<_>=wt.items.iter().map(|i|i.code.as_str()).collect();
-    if selected.iter().any(|code|!valid.contains(code.as_str())){return Err(WebError::bad("Invalid checklist entry"));}
-    let _=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    let mut codes:Vec<_>=selected.into_iter().collect();codes.sort();
-    let mut tx=st.db.begin().await?;
+    verify(csrf.as_deref().unwrap_or(""), &st)?;
+    let wt = st
+        .catalog
+        .work_type(work.as_deref().unwrap_or(""))
+        .ok_or_else(|| WebError::bad("Unknown work type"))?;
+    let valid: HashSet<_> = wt.items.iter().map(|i| i.code.as_str()).collect();
+    if selected.iter().any(|code| !valid.contains(code.as_str())) {
+        return Err(WebError::bad("Invalid checklist entry"));
+    }
+    let _ = repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let mut codes: Vec<_> = selected.into_iter().collect();
+    codes.sort();
+    let mut tx = st.db.begin().await?;
     sqlx::query("UPDATE packages SET catalog_name=$1,required_codes_json=$2,block1_approved_by=NULL,block1_approved_at=NULL,block1_scope_approved_by=NULL,block1_scope_approved_at=NULL WHERE id=$3")
         .bind(&wt.name).bind(serde_json::to_string(&codes)?).bind(id).execute(&mut *tx).await?;
     sqlx::query("DELETE FROM package_document_minimums WHERE package_id=$1")
-        .bind(id).execute(&mut *tx).await?;
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     for code in &codes {
-        let count=minimums.get(code).copied().unwrap_or(1);
-        sqlx::query("INSERT INTO package_document_minimums(package_id,code,min_count) VALUES($1,$2,$3)")
-            .bind(id).bind(code).bind(count).execute(&mut *tx).await?;
+        let count = minimums.get(code).copied().unwrap_or(1);
+        sqlx::query(
+            "INSERT INTO package_document_minimums(package_id,code,min_count) VALUES($1,$2,$3)",
+        )
+        .bind(id)
+        .bind(code)
+        .bind(count)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
-    engine::analyze(&st.db,&st.catalog,id,"manual").await?;
-    repo::audit(&st.db,&st.cfg.app_user,"configure_catalog",&format!("package={id} codes={codes:?}")).await?;
-    Ok(Redirect::to(&format!("/packages/{id}?notice=checklist#checklist")))
+    engine::analyze(&st.db, &st.catalog, id, "manual").await?;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "configure_catalog",
+        &format!("package={id} codes={codes:?}"),
+    )
+    .await?;
+    Ok(Redirect::to(&format!(
+        "/packages/{id}?notice=checklist#checklist"
+    )))
 }
 #[derive(Deserialize)]
 struct CustomChecklistForm {
-    csrf:String,title:String,#[serde(default)]note:String,
-    #[serde(default)]required:Option<String>,#[serde(default)]remove:Option<String>,
+    csrf: String,
+    title: String,
+    #[serde(default)]
+    note: String,
+    #[serde(default)]
+    required: Option<String>,
+    #[serde(default)]
+    remove: Option<String>,
 }
-fn checked_custom_title(value:&str)->WebResult<String>{
-    let v=value.trim();
-    if v.chars().count()<2 || v.chars().count()>300 || v.chars().any(char::is_control) {
-        return Err(WebError::bad("Название позиции должно содержать от 2 до 300 символов"));
+fn checked_custom_title(value: &str) -> WebResult<String> {
+    let v = value.trim();
+    if v.chars().count() < 2 || v.chars().count() > 300 || v.chars().any(char::is_control) {
+        return Err(WebError::bad(
+            "Название позиции должно содержать от 2 до 300 символов",
+        ));
     }
     Ok(v.to_owned())
 }
-async fn create_custom_checklist(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CustomChecklistForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    let _=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    let title=checked_custom_title(&form.title)?;
-    if form.note.chars().count()>500 {return Err(WebError::bad("Примечание длиннее 500 символов"));}
-    let code=format!("USER-{}",uuid::Uuid::new_v4().simple());
+async fn create_custom_checklist(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<CustomChecklistForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    let _ = repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let title = checked_custom_title(&form.title)?;
+    if form.note.chars().count() > 500 {
+        return Err(WebError::bad("Примечание длиннее 500 символов"));
+    }
+    let code = format!("USER-{}", uuid::Uuid::new_v4().simple());
     sqlx::query("INSERT INTO package_custom_checklist(package_id,code,title,required,note) VALUES($1,$2,$3,$4,$5)")
         .bind(id).bind(&code).bind(&title).bind(form.required.as_deref()==Some("yes"))
         .bind(&form.note).execute(&st.db).await?;
-    invalidate_block1(&st.db,id).await?;
-    engine::analyze(&st.db,&st.catalog,id,"checklist_custom_create").await?;
-    repo::audit(&st.db,&st.cfg.app_user,"checklist_custom_create",&format!("package={id} code={code}")).await?;
-    Ok(Redirect::to(&format!("/packages/{id}?notice=checklist#checklist")))
+    invalidate_block1(&st.db, id).await?;
+    engine::analyze(&st.db, &st.catalog, id, "checklist_custom_create").await?;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "checklist_custom_create",
+        &format!("package={id} code={code}"),
+    )
+    .await?;
+    Ok(Redirect::to(&format!(
+        "/packages/{id}?notice=checklist#checklist"
+    )))
 }
-async fn edit_custom_checklist(State(st):State<Shared>,Path((id,item_id)):Path<(i64,i64)>,Form(form):Form<CustomChecklistForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    let _=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    let title=checked_custom_title(&form.title)?;
-    if form.note.chars().count()>500 {return Err(WebError::bad("Примечание длиннее 500 символов"));}
-    let removal=form.remove.as_deref()==Some("yes");
+async fn edit_custom_checklist(
+    State(st): State<Shared>,
+    Path((id, item_id)): Path<(i64, i64)>,
+    Form(form): Form<CustomChecklistForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    let _ = repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let title = checked_custom_title(&form.title)?;
+    if form.note.chars().count() > 500 {
+        return Err(WebError::bad("Примечание длиннее 500 символов"));
+    }
+    let removal = form.remove.as_deref() == Some("yes");
     let row=sqlx::query("UPDATE package_custom_checklist SET title=$3,note=$4,required=$5,active=NOT $6,updated_at=now() WHERE package_id=$1 AND id=$2 AND active=true")
         .bind(id).bind(item_id).bind(&title).bind(&form.note)
         .bind(form.required.as_deref()==Some("yes")).bind(removal).execute(&st.db).await?;
-    if row.rows_affected()!=1 {return Err(WebError::not_found());}
+    if row.rows_affected() != 1 {
+        return Err(WebError::not_found());
+    }
     if !removal {
-        let code: (String,)=sqlx::query_as("SELECT code FROM package_custom_checklist WHERE package_id=$1 AND id=$2")
-            .bind(id).bind(item_id).fetch_one(&st.db).await?;
-        sqlx::query("UPDATE documents SET document_type=$3 WHERE package_id=$1 AND catalog_code=$2")
-            .bind(id).bind(&code.0).bind(&title).execute(&st.db).await?;
+        let code: (String,) = sqlx::query_as(
+            "SELECT code FROM package_custom_checklist WHERE package_id=$1 AND id=$2",
+        )
+        .bind(id)
+        .bind(item_id)
+        .fetch_one(&st.db)
+        .await?;
+        sqlx::query(
+            "UPDATE documents SET document_type=$3 WHERE package_id=$1 AND catalog_code=$2",
+        )
+        .bind(id)
+        .bind(&code.0)
+        .bind(&title)
+        .execute(&st.db)
+        .await?;
     }
     // Existing uploaded copies and document assignments are intentionally preserved.
-    invalidate_block1(&st.db,id).await?;
-    engine::analyze(&st.db,&st.catalog,id,"checklist_custom_edit").await?;
-    repo::audit(&st.db,&st.cfg.app_user,"checklist_custom_edit",&format!("package={id} item={item_id} removed={removal}")).await?;
-    Ok(Redirect::to(&format!("/packages/{id}?notice=checklist#checklist")))
+    invalidate_block1(&st.db, id).await?;
+    engine::analyze(&st.db, &st.catalog, id, "checklist_custom_edit").await?;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "checklist_custom_edit",
+        &format!("package={id} item={item_id} removed={removal}"),
+    )
+    .await?;
+    Ok(Redirect::to(&format!(
+        "/packages/{id}?notice=checklist#checklist"
+    )))
 }
 #[derive(sqlx::FromRow)]
 struct AiSuggestionRow {
-    id:i64, document_id:i64, reference_document_id:Option<i64>,
-    source_quote:String, reference_quote:String, description:String,
-    proposed_action:String, review_status:String, comment:String,
+    id: i64,
+    document_id: i64,
+    reference_document_id: Option<i64>,
+    source_quote: String,
+    reference_quote: String,
+    description: String,
+    proposed_action: String,
+    review_status: String,
+    comment: String,
 }
-#[derive(Deserialize)]struct AiConsentForm { csrf:String, #[serde(default)]consent:Option<String> }
-async fn set_ai_consent(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<AiConsentForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    let allow=form.consent.as_deref()==Some("yes");
-    let affected=sqlx::query("UPDATE packages SET ai_consent=$1,ai_consent_updated_at=now() WHERE id=$2")
-        .bind(allow).bind(id).execute(&st.db).await?;
-    if affected.rows_affected()==0 {return Err(WebError::not_found());}
+#[derive(Deserialize)]
+struct AiConsentForm {
+    csrf: String,
+    #[serde(default)]
+    consent: Option<String>,
+}
+async fn set_ai_consent(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<AiConsentForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    let allow = form.consent.as_deref() == Some("yes");
+    let affected =
+        sqlx::query("UPDATE packages SET ai_consent=$1,ai_consent_updated_at=now() WHERE id=$2")
+            .bind(allow)
+            .bind(id)
+            .execute(&st.db)
+            .await?;
+    if affected.rows_affected() == 0 {
+        return Err(WebError::not_found());
+    }
     if !allow {
         sqlx::query("UPDATE ai_jobs SET status='failed',error_message='Consent revoked',finished_at=now() WHERE package_id=$1 AND status='pending'")
             .bind(id).execute(&st.db).await?;
     }
-    repo::audit(&st.db,&st.cfg.app_user,"ai_consent",&format!("package={id} allow={allow}")).await?;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "ai_consent",
+        &format!("package={id} allow={allow}"),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}")))
 }
-async fn queue_ai_check(State(st):State<Shared>,Path(_id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
+async fn queue_ai_check(
+    State(st): State<Shared>,
+    Path(_id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
     Err(WebError::bad("Внешняя сверка ИД с ПД/РД отключена: запрещена передача проектной документации. Используйте локальные проверки."))
 }
-#[derive(Deserialize)]struct AiReviewForm{csrf:String,status:String,#[serde(default)]comment:String}
-async fn review_ai_suggestion(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<AiReviewForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !["pending","confirmed","rejected"].contains(&form.status.as_str()) {return Err(WebError::bad("Invalid status"));}
+#[derive(Deserialize)]
+struct AiReviewForm {
+    csrf: String,
+    status: String,
+    #[serde(default)]
+    comment: String,
+}
+async fn review_ai_suggestion(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<AiReviewForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !["pending", "confirmed", "rejected"].contains(&form.status.as_str()) {
+        return Err(WebError::bad("Invalid status"));
+    }
     let row:Option<(i64,)> = sqlx::query_as("UPDATE ai_suggestions SET review_status=$1,comment=$2,reviewed_by=$3,reviewed_at=now() WHERE id=$4 RETURNING package_id")
         .bind(&form.status).bind(form.comment.chars().take(2000).collect::<String>())
         .bind(&st.cfg.app_user).bind(id).fetch_optional(&st.db).await?;
-    let package_id=row.ok_or_else(WebError::not_found)?.0;
-    repo::audit(&st.db,&st.cfg.app_user,"ai_suggestion_review",&format!("suggestion={id} status={}",form.status)).await?;
+    let package_id = row.ok_or_else(WebError::not_found)?.0;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "ai_suggestion_review",
+        &format!("suggestion={id} status={}", form.status),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{package_id}")))
 }
-#[derive(Deserialize)]struct TemplateSupportForm{csrf:String,template:String,min_count:i32}
-async fn add_template_requirement(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,Form(form):Form<TemplateSupportForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")){return Err(WebError::forbidden());}
-    let Some(template)=block1::SUPPORT_TEMPLATES.iter().find(|t|t.code==form.template.as_str()) else{return Err(WebError::bad("Неизвестная позиция ТЗ"));};
-    if !(1..=999).contains(&form.min_count){return Err(WebError::bad("Неверное количество"));}
+#[derive(Deserialize)]
+struct TemplateSupportForm {
+    csrf: String,
+    template: String,
+    min_count: i32,
+}
+async fn add_template_requirement(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path(id): Path<i64>,
+    Form(form): Form<TemplateSupportForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
+        return Err(WebError::forbidden());
+    }
+    let Some(template) = block1::SUPPORT_TEMPLATES
+        .iter()
+        .find(|t| t.code == form.template.as_str())
+    else {
+        return Err(WebError::bad("Неизвестная позиция ТЗ"));
+    };
+    if !(1..=999).contains(&form.min_count) {
+        return Err(WebError::bad("Неверное количество"));
+    }
     sqlx::query("INSERT INTO package_support_requirements(package_id,kind,title,basis,applies_when,min_count) VALUES($1,$2,$3,$4,$5,$6)")
         .bind(id).bind(template.kind).bind(template.title).bind(template.basis).bind(template.applies_when).bind(form.min_count).execute(&st.db).await?;
-    invalidate_block1(&st.db,id).await?;
-    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"block1_add_template",&format!("package={id} template={}",template.code)).await?;
+    invalidate_block1(&st.db, id).await?;
+    repo::audit(
+        &st.db,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+        "block1_add_template",
+        &format!("package={id} template={}", template.code),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}#block1-evidence")))
 }
-async fn invalidate_block1(db:&sqlx::PgPool,id:i64)->WebResult<()> {
+async fn invalidate_block1(db: &sqlx::PgPool, id: i64) -> WebResult<()> {
     sqlx::query("UPDATE packages SET block1_approved_at=NULL,block1_approved_by=NULL WHERE id=$1")
-        .bind(id).execute(db).await?;
+        .bind(id)
+        .execute(db)
+        .await?;
     Ok(())
 }
-#[derive(Deserialize)]struct SupportForm {
-    csrf:String,kind:String,title:String,#[serde(default)]basis:String,
-    #[serde(default)]applies_when:String,min_count:i32,
+#[derive(Deserialize)]
+struct SupportForm {
+    csrf: String,
+    kind: String,
+    title: String,
+    #[serde(default)]
+    basis: String,
+    #[serde(default)]
+    applies_when: String,
+    min_count: i32,
 }
-async fn add_support_requirement(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,Form(form):Form<SupportForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")){return Err(WebError::forbidden());}
-    if !["supplier","laboratory","attachment"].contains(&form.kind.as_str()) || form.title.trim().chars().count()<2 || form.title.len()>300 || form.basis.len()>500 || form.applies_when.len()>500 || !(1..=999).contains(&form.min_count) {
-        return Err(WebError::bad("Проверьте вид, название, применимость и количество требования"));
+async fn add_support_requirement(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path(id): Path<i64>,
+    Form(form): Form<SupportForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
+        return Err(WebError::forbidden());
+    }
+    if !["supplier", "laboratory", "attachment"].contains(&form.kind.as_str())
+        || form.title.trim().chars().count() < 2
+        || form.title.len() > 300
+        || form.basis.len() > 500
+        || form.applies_when.len() > 500
+        || !(1..=999).contains(&form.min_count)
+    {
+        return Err(WebError::bad(
+            "Проверьте вид, название, применимость и количество требования",
+        ));
     }
     sqlx::query("INSERT INTO package_support_requirements(package_id,kind,title,basis,applies_when,min_count) VALUES($1,$2,$3,$4,$5,$6)")
         .bind(id).bind(&form.kind).bind(form.title.trim()).bind(&form.basis).bind(&form.applies_when).bind(form.min_count).execute(&st.db).await?;
-    invalidate_block1(&st.db,id).await?;
-    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"block1_add_requirement",&format!("package={id} kind={} title={}",form.kind,form.title)).await?;
+    invalidate_block1(&st.db, id).await?;
+    repo::audit(
+        &st.db,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+        "block1_add_requirement",
+        &format!("package={id} kind={} title={}", form.kind, form.title),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}#block1-evidence")))
 }
-async fn disable_support_requirement(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path((id,req_id)):Path<(i64,i64)>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")){return Err(WebError::forbidden());}
+async fn disable_support_requirement(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path((id, req_id)): Path<(i64, i64)>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
+        return Err(WebError::forbidden());
+    }
     let row=sqlx::query("UPDATE package_support_requirements SET active=false WHERE package_id=$1 AND id=$2 AND active=true")
         .bind(id).bind(req_id).execute(&st.db).await?;
-    if row.rows_affected()!=1{return Err(WebError::not_found());}
-    invalidate_block1(&st.db,id).await?;
-    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"block1_disable_requirement",&format!("package={id} req={req_id}")).await?;
+    if row.rows_affected() != 1 {
+        return Err(WebError::not_found());
+    }
+    invalidate_block1(&st.db, id).await?;
+    repo::audit(
+        &st.db,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+        "block1_disable_requirement",
+        &format!("package={id} req={req_id}"),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}#block1-evidence")))
 }
-#[derive(Deserialize)]struct EvidenceForm{csrf:String,document_id:i64}
-async fn add_support_evidence(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path((id,req_id)):Path<(i64,i64)>,Form(form):Form<EvidenceForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")){return Err(WebError::forbidden());}
-    let req:Option<i64>=sqlx::query_scalar("SELECT id FROM package_support_requirements WHERE package_id=$1 AND id=$2 AND active=true")
-        .bind(id).bind(req_id).fetch_optional(&st.db).await?;
-    if req.is_none(){return Err(WebError::not_found());}
-    let doc=repo::document(&st.db,form.document_id).await.map_err(|_|WebError::not_found())?;
-    let scope=block1::current_delivery(&st.db,id).await?;
-    let valid=doc.package_id==id && scope.is_some() && block1::is_delivery_id(&doc,scope.as_ref());
-    if !valid{return Err(WebError::bad("Можно привязать только актуальный документ ИД текущей поставки"));}
-    let parent_id:Option<i64>=sqlx::query_scalar("SELECT parent_document_id FROM package_support_requirements WHERE package_id=$1 AND id=$2")
-        .bind(id).bind(req_id).fetch_one(&st.db).await?;
-    if parent_id==Some(doc.id){return Err(WebError::bad("Акт и его приложение не могут быть одним файлом"));}
+#[derive(Deserialize)]
+struct EvidenceForm {
+    csrf: String,
+    document_id: i64,
+}
+async fn add_support_evidence(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path((id, req_id)): Path<(i64, i64)>,
+    Form(form): Form<EvidenceForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
+        return Err(WebError::forbidden());
+    }
+    let req: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM package_support_requirements WHERE package_id=$1 AND id=$2 AND active=true",
+    )
+    .bind(id)
+    .bind(req_id)
+    .fetch_optional(&st.db)
+    .await?;
+    if req.is_none() {
+        return Err(WebError::not_found());
+    }
+    let doc = repo::document(&st.db, form.document_id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let scope = block1::current_delivery(&st.db, id).await?;
+    let valid =
+        doc.package_id == id && scope.is_some() && block1::is_delivery_id(&doc, scope.as_ref());
+    if !valid {
+        return Err(WebError::bad(
+            "Можно привязать только актуальный документ ИД текущей поставки",
+        ));
+    }
+    let parent_id: Option<i64> = sqlx::query_scalar(
+        "SELECT parent_document_id FROM package_support_requirements WHERE package_id=$1 AND id=$2",
+    )
+    .bind(id)
+    .bind(req_id)
+    .fetch_one(&st.db)
+    .await?;
+    if parent_id == Some(doc.id) {
+        return Err(WebError::bad(
+            "Акт и его приложение не могут быть одним файлом",
+        ));
+    }
     sqlx::query("INSERT INTO package_support_evidence(requirement_id,document_id,added_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
         .bind(req_id).bind(doc.id).bind(format!("bitrix:{}:{}",actor.member,actor.user_id)).execute(&st.db).await?;
-    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"block1_attach_evidence",&format!("package={id} req={req_id} document={}",doc.id)).await?;
+    repo::audit(
+        &st.db,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+        "block1_attach_evidence",
+        &format!("package={id} req={req_id} document={}", doc.id),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}#block1-evidence")))
 }
-async fn remove_support_evidence(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path((id,req_id,doc_id)):Path<(i64,i64,i64)>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")){return Err(WebError::forbidden());}
+async fn remove_support_evidence(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path((id, req_id, doc_id)): Path<(i64, i64, i64)>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
+        return Err(WebError::forbidden());
+    }
     let result=sqlx::query("DELETE FROM package_support_evidence e WHERE e.requirement_id=$1 AND e.document_id=$2 AND EXISTS(SELECT 1 FROM package_support_requirements r WHERE r.id=e.requirement_id AND r.package_id=$3)")
         .bind(req_id).bind(doc_id).bind(id).execute(&st.db).await?;
-    if result.rows_affected()==0{return Err(WebError::not_found());}
-    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"block1_support_evidence_removed",&format!("package={id} req={req_id} doc={doc_id}")).await?;
+    if result.rows_affected() == 0 {
+        return Err(WebError::not_found());
+    }
+    repo::audit(
+        &st.db,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+        "block1_support_evidence_removed",
+        &format!("package={id} req={req_id} doc={doc_id}"),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}#block1-evidence")))
 }
-#[derive(Deserialize)]struct WorkRegisterForm{csrf:String,description:String,#[serde(default)]location:String,catalog_code:String,required_count:i32,basis:String}
-async fn add_work_operation(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,Form(form):Form<WorkRegisterForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")){return Err(WebError::forbidden());}
-    let pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    if !(1..=999).contains(&form.required_count) || form.description.trim().chars().count()<3 || form.description.chars().count()>400 || form.location.chars().count()>250 || form.basis.trim().chars().count()<3 || form.basis.chars().count()>500 ||
-        form.description.chars().any(char::is_control) || form.basis.chars().any(char::is_control) || form.location.chars().any(char::is_control){return Err(WebError::bad("Проверьте количество, описание, основание и зону работ"));}
-    if st.catalog.item(pkg.catalog_name.as_deref().unwrap_or(""),&form.catalog_code).is_none(){return Err(WebError::bad("Выберите пункт каталога данного вида работ"));}
-    let actor_label=format!("bitrix:{}:{}",actor.member,actor.user_id);
-    let mut tx=st.db.begin().await?;
+#[derive(Deserialize)]
+struct WorkRegisterForm {
+    csrf: String,
+    description: String,
+    #[serde(default)]
+    location: String,
+    catalog_code: String,
+    required_count: i32,
+    basis: String,
+}
+async fn add_work_operation(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path(id): Path<i64>,
+    Form(form): Form<WorkRegisterForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
+        return Err(WebError::forbidden());
+    }
+    let pkg = repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    if !(1..=999).contains(&form.required_count)
+        || form.description.trim().chars().count() < 3
+        || form.description.chars().count() > 400
+        || form.location.chars().count() > 250
+        || form.basis.trim().chars().count() < 3
+        || form.basis.chars().count() > 500
+        || form.description.chars().any(char::is_control)
+        || form.basis.chars().any(char::is_control)
+        || form.location.chars().any(char::is_control)
+    {
+        return Err(WebError::bad(
+            "Проверьте количество, описание, основание и зону работ",
+        ));
+    }
+    if st
+        .catalog
+        .item(
+            pkg.catalog_name.as_deref().unwrap_or(""),
+            &form.catalog_code,
+        )
+        .is_none()
+    {
+        return Err(WebError::bad("Выберите пункт каталога данного вида работ"));
+    }
+    let actor_label = format!("bitrix:{}:{}", actor.member, actor.user_id);
+    let mut tx = st.db.begin().await?;
     sqlx::query("INSERT INTO package_work_operations(package_id,description,location,catalog_code,required_count,basis,added_by) VALUES ($1,$2,$3,$4,$5,$6,$7)")
         .bind(id).bind(form.description.trim()).bind(form.location.trim()).bind(&form.catalog_code).bind(form.required_count).bind(form.basis.trim()).bind(&actor_label).execute(&mut *tx).await?;
     sqlx::query("UPDATE packages SET block1_approved_by=NULL,block1_approved_at=NULL,block1_scope_approved_by=NULL,block1_scope_approved_at=NULL WHERE id=$1")
         .bind(id).execute(&mut *tx).await?;
     tx.commit().await?;
-    repo::audit(&st.db,&actor_label,"block1_work_added",&format!("package={id} code={} count={}",form.catalog_code,form.required_count)).await?;
+    repo::audit(
+        &st.db,
+        &actor_label,
+        "block1_work_added",
+        &format!(
+            "package={id} code={} count={}",
+            form.catalog_code, form.required_count
+        ),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}#work-register")))
 }
-async fn disable_work_operation(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path((id,work_id)):Path<(i64,i64)>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")){return Err(WebError::forbidden());}
-    let mut tx=st.db.begin().await?;
+async fn disable_work_operation(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path((id, work_id)): Path<(i64, i64)>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
+        return Err(WebError::forbidden());
+    }
+    let mut tx = st.db.begin().await?;
     let changed=sqlx::query("UPDATE package_work_operations SET active=false WHERE id=$1 AND package_id=$2 AND active=true")
         .bind(work_id).bind(id).execute(&mut *tx).await?;
-    if changed.rows_affected()!=1{return Err(WebError::not_found());}
+    if changed.rows_affected() != 1 {
+        return Err(WebError::not_found());
+    }
     sqlx::query("UPDATE packages SET block1_approved_by=NULL,block1_approved_at=NULL,block1_scope_approved_by=NULL,block1_scope_approved_at=NULL WHERE id=$1")
         .bind(id).execute(&mut *tx).await?;
     tx.commit().await?;
-    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"block1_work_disabled",&format!("package={id} work={work_id}")).await?;
+    repo::audit(
+        &st.db,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+        "block1_work_disabled",
+        &format!("package={id} work={work_id}"),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}#work-register")))
 }
-#[derive(Deserialize)]struct WorkEvidenceForm{csrf:String,document_id:i64}
-async fn add_work_evidence(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path((id,work_id)):Path<(i64,i64)>,Form(form):Form<WorkEvidenceForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")){return Err(WebError::forbidden());}
+#[derive(Deserialize)]
+struct WorkEvidenceForm {
+    csrf: String,
+    document_id: i64,
+}
+async fn add_work_evidence(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path((id, work_id)): Path<(i64, i64)>,
+    Form(form): Form<WorkEvidenceForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
+        return Err(WebError::forbidden());
+    }
     let work:Option<(String,)>=sqlx::query_as("SELECT catalog_code FROM package_work_operations WHERE package_id=$1 AND id=$2 AND active=true")
         .bind(id).bind(work_id).fetch_optional(&st.db).await?;
-    let code=work.ok_or_else(WebError::not_found)?.0;
-    let doc=repo::document(&st.db,form.document_id).await.map_err(|_|WebError::not_found())?;
-    let delivery=block1::current_delivery(&st.db,id).await?.ok_or_else(||WebError::bad("Нет опубликованной поставки"))?;
-    if doc.package_id!=id || !block1::is_delivery_id(&doc,Some(&delivery)) || doc.catalog_code.as_deref()!=Some(code.as_str()){
-        return Err(WebError::bad("Документ должен относиться к текущей поставке и выбранному типу акта"));
+    let code = work.ok_or_else(WebError::not_found)?.0;
+    let doc = repo::document(&st.db, form.document_id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let delivery = block1::current_delivery(&st.db, id)
+        .await?
+        .ok_or_else(|| WebError::bad("Нет опубликованной поставки"))?;
+    if doc.package_id != id
+        || !block1::is_delivery_id(&doc, Some(&delivery))
+        || doc.catalog_code.as_deref() != Some(code.as_str())
+    {
+        return Err(WebError::bad(
+            "Документ должен относиться к текущей поставке и выбранному типу акта",
+        ));
     }
     sqlx::query("INSERT INTO package_work_evidence(operation_id,document_id,added_by) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING")
         .bind(work_id).bind(doc.id).bind(format!("bitrix:{}:{}",actor.member,actor.user_id)).execute(&st.db).await?;
-    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"block1_work_evidence",&format!("package={id} work={work_id} doc={}",doc.id)).await?;
+    repo::audit(
+        &st.db,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+        "block1_work_evidence",
+        &format!("package={id} work={work_id} doc={}", doc.id),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}#work-register")))
 }
-async fn remove_work_evidence(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path((id,work_id,doc_id)):Path<(i64,i64,i64)>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")){return Err(WebError::forbidden());}
+async fn remove_work_evidence(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path((id, work_id, doc_id)): Path<(i64, i64, i64)>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
+        return Err(WebError::forbidden());
+    }
     let result=sqlx::query("DELETE FROM package_work_evidence e WHERE e.operation_id=$1 AND e.document_id=$2 AND EXISTS(SELECT 1 FROM package_work_operations w WHERE w.id=e.operation_id AND w.package_id=$3)")
         .bind(work_id).bind(doc_id).bind(id).execute(&st.db).await?;
-    if result.rows_affected()==0{return Err(WebError::not_found());}
-    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"block1_work_evidence_removed",&format!("package={id} work={work_id} doc={doc_id}")).await?;
+    if result.rows_affected() == 0 {
+        return Err(WebError::not_found());
+    }
+    repo::audit(
+        &st.db,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+        "block1_work_evidence_removed",
+        &format!("package={id} work={work_id} doc={doc_id}"),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}#work-register")))
 }
-async fn approve_work_register(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")){return Err(WebError::forbidden());}
-    let works=block1::work_operations(&st.db,id).await?;
-    if works.is_empty(){return Err(WebError::bad("Сначала внесите выполненные работы с основанием ПД/РД или журнала работ"));}
-    let label=format!("bitrix:{}:{}",actor.member,actor.user_id);
+async fn approve_work_register(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
+        return Err(WebError::forbidden());
+    }
+    let works = block1::work_operations(&st.db, id).await?;
+    if works.is_empty() {
+        return Err(WebError::bad(
+            "Сначала внесите выполненные работы с основанием ПД/РД или журнала работ",
+        ));
+    }
+    let label = format!("bitrix:{}:{}", actor.member, actor.user_id);
     sqlx::query("UPDATE packages SET block1_scope_approved_by=$1,block1_scope_approved_at=now(),block1_approved_by=NULL,block1_approved_at=NULL WHERE id=$2")
         .bind(&label).bind(id).execute(&st.db).await?;
-    repo::audit(&st.db,&label,"block1_work_approved",&format!("package={id} operations={}",works.len())).await?;
+    repo::audit(
+        &st.db,
+        &label,
+        "block1_work_approved",
+        &format!("package={id} operations={}", works.len()),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}#work-register")))
 }
-#[derive(Deserialize)]struct ParentForm {csrf:String,parent_id:i64}
-async fn set_support_parent(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path((id,req_id)):Path<(i64,i64)>,Form(form):Form<ParentForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")){return Err(WebError::forbidden());}
-    let parent=repo::document(&st.db,form.parent_id).await.map_err(|_|WebError::not_found())?;
-    let scope=block1::current_delivery(&st.db,id).await?.ok_or_else(||WebError::bad("Нет опубликованной поставки"))?;
-    if parent.package_id!=id || !block1::is_delivery_id(&parent,Some(&scope)){
+#[derive(Deserialize)]
+struct ParentForm {
+    csrf: String,
+    parent_id: i64,
+}
+async fn set_support_parent(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path((id, req_id)): Path<(i64, i64)>,
+    Form(form): Form<ParentForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
+        return Err(WebError::forbidden());
+    }
+    let parent = repo::document(&st.db, form.parent_id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let scope = block1::current_delivery(&st.db, id)
+        .await?
+        .ok_or_else(|| WebError::bad("Нет опубликованной поставки"))?;
+    if parent.package_id != id || !block1::is_delivery_id(&parent, Some(&scope)) {
         return Err(WebError::bad("Выберите акт ИД из текущей поставки"));
     }
     let changed=sqlx::query("UPDATE package_support_requirements SET parent_document_id=$1 WHERE id=$2 AND package_id=$3 AND active=true")
         .bind(parent.id).bind(req_id).bind(id).execute(&st.db).await?;
-    if changed.rows_affected()!=1{return Err(WebError::not_found());}
-    invalidate_block1(&st.db,id).await?;
-    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"block1_support_parent",&format!("package={id} req={req_id} act={}",parent.id)).await?;
+    if changed.rows_affected() != 1 {
+        return Err(WebError::not_found());
+    }
+    invalidate_block1(&st.db, id).await?;
+    repo::audit(
+        &st.db,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+        "block1_support_parent",
+        &format!("package={id} req={req_id} act={}", parent.id),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}#block1-evidence")))
 }
-async fn approve_block1(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")){return Err(WebError::forbidden());}
-    let pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    if pkg.catalog_name.is_none(){return Err(WebError::bad("Сначала выберите вид работ"));}
-    let codes:Vec<String>=serde_json::from_str(&pkg.required_codes_json).unwrap_or_default();
+async fn approve_block1(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
+        return Err(WebError::forbidden());
+    }
+    let pkg = repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    if pkg.catalog_name.is_none() {
+        return Err(WebError::bad("Сначала выберите вид работ"));
+    }
+    let codes: Vec<String> = serde_json::from_str(&pkg.required_codes_json).unwrap_or_default();
     let custom:i64=sqlx::query_scalar("SELECT count(*) FROM package_custom_checklist WHERE package_id=$1 AND required=true AND active=true")
         .bind(id).fetch_one(&st.db).await?;
-    let support=block1::support_requirements(&st.db,id).await?;
-    if codes.is_empty() && custom==0 && support.is_empty(){return Err(WebError::bad("Сначала определите обязательные позиции первого блока"));}
-    let count=block1::minimums(&st.db,id).await?;
-    let works=block1::work_operations(&st.db,id).await?;
-    let work_approved:Option<String>=sqlx::query_scalar("SELECT block1_scope_approved_by FROM packages WHERE id=$1")
-        .bind(id).fetch_one(&st.db).await?;
-    if works.is_empty() || work_approved.is_none(){return Err(WebError::bad("Сначала внесите и подтвердите реестр фактически выполненных работ"));}
-    let selected:HashSet<String>=codes.iter().cloned().collect();
-    if works.iter().any(|w|!selected.contains(&w.catalog_code)){return Err(WebError::bad("Выполненные работы содержат позиции, не отмеченные в обязательном чек-листе"));}
-    let actor_label=format!("bitrix:{}:{}",actor.member,actor.user_id);
-    let snapshot=serde_json::json!({"catalog":pkg.catalog_name,"required":codes,"minimums":count,"custom_count":custom,
+    let support = block1::support_requirements(&st.db, id).await?;
+    if codes.is_empty() && custom == 0 && support.is_empty() {
+        return Err(WebError::bad(
+            "Сначала определите обязательные позиции первого блока",
+        ));
+    }
+    let count = block1::minimums(&st.db, id).await?;
+    let works = block1::work_operations(&st.db, id).await?;
+    let work_approved: Option<String> =
+        sqlx::query_scalar("SELECT block1_scope_approved_by FROM packages WHERE id=$1")
+            .bind(id)
+            .fetch_one(&st.db)
+            .await?;
+    if works.is_empty() || work_approved.is_none() {
+        return Err(WebError::bad(
+            "Сначала внесите и подтвердите реестр фактически выполненных работ",
+        ));
+    }
+    let selected: HashSet<String> = codes.iter().cloned().collect();
+    if works.iter().any(|w| !selected.contains(&w.catalog_code)) {
+        return Err(WebError::bad(
+            "Выполненные работы содержат позиции, не отмеченные в обязательном чек-листе",
+        ));
+    }
+    let actor_label = format!("bitrix:{}:{}", actor.member, actor.user_id);
+    let snapshot = serde_json::json!({"catalog":pkg.catalog_name,"required":codes,"minimums":count,"custom_count":custom,
         "works":works.iter().map(|w|serde_json::json!({"id":w.id,"title":w.description,"zone":w.location,"code":w.catalog_code,"count":w.required_count,"basis":w.basis})).collect::<Vec<_>>(),
         "support":support.iter().map(|r|serde_json::json!({"id":r.id,"kind":r.kind,"title":r.title,"count":r.min_count,"basis":r.basis,"applicability":r.applies_when,"parent":r.parent_document_id})).collect::<Vec<_>>()});
-    let mut tx=st.db.begin().await?;
+    let mut tx = st.db.begin().await?;
     sqlx::query("UPDATE packages SET block1_approved_by=$1,block1_approved_at=now() WHERE id=$2")
-        .bind(&actor_label).bind(id).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO package_block1_approvals(package_id,approved_by,snapshot) VALUES($1,$2,$3)")
-        .bind(id).bind(&actor_label).bind(snapshot).execute(&mut *tx).await?;
+        .bind(&actor_label)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO package_block1_approvals(package_id,approved_by,snapshot) VALUES($1,$2,$3)",
+    )
+    .bind(id)
+    .bind(&actor_label)
+    .bind(snapshot)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
-    engine::analyze(&st.db,&st.catalog,id,"block1_approved").await?;
-    repo::audit(&st.db,&actor_label,"block1_approved",&format!("package={id}")).await?;
-    Ok(Redirect::to(&format!("/packages/{id}?notice=checklist#checklist")))
+    engine::analyze(&st.db, &st.catalog, id, "block1_approved").await?;
+    repo::audit(
+        &st.db,
+        &actor_label,
+        "block1_approved",
+        &format!("package={id}"),
+    )
+    .await?;
+    Ok(Redirect::to(&format!(
+        "/packages/{id}?notice=checklist#checklist"
+    )))
 }
 
-#[derive(Deserialize)]struct CsrfForm{csrf:String}
+#[derive(Deserialize)]
+struct CsrfForm {
+    csrf: String,
+}
 /// Explicit manual rules/consistency check. This does not run OCR and does
 /// not alter originals on Synology or locally staged documents.
-async fn run_package_check(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    let _pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
+async fn run_package_check(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    let _pkg = repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
     // Authorization middleware permits only manager/engineer to POST here.
-    let run=engine::analyze(&st.db,&st.catalog,id,"manual_ui").await?;
-    if let Err(err)=semantic::auto_compare(st.clone(),id,run,&format!("bitrix:{}:{}",actor.member,actor.user_id)).await {
-        tracing::warn!(package=id,"Failed to schedule semantic check: {err:#}");
+    let run = engine::analyze(&st.db, &st.catalog, id, "manual_ui").await?;
+    if let Err(err) = semantic::auto_compare(
+        st.clone(),
+        id,
+        run,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+    )
+    .await
+    {
+        tracing::warn!(package = id, "Failed to schedule semantic check: {err:#}");
     }
-    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"manual_check",&format!("package={id} run={run}")).await?;
-    Ok(Redirect::to(&format!("/packages/{id}?run_id={run}&notice=checked#checks")))
+    repo::audit(
+        &st.db,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+        "manual_check",
+        &format!("package={id} run={run}"),
+    )
+    .await?;
+    Ok(Redirect::to(&format!(
+        "/packages/{id}?run_id={run}&notice=checked#checks"
+    )))
 }
 /// Upload up to 20 documents in one request. Files are staged locally first;
 /// originals on NAS are never modified. A single checklist position may have many attachments.
-async fn upload(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,mut multipart:Multipart)->WebResult<Redirect>{
-    let pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    let project=sqlx::query_as::<_,crate::models::Project>("SELECT id,name FROM projects WHERE id=$1")
-        .bind(pkg.project_id).fetch_one(&st.db).await?;
+async fn upload(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path(id): Path<i64>,
+    mut multipart: Multipart,
+) -> WebResult<Redirect> {
+    let pkg = repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let project =
+        sqlx::query_as::<_, crate::models::Project>("SELECT id,name FROM projects WHERE id=$1")
+            .bind(pkg.project_id)
+            .fetch_one(&st.db)
+            .await?;
     // The server enforces this boundary; changing hidden form fields cannot
     // turn a reference upload into an official contractor submission.
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")) {
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
         return Err(WebError::forbidden());
     }
-    let mut kind=String::from("REFERENCE");let mut csrf=String::new();
-    let mut reference_type=String::new();let mut reference_note=String::new();
-    let mut staged:Vec<(tempfile::NamedTempFile,String)>=Vec::new();
-    let mut filenames=HashSet::new();
-    while let Some(mut field)=multipart.next_field().await.map_err(|e|WebError::bad(e.to_string()))?{
-        let field_name=field.name().unwrap_or("").to_owned();
-        match field_name.as_str(){
-            "csrf"=>csrf=field.text().await.map_err(|e|WebError::bad(e.to_string()))?,
-            "kind"=>kind=field.text().await.map_err(|e|WebError::bad(e.to_string()))?,
-            "reference_type"=>reference_type=field.text().await.map_err(|e|WebError::bad(e.to_string()))?,
-            "reference_note"=>reference_note=field.text().await.map_err(|e|WebError::bad(e.to_string()))?,
-            "file"=>{
-                if staged.len()>=20 {return Err(WebError::bad("Можно загрузить не более 20 файлов за раз"));}
-                let original_name=field.file_name().unwrap_or("file").to_owned();
-                let filename=repo::validate_segment(&original_name).map_err(|_|WebError::bad("Некорректное имя файла"))?;
+    let mut kind = String::from("REFERENCE");
+    let mut csrf = String::new();
+    let mut reference_type = String::new();
+    let mut reference_note = String::new();
+    let mut staged: Vec<(tempfile::NamedTempFile, String)> = Vec::new();
+    let mut filenames = HashSet::new();
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| WebError::bad(e.to_string()))?
+    {
+        let field_name = field.name().unwrap_or("").to_owned();
+        match field_name.as_str() {
+            "csrf" => {
+                csrf = field
+                    .text()
+                    .await
+                    .map_err(|e| WebError::bad(e.to_string()))?
+            }
+            "kind" => {
+                kind = field
+                    .text()
+                    .await
+                    .map_err(|e| WebError::bad(e.to_string()))?
+            }
+            "reference_type" => {
+                reference_type = field
+                    .text()
+                    .await
+                    .map_err(|e| WebError::bad(e.to_string()))?
+            }
+            "reference_note" => {
+                reference_note = field
+                    .text()
+                    .await
+                    .map_err(|e| WebError::bad(e.to_string()))?
+            }
+            "file" => {
+                if staged.len() >= 20 {
+                    return Err(WebError::bad("Можно загрузить не более 20 файлов за раз"));
+                }
+                let original_name = field.file_name().unwrap_or("file").to_owned();
+                let filename = repo::validate_segment(&original_name)
+                    .map_err(|_| WebError::bad("Некорректное имя файла"))?;
                 if !crate::docs::supported(&PathBuf::from(filename)) || filename.starts_with("~$") {
                     return Err(WebError::bad("Неподдерживаемый формат файла"));
                 }
@@ -1335,309 +2707,654 @@ async fn upload(State(st):State<Shared>,Extension(actor):Extension<access::Princ
                 if !filenames.insert(filename.to_lowercase()) {
                     return Err(WebError::bad("Одинаковые имена файлов в одной загрузке"));
                 }
-                let staging=st.cfg.temp_root.join("upload-staging");
+                let staging = st.cfg.temp_root.join("upload-staging");
                 std::fs::create_dir_all(&staging)?;
-                let mut tmp=tempfile::NamedTempFile::new_in(&staging)?;
-                let mut count=0u64;
-                while let Some(chunk)=field.chunk().await.map_err(|e|WebError::bad(e.to_string()))?{
-                    count=count.saturating_add(chunk.len() as u64);
-                    if count>st.cfg.max_file_mb*1024*1024 {return Err(WebError::bad("Файл превышает MAX_FILE_MB"));}
+                let mut tmp = tempfile::NamedTempFile::new_in(&staging)?;
+                let mut count = 0u64;
+                while let Some(chunk) = field
+                    .chunk()
+                    .await
+                    .map_err(|e| WebError::bad(e.to_string()))?
+                {
+                    count = count.saturating_add(chunk.len() as u64);
+                    if count > st.cfg.max_file_mb * 1024 * 1024 {
+                        return Err(WebError::bad("Файл превышает MAX_FILE_MB"));
+                    }
                     tmp.write_all(&chunk)?;
                 }
-                staged.push((tmp,filename.to_owned()));
-            },
-            _=>{}
+                staged.push((tmp, filename.to_owned()));
+            }
+            _ => {}
         }
     }
-    verify(&csrf,&st)?;
-    if kind!="REFERENCE" {return Err(WebError::bad("Официальная ИД принимается только через одноразовую ссылку подрядчика"));}
-    if !REFERENCE_CATEGORIES.iter().any(|(code,_)|*code==reference_type){return Err(WebError::bad("Выберите категорию контрольного материала"));}
-    if reference_note.len()>500 || reference_note.chars().any(char::is_control) {
+    verify(&csrf, &st)?;
+    if kind != "REFERENCE" {
+        return Err(WebError::bad(
+            "Официальная ИД принимается только через одноразовую ссылку подрядчика",
+        ));
+    }
+    if !REFERENCE_CATEGORIES
+        .iter()
+        .any(|(code, _)| *code == reference_type)
+    {
+        return Err(WebError::bad("Выберите категорию контрольного материала"));
+    }
+    if reference_note.len() > 500 || reference_note.chars().any(char::is_control) {
         return Err(WebError::bad("Некорректное примечание к материалу"));
     }
-    if staged.is_empty(){return Err(WebError::bad("Выберите файлы для проверки"));}
-    let root=st.cfg.data_root.join("inbox");
-    let mut done=0usize;
-    for (tmp,filename) in staged {
-        let file=root.join(&project.name).join(crate::contractor::nas_work_folder(&pkg.name)).join("REFERENCE").join(&reference_type).join(&filename);
+    if staged.is_empty() {
+        return Err(WebError::bad("Выберите файлы для проверки"));
+    }
+    let root = st.cfg.data_root.join("inbox");
+    let mut done = 0usize;
+    for (tmp, filename) in staged {
+        let file = root
+            .join(&project.name)
+            .join(crate::contractor::nas_work_folder(&pkg.name))
+            .join("REFERENCE")
+            .join(&reference_type)
+            .join(&filename);
         std::fs::create_dir_all(file.parent().unwrap())?;
         // Copy only into application inbox. Synology originals are read-only.
-        std::fs::copy(tmp.path(),&file)?;
-        scanner::ingest(&st.db,&st.cfg,&st.catalog,&root,&file,"upload").await?;
+        std::fs::copy(tmp.path(), &file)?;
+        scanner::ingest(&st.db, &st.cfg, &st.catalog, &root, &file, "upload").await?;
         // Store category and author against the exact document revision after ingest.
         // Re-uploading a changed file creates a new documents.version; old evidence stays intact.
-        let rel=format!("REFERENCE/{reference_type}/{filename}");
-        if let Some(doc)=repo::latest_document(&st.db,id,&rel).await? {
+        let rel = format!("REFERENCE/{reference_type}/{filename}");
+        if let Some(doc) = repo::latest_document(&st.db, id, &rel).await? {
             sqlx::query("INSERT INTO reference_materials(document_id,category,note,uploaded_by) VALUES($1,$2,$3,$4) ON CONFLICT(document_id) DO UPDATE SET category=EXCLUDED.category,note=EXCLUDED.note,uploaded_by=EXCLUDED.uploaded_by")
                 .bind(doc.id).bind(&reference_type).bind(&reference_note)
                 .bind(format!("bitrix:{}:{}",actor.member,actor.user_id))
                 .execute(&st.db).await?;
         } else {
-            return Err(WebError::bad("Не удалось зарегистрировать контрольный документ в комплекте"));
+            return Err(WebError::bad(
+                "Не удалось зарегистрировать контрольный документ в комплекте",
+            ));
         }
-        done+=1;
+        done += 1;
     }
     // A new PD/RD revision can change which acts are required for this project.
     // Previous approvals cannot silently remain valid after source changes.
-    if reference_type=="PD" || reference_type=="RD" {
+    if reference_type == "PD" || reference_type == "RD" {
         sqlx::query("UPDATE packages SET block1_scope_approved_at=NULL,block1_scope_approved_by=NULL,block1_approved_at=NULL,block1_approved_by=NULL WHERE id=$1")
             .bind(id).execute(&st.db).await?;
     }
     // Reference uploads do not create an official delivery or auto-run a check.
     // The engineer starts a new check explicitly when ready.
-    repo::audit(&st.db,&format!("bitrix:{}:{}",actor.member,actor.user_id),"reference_upload",&format!("package={id} files={done} category={reference_type}")).await?;
-    Ok(Redirect::to(&format!("/packages/{id}?notice=uploaded#references")))
+    repo::audit(
+        &st.db,
+        &format!("bitrix:{}:{}", actor.member, actor.user_id),
+        "reference_upload",
+        &format!("package={id} files={done} category={reference_type}"),
+    )
+    .await?;
+    Ok(Redirect::to(&format!(
+        "/packages/{id}?notice=uploaded#references"
+    )))
 }
 
-#[derive(Deserialize)]struct ClassifyProviderForm {csrf:String,provider:String,#[serde(default)]auto_queue:Option<String>}
-async fn set_classify_provider(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<ClassifyProviderForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    if !["vibecode","gigacowork"].contains(&form.provider.as_str()) {return Err(WebError::bad("Unknown classification provider"));}
+#[derive(Deserialize)]
+struct ClassifyProviderForm {
+    csrf: String,
+    provider: String,
+    #[serde(default)]
+    auto_queue: Option<String>,
+}
+async fn set_classify_provider(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<ClassifyProviderForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    if !["vibecode", "gigacowork"].contains(&form.provider.as_str()) {
+        return Err(WebError::bad("Unknown classification provider"));
+    }
     sqlx::query("INSERT INTO classification_settings(package_id,provider,auto_queue) VALUES($1,$2,$3) ON CONFLICT(package_id) DO UPDATE SET provider=$2,auto_queue=$3,updated_at=now()")
       .bind(id).bind(&form.provider).bind(form.auto_queue.as_deref()==Some("yes")).execute(&st.db).await?;
-    repo::audit(&st.db,&st.cfg.app_user,"classification_provider",&format!("package={id} provider={}",form.provider)).await?;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "classification_provider",
+        &format!("package={id} provider={}", form.provider),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}")))
 }
-async fn allowed_classification(st:&Shared,id:i64)->WebResult<()> {
-    repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    let consent:(bool,)=sqlx::query_as("SELECT ai_consent FROM packages WHERE id=$1").bind(id).fetch_one(&st.db).await?;
-    if !consent.0 {return Err(WebError::bad("Set AI consent for this package first"));}
-    let provider:Option<(String,)>=sqlx::query_as("SELECT provider FROM classification_settings WHERE package_id=$1")
-       .bind(id).fetch_optional(&st.db).await?;
-    let provider=provider.map(|p|p.0).unwrap_or_else(||"vibecode".into());
-    if !classification::configured(&st.cfg,&provider){return Err(WebError::bad("Selected AI classification provider is not configured"));}
+async fn allowed_classification(st: &Shared, id: i64) -> WebResult<()> {
+    repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let consent: (bool,) = sqlx::query_as("SELECT ai_consent FROM packages WHERE id=$1")
+        .bind(id)
+        .fetch_one(&st.db)
+        .await?;
+    if !consent.0 {
+        return Err(WebError::bad("Set AI consent for this package first"));
+    }
+    let provider: Option<(String,)> =
+        sqlx::query_as("SELECT provider FROM classification_settings WHERE package_id=$1")
+            .bind(id)
+            .fetch_optional(&st.db)
+            .await?;
+    let provider = provider.map(|p| p.0).unwrap_or_else(|| "vibecode".into());
+    if !classification::configured(&st.cfg, &provider) {
+        return Err(WebError::bad(
+            "Selected AI classification provider is not configured",
+        ));
+    }
     Ok(())
 }
-async fn queue_classify_all(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?; allowed_classification(&st,id).await?;
-    let count=classification::enqueue(&st.db,id,false,&st.cfg.app_user).await?;
-    repo::audit(&st.db,&st.cfg.app_user,"ai_classification_all",&format!("package={id} count={count}")).await?;
+async fn queue_classify_all(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    allowed_classification(&st, id).await?;
+    let count = classification::enqueue(&st.db, id, false, &st.cfg.app_user).await?;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "ai_classification_all",
+        &format!("package={id} count={count}"),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}")))
 }
-async fn queue_classify_unclassified(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?; allowed_classification(&st,id).await?;
-    let count=classification::enqueue(&st.db,id,true,&st.cfg.app_user).await?;
-    repo::audit(&st.db,&st.cfg.app_user,"ai_classification_unclassified",&format!("package={id} count={count}")).await?;
+async fn queue_classify_unclassified(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    allowed_classification(&st, id).await?;
+    let count = classification::enqueue(&st.db, id, true, &st.cfg.app_user).await?;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "ai_classification_unclassified",
+        &format!("package={id} count={count}"),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}")))
 }
 /// One-click, non-AI reconciliation of the *current* contractor delivery.
 /// Respect engineer overrides and never rewrite previously assigned codes.
-async fn reconcile_catalog_codes(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !matches!(access::package_role(&st,&actor,id).await.as_deref(),Some("manager"|"engineer")) {
+async fn reconcile_catalog_codes(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !matches!(
+        access::package_role(&st, &actor, id).await.as_deref(),
+        Some("manager" | "engineer")
+    ) {
         return Err(WebError::forbidden());
     }
-    let pkg=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    let work=pkg.catalog_name.as_deref().and_then(|name|st.catalog.work_type(name))
-        .ok_or_else(||WebError::bad("Сначала выберите вид работ в каталоге"))?;
-    let delivery=block1::current_delivery(&st.db,id).await?;
-    let history:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM contractor_submissions WHERE package_id=$1)")
-        .bind(id).fetch_one(&st.db).await?;
+    let pkg = repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let work = pkg
+        .catalog_name
+        .as_deref()
+        .and_then(|name| st.catalog.work_type(name))
+        .ok_or_else(|| WebError::bad("Сначала выберите вид работ в каталоге"))?;
+    let delivery = block1::current_delivery(&st.db, id).await?;
+    let history: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM contractor_submissions WHERE package_id=$1)",
+    )
+    .bind(id)
+    .fetch_one(&st.db)
+    .await?;
     if history && delivery.is_none() {
-        return Err(WebError::bad("Нет опубликованной поставки подрядчика: старые ревизии нельзя засчитывать"));
+        return Err(WebError::bad(
+            "Нет опубликованной поставки подрядчика: старые ревизии нельзя засчитывать",
+        ));
     }
-    let docs=repo::documents(&st.db,id).await?;
-    let latest=block1::latest(&docs);
+    let docs = repo::documents(&st.db, id).await?;
+    let latest = block1::latest(&docs);
     let excluded:HashSet<i64>=sqlx::query_as::<_,(i64,)>(
         "SELECT document_id FROM classification_results WHERE review_status='manual_override' AND document_id IN (SELECT id FROM documents WHERE package_id=$1)")
         .bind(id).fetch_all(&st.db).await?.into_iter().map(|x|x.0).collect();
-    let mut decisions=Vec::new();
+    let mut decisions = Vec::new();
     for doc in latest {
-        if !block1::is_delivery_id(doc,delivery.as_ref()) || doc.catalog_code.is_some() ||
-            excluded.contains(&doc.id) || doc.recognized_text.trim().is_empty() ||
-            !matches!(doc.recognition_status.as_str(),"extracted"|"ocr"|"ocr_vibe"|"ocr_local") {continue;}
-        let filename=doc.relative_path.rsplit('/').next().unwrap_or(&doc.relative_path);
-        if let Some((code,title))=st.catalog.classify(filename,&doc.recognized_text,Some(work)) {
-            decisions.push((doc.id,code,title));
+        if !block1::is_delivery_id(doc, delivery.as_ref())
+            || doc.catalog_code.is_some()
+            || excluded.contains(&doc.id)
+            || doc.recognized_text.trim().is_empty()
+            || !matches!(
+                doc.recognition_status.as_str(),
+                "extracted" | "ocr" | "ocr_vibe" | "ocr_local"
+            )
+        {
+            continue;
+        }
+        let filename = doc
+            .relative_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&doc.relative_path);
+        if let Some((code, title)) = st
+            .catalog
+            .classify(filename, &doc.recognized_text, Some(work))
+        {
+            decisions.push((doc.id, code, title));
         }
     }
-    let mut tx=st.db.begin().await?;
-    let mut changed=0usize;
-    for (doc_id,code,title) in &decisions {
+    let mut tx = st.db.begin().await?;
+    let mut changed = 0usize;
+    for (doc_id, code, title) in &decisions {
         changed+=sqlx::query("UPDATE documents d SET catalog_code=$2,document_type=COALESCE(NULLIF(d.document_type,''),$3) WHERE d.id=$1 AND d.package_id=$4 AND d.is_present=true AND d.source_kind='ID' AND d.catalog_code IS NULL AND NOT EXISTS (SELECT 1 FROM classification_results c WHERE c.document_id=d.id AND c.review_status='manual_override')")
             .bind(doc_id).bind(code).bind(title).bind(id).execute(&mut *tx).await?.rows_affected() as usize;
     }
     tx.commit().await?;
-    if changed>0 {engine::analyze(&st.db,&st.catalog,id,"catalog_ocr_reconciliation").await?;}
-    let actor_label=format!("bitrix:{}:{}",actor.member,actor.user_id);
-    repo::audit(&st.db,&actor_label,"catalog_ocr_reconciliation",&format!("package={id} linked={changed} considered={}",decisions.len())).await?;
-    Ok(Redirect::to(&format!("/packages/{id}?notice=reconciled#completion")))
+    if changed > 0 {
+        engine::analyze(&st.db, &st.catalog, id, "catalog_ocr_reconciliation").await?;
+    }
+    let actor_label = format!("bitrix:{}:{}", actor.member, actor.user_id);
+    repo::audit(
+        &st.db,
+        &actor_label,
+        "catalog_ocr_reconciliation",
+        &format!(
+            "package={id} linked={changed} considered={}",
+            decisions.len()
+        ),
+    )
+    .await?;
+    Ok(Redirect::to(&format!(
+        "/packages/{id}?notice=reconciled#completion"
+    )))
 }
 
-async fn queue_classify_one(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    let doc=repo::document(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    allowed_classification(&st,doc.package_id).await?;
-    let ok=classification::enqueue_one(&st.db,id,&st.cfg.app_user).await?;
-    if !ok {return Err(WebError::bad("Document has no extracted text, is obsolete, or is already queued"));}
-    repo::audit(&st.db,&st.cfg.app_user,"ai_classification_one",&format!("doc={id}")).await?;
-    Ok(Redirect::to(&format!("/packages/{}",doc.package_id)))
+async fn queue_classify_one(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    let doc = repo::document(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    allowed_classification(&st, doc.package_id).await?;
+    let ok = classification::enqueue_one(&st.db, id, &st.cfg.app_user).await?;
+    if !ok {
+        return Err(WebError::bad(
+            "Document has no extracted text, is obsolete, or is already queued",
+        ));
+    }
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "ai_classification_one",
+        &format!("doc={id}"),
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/packages/{}", doc.package_id)))
 }
-async fn confirm_classification(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    let doc=repo::document(&st.db,id).await.map_err(|_|WebError::not_found())?;
+async fn confirm_classification(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    let doc = repo::document(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
     let row:Option<(String,String)>=sqlx::query_as("SELECT predicted_type,source_text_sha256 FROM classification_results WHERE document_id=$1 AND review_status='suggested'")
       .bind(id).fetch_optional(&st.db).await?;
-    let (label,hash)=row.ok_or_else(||WebError::bad("No unreviewed AI classification"))?;
+    let (label, hash) = row.ok_or_else(|| WebError::bad("No unreviewed AI classification"))?;
     use sha2::Digest;
-    if label=="Не удалось определить" {
+    if label == "Не удалось определить" {
         return Err(WebError::bad("AI could not determine document type"));
     }
-    if hex::encode(sha2::Sha256::digest(doc.recognized_text.as_bytes()))!=hash {
+    if hex::encode(sha2::Sha256::digest(doc.recognized_text.as_bytes())) != hash {
         return Err(WebError::bad("OCR text has changed; repeat classification"));
     }
-    let pkg=repo::package(&st.db,doc.package_id).await?;
-    let found=pkg.catalog_name.as_deref().and_then(|name|st.catalog.work_type(name)).and_then(|wt|{
-       // AI labels such as "АОСР" or "Исполнительная геодезическая схема"
-       // are not verbatim checklist titles. Use the same conservative mapper.
-       // Type confirmation must not be rewritten by incidental references
-       // to unrelated documents inside its OCR body.
-       st.catalog.classify(&label,"",Some(wt))
-    });
-    let mut tx=st.db.begin().await?;
+    let pkg = repo::package(&st.db, doc.package_id).await?;
+    let found = pkg
+        .catalog_name
+        .as_deref()
+        .and_then(|name| st.catalog.work_type(name))
+        .and_then(|wt| {
+            // AI labels such as "АОСР" or "Исполнительная геодезическая схема"
+            // are not verbatim checklist titles. Use the same conservative mapper.
+            // Type confirmation must not be rewritten by incidental references
+            // to unrelated documents inside its OCR body.
+            st.catalog.classify(&label, "", Some(wt))
+        });
+    let mut tx = st.db.begin().await?;
     sqlx::query("UPDATE documents SET document_type=$2,catalog_code=$3 WHERE id=$1")
-       .bind(id).bind(&label).bind(found.as_ref().map(|x|x.0.as_str())).execute(&mut *tx).await?;
+        .bind(id)
+        .bind(&label)
+        .bind(found.as_ref().map(|x| x.0.as_str()))
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("UPDATE classification_results SET review_status='confirmed',reviewed_by=$2,reviewed_at=now() WHERE document_id=$1")
        .bind(id).bind(&st.cfg.app_user).execute(&mut *tx).await?;
     tx.commit().await?;
-    engine::analyze(&st.db,&st.catalog,doc.package_id,"ai_classification_confirmed").await?;
-    repo::audit(&st.db,&st.cfg.app_user,"ai_classification_confirmed",&format!("doc={id}")).await?;
-    Ok(Redirect::to(&format!("/packages/{}",doc.package_id)))
+    engine::analyze(
+        &st.db,
+        &st.catalog,
+        doc.package_id,
+        "ai_classification_confirmed",
+    )
+    .await?;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "ai_classification_confirmed",
+        &format!("doc={id}"),
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/packages/{}", doc.package_id)))
 }
-async fn reject_classification(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    let doc=repo::document(&st.db,id).await.map_err(|_|WebError::not_found())?;
+async fn reject_classification(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    let doc = repo::document(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
     sqlx::query("UPDATE classification_results SET review_status='rejected',reviewed_by=$2,reviewed_at=now() WHERE document_id=$1 AND review_status='suggested'")
        .bind(id).bind(&st.cfg.app_user).execute(&st.db).await?;
-    repo::audit(&st.db,&st.cfg.app_user,"ai_classification_rejected",&format!("doc={id}")).await?;
-    Ok(Redirect::to(&format!("/packages/{}",doc.package_id)))
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "ai_classification_rejected",
+        &format!("doc={id}"),
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/packages/{}", doc.package_id)))
 }
-async fn classification_fragment(State(st):State<Shared>,Path(id):Path<i64>)->WebResult<Html<String>>{
-    repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
+async fn classification_fragment(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+) -> WebResult<Html<String>> {
+    repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
     let list:Vec<(i64,i64,String,String,String,String)>=sqlx::query_as(
         "SELECT id,document_id,provider,status,error_message,created_at::text FROM classification_jobs WHERE package_id=$1 ORDER BY id DESC LIMIT 25")
         .bind(id).fetch_all(&st.db).await?;
     let mut out=String::from("<table><tr><th>Задание</th><th>Документ</th><th>Провайдер</th><th>Статус</th><th>Ошибка</th></tr>");
-    for (jid,did,provider,status,error,_date) in list {
+    for (jid, did, provider, status, error, _date) in list {
         out.push_str(&format!("<tr><td>#{jid}</td><td>#{did}</td><td>{}</td><td>{}</td><td><small>{}</small></td></tr>",h(&provider),h(&status),h(&error)));
     }
     out.push_str("</table>");
     Ok(Html(out))
 }
 
-#[derive(Deserialize)]struct ClassifyForm{csrf:String,catalog_code:String}
-async fn classify(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<ClassifyForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    let doc=repo::document(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    if doc.source_kind!="ID" {return Err(WebError::bad("ПД/РД нельзя назначать в позиции исполнительной документации"));}
-    let pkg=repo::package(&st.db,doc.package_id).await?;
-    let (code,title)=if form.catalog_code.is_empty(){(None,None)}else if let Some(item)=st.catalog.item(pkg.catalog_name.as_deref().unwrap_or(""),&form.catalog_code){
-        (Some(item.code.clone()),Some(item.title.clone()))
-    }else{
+#[derive(Deserialize)]
+struct ClassifyForm {
+    csrf: String,
+    catalog_code: String,
+}
+async fn classify(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<ClassifyForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    let doc = repo::document(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    if doc.source_kind != "ID" {
+        return Err(WebError::bad(
+            "ПД/РД нельзя назначать в позиции исполнительной документации",
+        ));
+    }
+    let pkg = repo::package(&st.db, doc.package_id).await?;
+    let (code, title) = if form.catalog_code.is_empty() {
+        (None, None)
+    } else if let Some(item) = st.catalog.item(
+        pkg.catalog_name.as_deref().unwrap_or(""),
+        &form.catalog_code,
+    ) {
+        (Some(item.code.clone()), Some(item.title.clone()))
+    } else {
         let custom:Option<(String,String)>=sqlx::query_as("SELECT code,title FROM package_custom_checklist WHERE package_id=$1 AND code=$2 AND active=true")
             .bind(pkg.id).bind(&form.catalog_code).fetch_optional(&st.db).await?;
-        let (c,t)=custom.ok_or_else(||WebError::bad("Неизвестная позиция чек-листа"))?;
-        (Some(c),Some(t))
+        let (c, t) = custom.ok_or_else(|| WebError::bad("Неизвестная позиция чек-листа"))?;
+        (Some(c), Some(t))
     };
     sqlx::query("UPDATE documents SET catalog_code=$1,document_type=$2 WHERE id=$3")
-        .bind(&code).bind(&title).bind(id).execute(&st.db).await?;
+        .bind(&code)
+        .bind(&title)
+        .bind(id)
+        .execute(&st.db)
+        .await?;
     sqlx::query("UPDATE classification_results SET review_status='manual_override',reviewed_by=$2,reviewed_at=now() WHERE document_id=$1")
         .bind(id).bind(&st.cfg.app_user).execute(&st.db).await?;
-    engine::analyze(&st.db,&st.catalog,pkg.id,"manual").await?;
-    repo::audit(&st.db,&st.cfg.app_user,"classify_document",&format!("doc={id} code={}",form.catalog_code)).await?;
-    Ok(Redirect::to(&format!("/packages/{}?notice=classified&doc={id}#doc-{id}",pkg.id)))
+    engine::analyze(&st.db, &st.catalog, pkg.id, "manual").await?;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "classify_document",
+        &format!("doc={id} code={}", form.catalog_code),
+    )
+    .await?;
+    Ok(Redirect::to(&format!(
+        "/packages/{}?notice=classified&doc={id}#doc-{id}",
+        pkg.id
+    )))
 }
-#[derive(Deserialize)]struct ReviewForm{csrf:String,status:String,#[serde(default)]comment:String}
-async fn review(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<ReviewForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !["pending","confirmed","rejected","resolved"].contains(&form.status.as_str()){
+#[derive(Deserialize)]
+struct ReviewForm {
+    csrf: String,
+    status: String,
+    #[serde(default)]
+    comment: String,
+}
+async fn review(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<ReviewForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !["pending", "confirmed", "rejected", "resolved"].contains(&form.status.as_str()) {
         return Err(WebError::bad("Invalid review status"));
     }
     let row:Option<(i64,)>=sqlx::query_as("UPDATE findings SET review_status=$1,comment=$2,reviewed_by=$3,reviewed_at=now() WHERE id=$4 RETURNING package_id")
         .bind(&form.status).bind(form.comment.chars().take(5000).collect::<String>()).bind(&st.cfg.app_user).bind(id)
         .fetch_optional(&st.db).await?;
-    let package_id=row.ok_or_else(WebError::not_found)?.0;
-    repo::audit(&st.db,&st.cfg.app_user,"review",&format!("finding={id} status={}",form.status)).await?;
+    let package_id = row.ok_or_else(WebError::not_found)?.0;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "review",
+        &format!("finding={id} status={}", form.status),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{package_id}")))
 }
-async fn download(State(st):State<Shared>,Path(id):Path<i64>)->WebResult<Response>{
-    let doc=repo::document(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    let path=&doc.archive_path;
-    let safe=std::fs::canonicalize(path).map_err(|_|WebError::not_found())?;
-    let root=std::fs::canonicalize(&st.cfg.data_root)?;
-    if !safe.starts_with(&root){return Err(WebError{status:StatusCode::FORBIDDEN,detail:"Invalid storage path".into()});}
-    let file=tokio::fs::File::open(safe).await?;
-    let stream=tokio_util::io::ReaderStream::new(file);
-    let fname=format!("document-{}-v{}.{}",id,doc.version,doc.relative_path.rsplit('.').next().unwrap_or("bin"));
-    let response=Response::builder().header(header::CONTENT_TYPE,"application/octet-stream")
-        .header(header::CONTENT_DISPOSITION,format!("attachment; filename=\"{}\"",fname))
+async fn download(State(st): State<Shared>, Path(id): Path<i64>) -> WebResult<Response> {
+    let doc = repo::document(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let path = &doc.archive_path;
+    let safe = std::fs::canonicalize(path).map_err(|_| WebError::not_found())?;
+    let root = std::fs::canonicalize(&st.cfg.data_root)?;
+    if !safe.starts_with(&root) {
+        return Err(WebError {
+            status: StatusCode::FORBIDDEN,
+            detail: "Invalid storage path".into(),
+        });
+    }
+    let file = tokio::fs::File::open(safe).await?;
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let fname = format!(
+        "document-{}-v{}.{}",
+        id,
+        doc.version,
+        doc.relative_path.rsplit('.').next().unwrap_or("bin")
+    );
+    let response = Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", fname),
+        )
         .body(Body::from_stream(stream))?;
     Ok(response)
 }
-#[derive(Deserialize,Default)]struct ReportQuery{#[serde(default)]draft:bool,run_id:Option<i64>}
-async fn report(State(st):State<Shared>,Path((id,fmt)):Path<(i64,String)>,Query(query):Query<ReportQuery>)->WebResult<Response>{
-    if !["xlsx","docx","pdf"].contains(&fmt.as_str()){return Err(WebError::bad("Unknown report format"));}
-    let _=repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    let runs=repo::runs(&st.db,id).await?;
-    let run=if let Some(want)=query.run_id {runs.iter().find(|r|r.id==want)}else{runs.first()};
-    let run=run.ok_or_else(WebError::not_found)?;
-    let all=repo::findings(&st.db,run.id).await?;
-    let filtered:Vec<Finding>=all.into_iter().filter(|f|query.draft || ["confirmed","resolved"].contains(&f.review_status.as_str())).collect();
-    let fmt_for_task=fmt.clone();
-    let temp_root=st.cfg.temp_root.clone();
-    let output=tokio::task::spawn_blocking(move||->Result<Vec<u8>>{
-        match fmt_for_task.as_str(){"xlsx"=>reports::xlsx(&filtered),"docx"=>reports::docx(&filtered),"pdf"=>reports::pdf(&filtered,&temp_root),_=>unreachable!()}
-    }).await??;
-    let mime=match fmt.as_str(){"xlsx"=>"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","docx"=>"application/vnd.openxmlformats-officedocument.wordprocessingml.document","pdf"=>"application/pdf",_=>"application/octet-stream"};
-    Ok(Response::builder().header(header::CONTENT_TYPE,mime)
-        .header(header::CONTENT_DISPOSITION,format!("attachment; filename=\"findings-{}-{}.{}\"",id,run.id,fmt))
+#[derive(Deserialize, Default)]
+struct ReportQuery {
+    #[serde(default)]
+    draft: bool,
+    run_id: Option<i64>,
+}
+async fn report(
+    State(st): State<Shared>,
+    Path((id, fmt)): Path<(i64, String)>,
+    Query(query): Query<ReportQuery>,
+) -> WebResult<Response> {
+    if !["xlsx", "docx", "pdf"].contains(&fmt.as_str()) {
+        return Err(WebError::bad("Unknown report format"));
+    }
+    let _ = repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let runs = repo::runs(&st.db, id).await?;
+    let run = if let Some(want) = query.run_id {
+        runs.iter().find(|r| r.id == want)
+    } else {
+        runs.first()
+    };
+    let run = run.ok_or_else(WebError::not_found)?;
+    let all = repo::findings(&st.db, run.id).await?;
+    let filtered: Vec<Finding> = all
+        .into_iter()
+        .filter(|f| query.draft || ["confirmed", "resolved"].contains(&f.review_status.as_str()))
+        .collect();
+    let fmt_for_task = fmt.clone();
+    let temp_root = st.cfg.temp_root.clone();
+    let output = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+        match fmt_for_task.as_str() {
+            "xlsx" => reports::xlsx(&filtered),
+            "docx" => reports::docx(&filtered),
+            "pdf" => reports::pdf(&filtered, &temp_root),
+            _ => unreachable!(),
+        }
+    })
+    .await??;
+    let mime = match fmt.as_str() {
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    };
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, mime)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!(
+                "attachment; filename=\"findings-{}-{}.{}\"",
+                id, run.id, fmt
+            ),
+        )
         .body(Body::from(output))?)
 }
 
-#[derive(Deserialize,Default)]
-struct OcrJobQuery {package_id:Option<i64>,status:Option<String>}
+#[derive(Deserialize, Default)]
+struct OcrJobQuery {
+    package_id: Option<i64>,
+    status: Option<String>,
+}
 
-fn status_ru(status:&str)->&'static str {
+fn status_ru(status: &str) -> &'static str {
     match status {
-        "pending"=>"В очереди",
-        "running"=>"Выполняется",
-        "done"=>"Готово",
-        "partial"=>"Частично / ручная проверка",
-        "failed"=>"Ошибка",
-        "cancelled"=>"Отменено",
-        _=>"Неизвестно"
+        "pending" => "В очереди",
+        "running" => "Выполняется",
+        "done" => "Готово",
+        "partial" => "Частично / ручная проверка",
+        "failed" => "Ошибка",
+        "cancelled" => "Отменено",
+        _ => "Неизвестно",
     }
 }
-async fn jobs_markup(st:&Shared,package_id:Option<i64>,status:Option<&str>)->WebResult<String>{
-    let jobs=ocr_jobs::jobs_filtered(&st.db,package_id,status,150).await?;
-    if jobs.is_empty(){return Ok("<p class=muted>Заданий пока нет. Выбери документ и нажми «Повторить OCR».</p>".into());}
-    let mut html=String::new();
+async fn jobs_markup(
+    st: &Shared,
+    package_id: Option<i64>,
+    status: Option<&str>,
+) -> WebResult<String> {
+    let jobs = ocr_jobs::jobs_filtered(&st.db, package_id, status, 150).await?;
+    if jobs.is_empty() {
+        return Ok(
+            "<p class=muted>Заданий пока нет. Выбери документ и нажми «Повторить OCR».</p>".into(),
+        );
+    }
+    let mut html = String::new();
     for job in jobs {
-        let filename:Option<(String,)>=sqlx::query_as("SELECT relative_path FROM documents WHERE id=$1")
-            .bind(job.document_id).fetch_optional(&st.db).await?;
-        let name=filename.map(|x|x.0).unwrap_or_else(||format!("Документ #{}",job.document_id));
-        let class=match job.status.as_str(){"failed"=>"job-failed","done"=>"job-done","partial"=>"job-partial","running"=>"job-running",_=>""};
+        let filename: Option<(String,)> =
+            sqlx::query_as("SELECT relative_path FROM documents WHERE id=$1")
+                .bind(job.document_id)
+                .fetch_optional(&st.db)
+                .await?;
+        let name = filename
+            .map(|x| x.0)
+            .unwrap_or_else(|| format!("Документ #{}", job.document_id));
+        let class = match job.status.as_str() {
+            "failed" => "job-failed",
+            "done" => "job-done",
+            "partial" => "job-partial",
+            "running" => "job-running",
+            _ => "",
+        };
         html.push_str(&format!("<div class='job {class}' data-document-id='{}' data-job-status='{}'><div class=row><b>#{} — {}</b><span class=chip>{}</span><small>Обновлено: {}</small></div><p>{}</p>",
             job.document_id,h(&job.status),job.id,h(&name),status_ru(&job.status),job.updated_at.format("%d.%m %H:%M:%S UTC"),h(&job.message)));
-        if job.total_steps>0 {
-            html.push_str(&format!("<p><progress value='{}' max='{}'></progress> {} / {} · этап {}</p>",job.current_step.clamp(0,job.total_steps),job.total_steps,job.current_step,job.total_steps,h(&job.stage)));
-        }else {html.push_str(&format!("<p><small>Этап: {}</small></p>",h(&job.stage)));}
-        if !job.error_message.is_empty(){html.push_str(&format!("<p class=warn>Ошибка: {}</p>",h(&job.error_message)));}
-        if job.status=="pending" {
+        if job.total_steps > 0 {
+            html.push_str(&format!(
+                "<p><progress value='{}' max='{}'></progress> {} / {} · этап {}</p>",
+                job.current_step.clamp(0, job.total_steps),
+                job.total_steps,
+                job.current_step,
+                job.total_steps,
+                h(&job.stage)
+            ));
+        } else {
+            html.push_str(&format!("<p><small>Этап: {}</small></p>", h(&job.stage)));
+        }
+        if !job.error_message.is_empty() {
+            html.push_str(&format!(
+                "<p class=warn>Ошибка: {}</p>",
+                h(&job.error_message)
+            ));
+        }
+        if job.status == "pending" {
             html.push_str(&format!("<form method=post action='/ocr/jobs/{}/cancel'>{}<button class=warnbutton>Отменить ожидание</button></form>",job.id,hidden(&st.csrf)));
-        } else if job.status!="running" {
+        } else if job.status != "running" {
             let current:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM documents d WHERE d.id=$1 AND d.is_present=true AND NOT EXISTS (SELECT 1 FROM documents newer WHERE newer.package_id=d.package_id AND newer.relative_path=d.relative_path AND newer.version>d.version))")
                 .bind(job.document_id).fetch_one(&st.db).await?;
-            if current {html.push_str(&format!("<form method=post action='/documents/{}/reprocess'>{}<button class=secondary>Повторить OCR документа</button></form>",job.document_id,hidden(&st.csrf)));}
+            if current {
+                html.push_str(&format!("<form method=post action='/documents/{}/reprocess'>{}<button class=secondary>Повторить OCR документа</button></form>",job.document_id,hidden(&st.csrf)));
+            }
         }
-        let events=ocr_jobs::recent_events(&st.db,job.id,15).await?;
-        if !events.is_empty(){
-            html.push_str(&format!("<details data-job='{}'><summary>Этапы и сообщения</summary><table>",job.id));
-            html.push_str("<tr><th>Время (UTC)</th><th>Этап</th><th>Прогресс</th><th>Сообщение</th></tr>");
+        let events = ocr_jobs::recent_events(&st.db, job.id, 15).await?;
+        if !events.is_empty() {
+            html.push_str(&format!(
+                "<details data-job='{}'><summary>Этапы и сообщения</summary><table>",
+                job.id
+            ));
+            html.push_str(
+                "<tr><th>Время (UTC)</th><th>Этап</th><th>Прогресс</th><th>Сообщение</th></tr>",
+            );
             for event in events {
-                html.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}/{}</td><td>{}</td></tr>",
-                    event.created_at.format("%H:%M:%S"),h(&event.stage),event.current_step,event.total_steps,h(&event.message)));
+                html.push_str(&format!(
+                    "<tr><td>{}</td><td>{}</td><td>{}/{}</td><td>{}</td></tr>",
+                    event.created_at.format("%H:%M:%S"),
+                    h(&event.stage),
+                    event.current_step,
+                    event.total_steps,
+                    h(&event.message)
+                ));
             }
             html.push_str("</table></details>");
         }
@@ -1646,15 +3363,25 @@ async fn jobs_markup(st:&Shared,package_id:Option<i64>,status:Option<&str>)->Web
     Ok(html)
 }
 
-async fn ocr_jobs_fragment(State(st):State<Shared>,Query(q):Query<OcrJobQuery>)->WebResult<Html<String>>{
-    Ok(Html(jobs_markup(&st,q.package_id,q.status.as_deref()).await?))
+async fn ocr_jobs_fragment(
+    State(st): State<Shared>,
+    Query(q): Query<OcrJobQuery>,
+) -> WebResult<Html<String>> {
+    Ok(Html(
+        jobs_markup(&st, q.package_id, q.status.as_deref()).await?,
+    ))
 }
-async fn ocr_jobs_json(State(st):State<Shared>,Query(q):Query<OcrJobQuery>)->WebResult<Json<Vec<ocr_jobs::OcrJob>>>{
-    Ok(Json(ocr_jobs::jobs(&st.db,q.package_id,100).await?))
+async fn ocr_jobs_json(
+    State(st): State<Shared>,
+    Query(q): Query<OcrJobQuery>,
+) -> WebResult<Json<Vec<ocr_jobs::OcrJob>>> {
+    Ok(Json(ocr_jobs::jobs(&st.db, q.package_id, 100).await?))
 }
-async fn ocr_status_json(State(st):State<Shared>)->WebResult<Json<serde_json::Value>>{
-    let counts:Vec<(String,i64)>=sqlx::query_as("SELECT status,count(*) FROM ocr_jobs GROUP BY status ORDER BY status")
-        .fetch_all(&st.db).await?;
+async fn ocr_status_json(State(st): State<Shared>) -> WebResult<Json<serde_json::Value>> {
+    let counts: Vec<(String, i64)> =
+        sqlx::query_as("SELECT status,count(*) FROM ocr_jobs GROUP BY status ORDER BY status")
+            .fetch_all(&st.db)
+            .await?;
     Ok(Json(serde_json::json!({
         "app_version":env!("CARGO_PKG_VERSION"),"ocr_mode":st.cfg.ocr_mode,
         "data_root":st.cfg.data_root.to_string_lossy(),
@@ -1671,108 +3398,214 @@ async fn ocr_status_json(State(st):State<Shared>)->WebResult<Json<serde_json::Va
     })))
 }
 
-async fn diagnostics(State(st):State<Shared>)->WebResult<Html<String>>{
-    let active_root=contractor::selected_root(&st).await?;
+async fn diagnostics(State(st): State<Shared>) -> WebResult<Html<String>> {
+    let active_root = contractor::selected_root(&st).await?;
     let stats:Vec<(String,i64)>=sqlx::query_as(
         "SELECT CASE WHEN recognition_status LIKE 'error:%' THEN 'error' ELSE recognition_status END,
          count(*) FROM documents d WHERE d.is_present=true
          AND NOT EXISTS(SELECT 1 FROM documents newer WHERE newer.package_id=d.package_id
          AND newer.relative_path=d.relative_path AND newer.version>d.version)
          GROUP BY 1 ORDER BY 1").fetch_all(&st.db).await?;
-    let queue_counts:Vec<(String,i64)>=sqlx::query_as("SELECT status,count(*) FROM ocr_jobs GROUP BY status ORDER BY status")
-        .fetch_all(&st.db).await?;
-    let last_errors:Vec<(i64,String,String)>=sqlx::query_as(
+    let queue_counts: Vec<(String, i64)> =
+        sqlx::query_as("SELECT status,count(*) FROM ocr_jobs GROUP BY status ORDER BY status")
+            .fetch_all(&st.db)
+            .await?;
+    let last_errors: Vec<(i64, String, String)> = sqlx::query_as(
         "SELECT id,relative_path,recognition_status FROM documents WHERE is_present=true
-         AND recognition_status LIKE 'error:%' ORDER BY id DESC LIMIT 15")
-        .fetch_all(&st.db).await?;
+         AND recognition_status LIKE 'error:%' ORDER BY id DESC LIMIT 15",
+    )
+    .fetch_all(&st.db)
+    .await?;
     let mut body=String::from("<h1>Диагностика системы и OCR</h1><p>Здесь отображаются фактические настройки запуска, очередь и события. API-ключ и содержимое документов в журнал не записываются.</p>");
-    body.push_str("<article><h2>Компоненты</h2><table><tr><th>Компонент</th><th>Состояние</th></tr>");
-    body.push_str(&format!("<tr><td>Приложение</td><td>v{} · порт {}</td></tr>",env!("CARGO_PKG_VERSION"),h(&st.cfg.listen)));
+    body.push_str(
+        "<article><h2>Компоненты</h2><table><tr><th>Компонент</th><th>Состояние</th></tr>",
+    );
+    body.push_str(&format!(
+        "<tr><td>Приложение</td><td>v{} · порт {}</td></tr>",
+        env!("CARGO_PKG_VERSION"),
+        h(&st.cfg.listen)
+    ));
     body.push_str(&format!("<tr><td>Локальный архив DATA_ROOT</td><td>{}</td></tr><tr><td>Временные файлы TEMP_ROOT</td><td>{}</td></tr>",
         h(&st.cfg.data_root.to_string_lossy()),h(&st.cfg.temp_root.to_string_lossy())));
     body.push_str("<tr><td>PostgreSQL</td><td>Подключена (данные получены)</td></tr><tr><td>Synology</td><td>Хранилище ZIP и проектных документов. Подключение проверяется при прямой операции; обход папок отключён.</td></tr>");
     body.push_str("<tr><td>Импорт ИД</td><td>По событию загрузки ZIP через ID-Control. Периодическое и ручное сканирование Synology отключено.</td></tr>");
     body.push_str(&format!("<tr><td>Источник Synology</td><td>Корень: <code>{}</code><br>Папка без вложенного имени ЖК: <code>{}</code><br>Вид работ по умолчанию: <code>{}</code><p><a href='/administration'>Настроить привязку папок к ЖК</a></p></td></tr>",
         h(&active_root),h(&st.cfg.synology_project_name),h(&st.cfg.synology_default_work)));
-    let model_check=crate::local_ocr::ensure_models(&st.cfg.local_ocr_model_dir);
-    body.push_str(&format!("<tr><td>OCR режим</td><td><b>{}</b> · локальные ONNX-модели: {} · путь {}</td></tr>",
-        h(&st.cfg.ocr_mode),if model_check.is_ok(){"НАЙДЕНЫ"}else{"НЕ УСТАНОВЛЕНЫ"},h(&st.cfg.local_ocr_model_dir.to_string_lossy())));
-    if let Err(error)=model_check {body.push_str(&format!("<tr><td>Проверка моделей</td><td>{}</td></tr>",h(&error.to_string())));}
+    let model_check = crate::local_ocr::ensure_models(&st.cfg.local_ocr_model_dir);
+    body.push_str(&format!(
+        "<tr><td>OCR режим</td><td><b>{}</b> · локальные ONNX-модели: {} · путь {}</td></tr>",
+        h(&st.cfg.ocr_mode),
+        if model_check.is_ok() {
+            "НАЙДЕНЫ"
+        } else {
+            "НЕ УСТАНОВЛЕНЫ"
+        },
+        h(&st.cfg.local_ocr_model_dir.to_string_lossy())
+    ));
+    if let Err(error) = model_check {
+        body.push_str(&format!(
+            "<tr><td>Проверка моделей</td><td>{}</td></tr>",
+            h(&error.to_string())
+        ));
+    }
     body.push_str(&format!("<tr><td>Параллельный OCR</td><td>Максимум {} ONNX-потоков одновременно, до {} страниц PDF, ограниченная очередь страниц (2 на поток). Для одного PDF используется несколько потоков; для одностраничного файла — один.</td></tr>",
         st.cfg.ocr_page_workers,st.cfg.ocr_max_pages));
 
     body.push_str(&format!("<tr><td>VibeCode OCR</td><td>enabled={} · key_present={} · HTTP timeout={} сек./попытку · PDF max={} стр.</td></tr>",
         st.cfg.vibe_ocr_enabled,st.cfg.vibe_ocr_key.is_some(),st.cfg.vibe_ocr_timeout,st.cfg.ocr_max_pages));
-    let class_counts:Vec<(String,i64)>=sqlx::query_as(
-        "SELECT status,count(*) FROM classification_jobs GROUP BY status ORDER BY status")
-        .fetch_all(&st.db).await?;
-    let classifier_status=class_counts.iter().map(|(status,n)|format!("{}: {}",status,n)).collect::<Vec<_>>().join(", ");
+    let class_counts: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT status,count(*) FROM classification_jobs GROUP BY status ORDER BY status",
+    )
+    .fetch_all(&st.db)
+    .await?;
+    let classifier_status = class_counts
+        .iter()
+        .map(|(status, n)| format!("{}: {}", status, n))
+        .collect::<Vec<_>>()
+        .join(", ");
     body.push_str(&format!("<tr><td>ИИ-классификатор</td><td>VibeCode: {} · GigaCowork-адаптер: {} · очередь: {}</td></tr>",
         if classification::configured(&st.cfg,"vibecode") {"настроен"} else {"не настроен"},
         if classification::configured(&st.cfg,"gigacowork") {"настроен"} else {"не настроен"},
         h(&classifier_status)));
-    body.push_str(&format!("<tr><td>Synology TLS</td><td>{}</td></tr>",if st.cfg.synology_verify_tls{"Проверка сертификата включена"}else{"ВНИМАНИЕ: проверка сертификата отключена"}));
+    body.push_str(&format!(
+        "<tr><td>Synology TLS</td><td>{}</td></tr>",
+        if st.cfg.synology_verify_tls {
+            "Проверка сертификата включена"
+        } else {
+            "ВНИМАНИЕ: проверка сертификата отключена"
+        }
+    ));
     body.push_str("</table></article><article><h2>Документы: результат извлечения</h2><table><tr><th>Статус</th><th>Количество</th></tr>");
-    for (status,count) in stats {body.push_str(&format!("<tr><td>{}</td><td>{count}</td></tr>",h(&status)));}
+    for (status, count) in stats {
+        body.push_str(&format!("<tr><td>{}</td><td>{count}</td></tr>", h(&status)));
+    }
     body.push_str("</table><p class=muted>Статистика документов показывает текущие версии. Счётчики очереди ниже — все исторические задания, включая повторные запуски.</p><h3>Последние ошибки</h3><table><tr><th>Документ</th><th>Ошибка</th><th>Действие</th></tr>");
-    for (id,name,status) in last_errors {
+    for (id, name, status) in last_errors {
         body.push_str(&format!("<tr><td>{}</td><td>{}</td><td><form method=post action='/documents/{id}/reprocess'>{}<button>Повторить OCR</button></form></td></tr>",h(&name),h(&status),hidden(&st.csrf)));
     }
     body.push_str("</table></article><article id=ocr-queue><h2>Очередь OCR</h2><p>Нажмите на статус, чтобы открыть список заданий и их ошибки:</p><div class=chips>");
     body.push_str("<a class='chip ocr-status-choice active' data-ocr-status='' href='#ocr-queue'>Все последние задания</a>");
-    for (state,count) in queue_counts {body.push_str(&format!("<a class='chip ocr-status-choice' data-ocr-status='{}' href='#ocr-queue'>{}: {count}</a> ",h(&state),status_ru(&state)));}
+    for (state, count) in queue_counts {
+        body.push_str(&format!("<a class='chip ocr-status-choice' data-ocr-status='{}' href='#ocr-queue'>{}: {count}</a> ",h(&state),status_ru(&state)));
+    }
     body.push_str(&format!("</div><div class=toolbox><form method=post action='/diagnostics/reprocess-errors'>{}<button class=warnbutton onclick=\"return confirm('Повторить OCR для всех текущих файлов с ошибкой, частичным результатом или ручной проверкой?')\">Повторить OCR всех проблемных документов</button></form></div><small id=ocr-poll-state></small><div id=global-ocr-jobs class='ocr-live' data-url='/ocr/jobs/fragment'>Загрузка журнала...</div></article>",hidden(&st.csrf)));
     body.push_str(r#"<script>const queued=new URLSearchParams(location.search).get('queued');if(queued!==null){const box=document.querySelector('#ocr-queue');if(box)box.insertAdjacentHTML('afterbegin','<p class=notice>Добавлено заданий OCR: '+Number(queued)+'</p>');}document.addEventListener('click',function(ev){let a=ev.target.closest('[data-ocr-status]');if(!a)return;ev.preventDefault();let q=a.dataset.ocrStatus||'';let list=document.getElementById('global-ocr-jobs');if(!list)return;document.querySelectorAll('.ocr-status-choice').forEach(el=>el.classList.toggle('active',el===a));list.dataset.url='/ocr/jobs/fragment'+(q?'?status='+encodeURIComponent(q):'');list.innerHTML='Загрузка...';fetch(list.dataset.url,{credentials:'same-origin',cache:'no-store'}).then(r=>{if(!r.ok)throw Error('HTTP '+r.status);return r.text()}).then(html=>{list.innerHTML=html}).catch(e=>{list.textContent='Не удалось загрузить задания: '+e.message});list.scrollIntoView({behavior:'smooth',block:'start'});});</script>"#);
     body.push_str("<article><h2>Команды диагностики</h2><pre>cargo run -- --ocr-status\ncargo run -- --check-vibe-ocr tests\\fixtures\\sample.tif\n$env:RUST_LOG='id_control_axum=debug,info'\ncargo run</pre><p>При работающем сервере: <a href='/api/ocr/status'>JSON состояния</a> · <a href='/api/ocr/jobs'>JSON заданий</a>. Пароли и ключи в отчёт не включаются.</p></article>");
-    Ok(layout("Диагностика",body))
+    Ok(layout("Диагностика", body))
 }
 
-
-async fn diagnostics_reprocess_errors(State(st):State<Shared>,Extension(actor):Extension<access::Principal>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    if !actor.superuser {return Err(WebError::forbidden());}
+async fn diagnostics_reprocess_errors(
+    State(st): State<Shared>,
+    Extension(actor): Extension<access::Principal>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    if !actor.superuser {
+        return Err(WebError::forbidden());
+    }
     let packages:Vec<(i64,)>=sqlx::query_as("SELECT DISTINCT d.package_id FROM documents d WHERE d.is_present=true AND (d.recognition_status LIKE 'error:%' OR d.recognition_status IN ('partial','manual')) AND NOT EXISTS (SELECT 1 FROM documents newer WHERE newer.package_id=d.package_id AND newer.relative_path=d.relative_path AND newer.version>d.version) ORDER BY d.package_id")
         .fetch_all(&st.db).await?;
-    let mut queued=0usize;
-    let actor_name=format!("bitrix:{}:{}",actor.member,actor.user_id);
-    for (pkg,) in packages{queued+=ocr_jobs::enqueue_package(&st.db,pkg,false,&actor_name).await?;}
-    repo::audit(&st.db,&actor_name,"ocr_global_errors_queued",&format!("queued={queued}")).await?;
-    Ok(Redirect::to(&format!("/diagnostics?queued={queued}#ocr-queue")))
+    let mut queued = 0usize;
+    let actor_name = format!("bitrix:{}:{}", actor.member, actor.user_id);
+    for (pkg,) in packages {
+        queued += ocr_jobs::enqueue_package(&st.db, pkg, false, &actor_name).await?;
+    }
+    repo::audit(
+        &st.db,
+        &actor_name,
+        "ocr_global_errors_queued",
+        &format!("queued={queued}"),
+    )
+    .await?;
+    Ok(Redirect::to(&format!(
+        "/diagnostics?queued={queued}#ocr-queue"
+    )))
 }
-async fn reprocess_document(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    let doc=repo::document(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    let queued=ocr_jobs::enqueue_document(&st.db,id,&st.cfg.app_user).await.map_err(|e|WebError::bad(e.to_string()))?;
-    if let Some(job)=queued {repo::audit(&st.db,&st.cfg.app_user,"ocr_single_queued",&format!("doc={id} job={job}")).await?;}
-    Ok(Redirect::to(&format!("/packages/{}",doc.package_id)))
+async fn reprocess_document(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    let doc = repo::document(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let queued = ocr_jobs::enqueue_document(&st.db, id, &st.cfg.app_user)
+        .await
+        .map_err(|e| WebError::bad(e.to_string()))?;
+    if let Some(job) = queued {
+        repo::audit(
+            &st.db,
+            &st.cfg.app_user,
+            "ocr_single_queued",
+            &format!("doc={id} job={job}"),
+        )
+        .await?;
+    }
+    Ok(Redirect::to(&format!("/packages/{}", doc.package_id)))
 }
-async fn reprocess_package_errors(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    let n=ocr_jobs::enqueue_package(&st.db,id,false,&st.cfg.app_user).await?;
-    repo::audit(&st.db,&st.cfg.app_user,"ocr_package_errors_queued",&format!("package={id} jobs={n}")).await?;
+async fn reprocess_package_errors(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let n = ocr_jobs::enqueue_package(&st.db, id, false, &st.cfg.app_user).await?;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "ocr_package_errors_queued",
+        &format!("package={id} jobs={n}"),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}")))
 }
-async fn reprocess_package_all(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    repo::package(&st.db,id).await.map_err(|_|WebError::not_found())?;
-    let n=ocr_jobs::enqueue_package(&st.db,id,true,&st.cfg.app_user).await?;
-    repo::audit(&st.db,&st.cfg.app_user,"ocr_package_all_queued",&format!("package={id} jobs={n}")).await?;
+async fn reprocess_package_all(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    repo::package(&st.db, id)
+        .await
+        .map_err(|_| WebError::not_found())?;
+    let n = ocr_jobs::enqueue_package(&st.db, id, true, &st.cfg.app_user).await?;
+    repo::audit(
+        &st.db,
+        &st.cfg.app_user,
+        "ocr_package_all_queued",
+        &format!("package={id} jobs={n}"),
+    )
+    .await?;
     Ok(Redirect::to(&format!("/packages/{id}")))
 }
-async fn cancel_ocr_job(State(st):State<Shared>,Path(id):Path<i64>,Form(form):Form<CsrfForm>)->WebResult<Redirect>{
-    verify(&form.csrf,&st)?;
-    let pkg:Option<(i64,)>=sqlx::query_as("SELECT package_id FROM ocr_jobs WHERE id=$1").bind(id).fetch_optional(&st.db).await?;
-    let pkg=pkg.ok_or_else(WebError::not_found)?.0;
-    let _=ocr_jobs::cancel_pending(&st.db,id).await?;
+async fn cancel_ocr_job(
+    State(st): State<Shared>,
+    Path(id): Path<i64>,
+    Form(form): Form<CsrfForm>,
+) -> WebResult<Redirect> {
+    verify(&form.csrf, &st)?;
+    let pkg: Option<(i64,)> = sqlx::query_as("SELECT package_id FROM ocr_jobs WHERE id=$1")
+        .bind(id)
+        .fetch_optional(&st.db)
+        .await?;
+    let pkg = pkg.ok_or_else(WebError::not_found)?.0;
+    let _ = ocr_jobs::cancel_pending(&st.db, id).await?;
     Ok(Redirect::to(&format!("/packages/{pkg}")))
 }
 
-async fn health(State(st):State<Shared>)->WebResult<Json<serde_json::Value>>{
-    let approved:(i64,) = sqlx::query_as("SELECT count(*) FROM normative_rules WHERE approval_status='approved'")
-        .fetch_one(&st.db).await?;
-    Ok(Json(serde_json::json!({"synology_connected":serde_json::Value::Null,
+async fn health(State(st): State<Shared>) -> WebResult<Json<serde_json::Value>> {
+    let approved: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM normative_rules WHERE approval_status='approved'")
+            .fetch_one(&st.db)
+            .await?;
+    Ok(Json(
+        serde_json::json!({"synology_connected":serde_json::Value::Null,
         "synology_mode":"direct_upload_only","scan_enabled":false,
         "approved_normative_rules":approved.0,"normative_rules_configured":approved.0>0,
-        "app_version":env!("CARGO_PKG_VERSION")})))
+        "app_version":env!("CARGO_PKG_VERSION")}),
+    ))
 }

@@ -1,102 +1,139 @@
-mod ai;
 mod access;
-mod portal;
-mod project_sources;
-mod project_requirements;
-mod semantic;
+mod ai;
 mod block1;
-mod checklist_result;
 mod catalog;
+mod checklist_result;
 mod classification;
 mod config;
+mod contractor;
 mod docs;
 mod engine;
-mod models;
 mod local_ocr;
+mod models;
 mod norms;
 mod ocr_jobs;
+mod portal;
+mod project_requirements;
+mod project_sources;
 mod repo;
-mod reprocess;
 mod reports;
+mod reprocess;
 mod scanner;
+mod semantic;
 mod synology;
+mod ui_version;
 mod vibecode;
 mod web;
-mod ui_version;
-mod contractor;
 
 use anyhow::Result;
 use rand::RngCore;
 use sqlx::postgres::PgPoolOptions;
 use std::{sync::Arc, time::Duration};
-use tokio::{net::TcpListener,signal};
-use tracing::{error,info};
+use tokio::{net::TcpListener, signal};
+use tracing::{error, info};
 
 #[tokio::main]
-async fn main()->Result<()> {
-    tracing_subscriber::fmt().with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_|"id_control_axum=info,tower_http=info,info".into())
-    ).init();
-    let debug_login=std::env::args().any(|arg|arg=="--debug-login");
-    if debug_login { tracing::warn!("DEBUG LOGIN ACTIVE: Basic admin/super123; do not expose this mode to the Internet"); }
-    let cfg=config::Config::load()?;
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "id_control_axum=info,tower_http=info,info".into()),
+        )
+        .init();
+    let debug_login = std::env::args().any(|arg| arg == "--debug-login");
+    if debug_login {
+        tracing::warn!(
+            "DEBUG LOGIN ACTIVE: Basic admin/super123; do not expose this mode to the Internet"
+        );
+    }
+    let cfg = config::Config::load()?;
     info!(data_root=%cfg.data_root.display(),temp_root=%cfg.temp_root.display(),models=%cfg.local_ocr_model_dir.display(),"Local Windows/project storage paths resolved");
     // Validate the local semantic model without touching PostgreSQL or Synology.
-    if std::env::args().any(|arg|arg=="--check-semantic-model") {
+    if std::env::args().any(|arg| arg == "--check-semantic-model") {
         semantic::check_cli().await?;
         return Ok(());
     }
     // Stand-alone OCR test (no PostgreSQL or Synology required).
-    if std::env::args().any(|arg|arg=="--check-local-models") {
+    if std::env::args().any(|arg| arg == "--check-local-models") {
         local_ocr::ensure_models(&cfg.local_ocr_model_dir)?;
-        println!("Локальные модели найдены: {}",cfg.local_ocr_model_dir.display());
+        println!(
+            "Локальные модели найдены: {}",
+            cfg.local_ocr_model_dir.display()
+        );
         return Ok(());
     }
     // Test one local JPG/PNG/TIFF/PDF without using PostgreSQL or Synology.
-    let args:Vec<String>=std::env::args().collect();
-    if let Some(pos)=args.iter().position(|a|a=="--check-ocr" || a=="--check-vibe-ocr" || a=="--check-local-ocr") {
-        let file=args.get(pos+1).ok_or_else(||anyhow::anyhow!("Usage: --check-ocr path/to/image.tif"))?;
-        let mut test_config=cfg.clone();
-        if args[pos]=="--check-vibe-ocr" {test_config.ocr_mode="vibecode".into();}
-        if args[pos]=="--check-local-ocr" {test_config.ocr_mode="local".into();}
-        println!("OCR test: mode={} file={}",test_config.ocr_mode,file);
-        let callback:docs::ProgressCallback=std::sync::Arc::new(|event|{
-            println!("  [{}] {}/{}: {}",event.stage,event.current,event.total,event.message);
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args
+        .iter()
+        .position(|a| a == "--check-ocr" || a == "--check-vibe-ocr" || a == "--check-local-ocr")
+    {
+        let file = args
+            .get(pos + 1)
+            .ok_or_else(|| anyhow::anyhow!("Usage: --check-ocr path/to/image.tif"))?;
+        let mut test_config = cfg.clone();
+        if args[pos] == "--check-vibe-ocr" {
+            test_config.ocr_mode = "vibecode".into();
+        }
+        if args[pos] == "--check-local-ocr" {
+            test_config.ocr_mode = "local".into();
+        }
+        println!("OCR test: mode={} file={}", test_config.ocr_mode, file);
+        let callback: docs::ProgressCallback = std::sync::Arc::new(|event| {
+            println!(
+                "  [{}] {}/{}: {}",
+                event.stage, event.current, event.total, event.message
+            );
         });
-        let result=docs::extract_with_progress(std::path::Path::new(file),test_config.ocr_max_pages,&test_config,Some(callback)).await;
-        println!("Recognition status: {}",result.status);
-        println!("EXTRACTED:\n{}",result.text);
-        if result.status.starts_with("error:") {anyhow::bail!("OCR failed");}
+        let result = docs::extract_with_progress(
+            std::path::Path::new(file),
+            test_config.ocr_max_pages,
+            &test_config,
+            Some(callback),
+        )
+        .await;
+        println!("Recognition status: {}", result.status);
+        println!("EXTRACTED:\n{}", result.text);
+        if result.status.starts_with("error:") {
+            anyhow::bail!("OCR failed");
+        }
         return Ok(());
     }
     // Explicit connectivity check only: never traverse NAS folders or download files.
-    if std::env::args().any(|arg|arg=="--check-synology") {
-        let nas=synology::SynologyClient::new(&cfg)?;
-        let session=nas.connect().await?;
+    if std::env::args().any(|arg| arg == "--check-synology") {
+        let nas = synology::SynologyClient::new(&cfg)?;
+        let session = nas.connect().await?;
         session.logout().await;
         println!("Synology DSM authentication OK (folder scanning disabled).");
         return Ok(());
     }
-    let catalog=catalog::Catalog::load()?;
-    info!("Loaded {} work types and {} common errors",catalog.work_types.len(),catalog.errors.len());
-    let db=PgPoolOptions::new().max_connections(8).connect(&cfg.database_url).await?;
+    let catalog = catalog::Catalog::load()?;
+    info!(
+        "Loaded {} work types and {} common errors",
+        catalog.work_types.len(),
+        catalog.errors.len()
+    );
+    let db = PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&cfg.database_url)
+        .await?;
     // Versioned, checksummed SQLx migrations; prevents accidental reapplication.
     sqlx::migrate!("./migrations").run(&db).await?;
-    if std::env::args().any(|arg|arg=="--migrate-only") {
+    if std::env::args().any(|arg| arg == "--migrate-only") {
         println!("PostgreSQL migrations applied successfully");
         return Ok(());
     }
-    if std::env::args().any(|arg|arg=="--reclassify-existing") {
-        reprocess::classify_existing(&db,&catalog).await?;
+    if std::env::args().any(|arg| arg == "--reclassify-existing") {
+        reprocess::classify_existing(&db, &catalog).await?;
         return Ok(());
     }
-    if std::env::args().any(|arg|arg=="--ocr-status") {
-        ocr_jobs::print_status(&db,&cfg).await?;
+    if std::env::args().any(|arg| arg == "--ocr-status") {
+        ocr_jobs::print_status(&db, &cfg).await?;
         return Ok(());
     }
-    if std::env::args().any(|arg|arg=="--reprocess-errors" || arg=="--reprocess-all") {
-        let all=std::env::args().any(|arg|arg=="--reprocess-all");
-        reprocess::run(&db,&cfg,&catalog,all).await?;
+    if std::env::args().any(|arg| arg == "--reprocess-errors" || arg == "--reprocess-all") {
+        let all = std::env::args().any(|arg| arg == "--reprocess-all");
+        reprocess::run(&db, &cfg, &catalog, all).await?;
         return Ok(());
     }
 
@@ -117,11 +154,20 @@ async fn main()->Result<()> {
     classification::recover_interrupted(&db).await?;
     // Resume jobs interrupted by an application restart.
     sqlx::query("UPDATE ai_jobs SET status='pending', started_at=NULL WHERE status='running'")
-        .execute(&db).await?;
-    let mut bytes=[0u8;32];rand::thread_rng().fill_bytes(&mut bytes);
-    let csrf=hex::encode(bytes);
-    let nas=synology::SynologyClient::new(&cfg)?;
-    let st=Arc::new(web::AppState{cfg:cfg.clone(),db,catalog,nas,csrf,debug_login});
+        .execute(&db)
+        .await?;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let csrf = hex::encode(bytes);
+    let nas = synology::SynologyClient::new(&cfg)?;
+    let st = Arc::new(web::AppState {
+        cfg: cfg.clone(),
+        db,
+        catalog,
+        nas,
+        csrf,
+        debug_login,
+    });
     project_sources::recover_interrupted(&st).await?;
     semantic::recover(&st.db).await?;
     // A manual generation interrupted by a previous process crash is retryable.
@@ -129,56 +175,80 @@ async fn main()->Result<()> {
         .execute(&st.db).await?;
     // Backfill proposal candidates from previously OCR-completed project sources
     // without re-uploading or re-running OCR on originals.
-    let backfill=st.clone();
+    let backfill = st.clone();
     tokio::spawn(async move {
-        match sqlx::query_scalar::<_,i64>("SELECT id FROM projects").fetch_all(&backfill.db).await {
-            Ok(ids) => for id in ids {
-                if let Err(e)=project_requirements::refresh_project(&backfill.db,&backfill.catalog,id).await {
-                    tracing::error!(project_id=id,"Project requirements backfill failed: {e:#}");
+        match sqlx::query_scalar::<_, i64>("SELECT id FROM projects")
+            .fetch_all(&backfill.db)
+            .await
+        {
+            Ok(ids) => {
+                for id in ids {
+                    if let Err(e) =
+                        project_requirements::refresh_project(&backfill.db, &backfill.catalog, id)
+                            .await
+                    {
+                        tracing::error!(
+                            project_id = id,
+                            "Project requirements backfill failed: {e:#}"
+                        );
+                    }
                 }
-            },
-            Err(e)=>tracing::error!("Project requirements startup query failed: {e:#}"),
+            }
+            Err(e) => tracing::error!("Project requirements startup query failed: {e:#}"),
         }
     });
     // Synology is storage, not an ingestion source. No directory polling or NAS scan.
     // Uploaded files are registered directly from the authoritative contractor link.
-    let ocr_background=st.clone();
+    let ocr_background = st.clone();
     tokio::spawn(async move {
-        let mut interval=tokio::time::interval(Duration::from_secs(2));
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            if let Err(err)=ocr_jobs::process_next(&ocr_background.db,&ocr_background.cfg,&ocr_background.catalog).await {
+            if let Err(err) = ocr_jobs::process_next(
+                &ocr_background.db,
+                &ocr_background.cfg,
+                &ocr_background.catalog,
+            )
+            .await
+            {
                 error!("OCR background worker error: {err:#}");
             }
         }
     });
-    let classify_background=st.clone();
+    let classify_background = st.clone();
     tokio::spawn(async move {
-        let mut interval=tokio::time::interval(Duration::from_secs(3));
+        let mut interval = tokio::time::interval(Duration::from_secs(3));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            if let Err(e)=classification::process_next(&classify_background.db,&classify_background.cfg).await {
+            if let Err(e) =
+                classification::process_next(&classify_background.db, &classify_background.cfg)
+                    .await
+            {
                 error!("Classification worker error: {e:#}");
             }
         }
     });
-    let ai_background=st.clone();
+    let ai_background = st.clone();
     tokio::spawn(async move {
-        let mut interval=tokio::time::interval(Duration::from_secs(10));
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            if let Err(e)=ai::process_next_job(&ai_background).await {
+            if let Err(e) = ai::process_next_job(&ai_background).await {
                 error!("AI job runner error: {e:#}");
             }
         }
     });
-    let addr=cfg.listen.parse::<std::net::SocketAddr>()?;
+    let addr = cfg.listen.parse::<std::net::SocketAddr>()?;
     // `--debug-login` is an explicit operator choice; honor configured LISTEN on any interface.
-    let listener=TcpListener::bind(addr).await?;
+    let listener = TcpListener::bind(addr).await?;
     info!("Listening at http://{addr}; put HTTPS reverse proxy in front of Basic authentication");
-    axum::serve(listener,web::router(st)).with_graceful_shutdown(async{let _=signal::ctrl_c().await;}).await?;
+    axum::serve(listener, web::router(st))
+        .with_graceful_shutdown(async {
+            let _ = signal::ctrl_c().await;
+        })
+        .await?;
     Ok(())
 }

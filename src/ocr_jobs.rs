@@ -1,43 +1,42 @@
 //! DB-backed OCR queue, single claim per document, persisted progress.
 //! Only non-sensitive metadata is logged: no key, document text, or image bytes.
 use crate::{catalog::Catalog, config::Config, docs, engine, repo};
-use anyhow::{anyhow, Context, Result, bail};
+use anyhow::{anyhow, bail, Context, Result};
 
-use chrono::{DateTime,Utc};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
-use sqlx::{FromRow,PgPool};
-use std::{path::{Path, PathBuf},  sync::Arc};
+use sqlx::{FromRow, PgPool};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::sync::mpsc;
-use tracing::{error,info,warn};
-
+use tracing::{error, info, warn};
 
 use chrono::NaiveDate;
 use regex::{Regex, RegexSet};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-
 //// Номер документа, дату документа, контрагента инн и название и нашего контрагента ИНН и название.
-/// 
-/// 
-/// 
-/// 
-/// 
-/// 
-/// 
-/// 
-/// 
-/// 
-/// 
+///
+///
+///
+///
+///
+///
+///
+///
+///
+///
+///
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecognizedField {
-
     DateDocum,
     NumberDocum,
     Name,
-    Inn
+    Inn,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Party {
@@ -47,38 +46,37 @@ pub struct Party {
     pub role: Option<String>,
 }
 
-
-#[derive(Debug,Clone,FromRow,Serialize)]
+#[derive(Debug, Clone, FromRow, Serialize)]
 pub struct OcrJob {
-    pub id:i64,
-    pub document_id:i64,
-    pub package_id:i64,
-    pub status:String,
-    pub stage:String,
-    pub current_step:i32,
-    pub total_steps:i32,
-    pub message:String,
-    pub error_message:String,
-    pub requested_by:String,
-    pub created_at:DateTime<Utc>,
-    pub started_at:Option<DateTime<Utc>>,
-    pub updated_at:DateTime<Utc>,
-    pub finished_at:Option<DateTime<Utc>>,
+    pub id: i64,
+    pub document_id: i64,
+    pub package_id: i64,
+    pub status: String,
+    pub stage: String,
+    pub current_step: i32,
+    pub total_steps: i32,
+    pub message: String,
+    pub error_message: String,
+    pub requested_by: String,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
 }
-#[derive(Debug,Clone,FromRow,Serialize)]
+#[derive(Debug, Clone, FromRow, Serialize)]
 pub struct OcrEvent {
-    pub id:i64,
-    pub job_id:i64,
-    pub created_at:DateTime<Utc>,
-    pub stage:String,
-    pub current_step:i32,
-    pub total_steps:i32,
-    pub message:String,
+    pub id: i64,
+    pub job_id: i64,
+    pub created_at: DateTime<Utc>,
+    pub stage: String,
+    pub current_step: i32,
+    pub total_steps: i32,
+    pub message: String,
 }
 const JOB_COLUMNS:&str="id,document_id,package_id,status,stage,current_step,total_steps,message,error_message,requested_by,created_at,started_at,updated_at,finished_at";
 
-pub fn needs_retry(status:&str)->bool {
-    status.starts_with("error:") || matches!(status,"manual"|"partial")
+pub fn needs_retry(status: &str) -> bool {
+    status.starts_with("error:") || matches!(status, "manual" | "partial")
 }
 
 fn re_inn() -> &'static Regex {
@@ -124,12 +122,9 @@ fn collect_numbers(text: &str) -> Vec<String> {
     out
 }
 
-
 fn re_org() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        Regex::new(r#"(?i)(ООО|АО|ПАО|ЗАО|ОАО|ИП)\s*[«"]\s*([^»\n]+?)\s*»"#).unwrap()
-    })
+    R.get_or_init(|| Regex::new(r#"(?i)(ООО|АО|ПАО|ЗАО|ОАО|ИП)\s*[«"]\s*([^»\n]+?)\s*»"#).unwrap())
 }
 
 fn re_role() -> &'static Regex {
@@ -162,7 +157,13 @@ pub fn render_pdf_bytes_to_pngs(pdf_bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
 
     let mut pages = Vec::new();
     for page in pdf.pages().iter() {
-        let pixmap = hayro::render(page, &cache, &interpreter, &render_settings, &pixmap_settings);
+        let pixmap = hayro::render(
+            page,
+            &cache,
+            &interpreter,
+            &render_settings,
+            &pixmap_settings,
+        );
         let mut png = Vec::new();
         PngEncoder::new(&mut png)
             .write_image(
@@ -177,15 +178,13 @@ pub fn render_pdf_bytes_to_pngs(pdf_bytes: &[u8]) -> Result<Vec<Vec<u8>>> {
     Ok(pages)
 }
 
-
-
 fn field_presence_set() -> &'static RegexSet {
     static S: OnceLock<RegexSet> = OnceLock::new();
     S.get_or_init(|| {
         RegexSet::new([
             r"(?i)[ИIНHNМMÉÈ]{2,3}[\s:№#\-]*\d{10,12}",
             r#"(?i)«?\d{1,2}»?\s+\w+[яь]\s+\d{4}"#,
-            r"\d{2}\.\d{2}\.\d{4}",                  // ← было (?<!\d)...(?!\d)
+            r"\d{2}\.\d{2}\.\d{4}", // ← было (?<!\d)...(?!\d)
             r"(?i)(?:№|N)\s*\d+",
             r#"(?i)(?:ООО|АО|ПАО|ЗАО|ОАО|ИП)\s*[«"]"#,
         ])
@@ -194,7 +193,6 @@ fn field_presence_set() -> &'static RegexSet {
 }
 
 // ---------- Коллекторы ----------
-
 
 fn month_from_rus(s: &str) -> Option<u32> {
     let base = s.to_lowercase();
@@ -241,7 +239,6 @@ fn collect_dates(text: &str) -> Vec<NaiveDate> {
     out
 }
 
-
 fn normalize_org_name(s: &str) -> String {
     s.replace("- ", "-")
         .replace(" -", "-")
@@ -262,10 +259,7 @@ fn collect_org_names(text: &str) -> Vec<String> {
 }
 
 // ---------- Публичный API ----------
-pub fn get_fields(
-    text: &str,
-    fields: &[RecognizedField],
-) -> HashMap<RecognizedField, Vec<String>> {
+pub fn get_fields(text: &str, fields: &[RecognizedField]) -> HashMap<RecognizedField, Vec<String>> {
     let mut out = HashMap::with_capacity(fields.len());
     for &field in fields {
         let values = match field {
@@ -275,10 +269,7 @@ pub fn get_fields(
                 .take(1)
                 .map(|d: NaiveDate| d.format("%d-%m-%Y").to_string())
                 .collect(),
-            RecognizedField::NumberDocum => collect_numbers(text)
-                .into_iter()
-                .take(1)
-                .collect(),
+            RecognizedField::NumberDocum => collect_numbers(text).into_iter().take(1).collect(),
             RecognizedField::Name => collect_org_names(text),
         };
         out.insert(field, values);
@@ -288,7 +279,9 @@ pub fn get_fields(
 pub fn pair_parties(text: &str, names: &[String], _inns: &[String]) -> Vec<Party> {
     let mut parties = Vec::new();
     for name in names {
-        let Some(pos) = text.find(name.as_str()) else { continue };
+        let Some(pos) = text.find(name.as_str()) else {
+            continue;
+        };
         let ctx_start = pos.saturating_sub(80);
         let ctx = &text[ctx_start..pos];
         let role = re_role().captures(ctx).map(|c| c[1].to_string());
@@ -300,7 +293,11 @@ pub fn pair_parties(text: &str, names: &[String], _inns: &[String]) -> Vec<Party
             (d.len() == 10 || d.len() == 12).then_some(d)
         });
 
-        parties.push(Party { name: name.clone(), inn, role });
+        parties.push(Party {
+            name: name.clone(),
+            inn,
+            role,
+        });
     }
     parties.sort_by(|a, b| a.name.cmp(&b.name));
     parties.dedup_by(|a, b| a.name == b.name);
@@ -332,7 +329,13 @@ pub fn render_pdf_bytes_to_png(pdf_bytes: &[u8]) -> Result<Vec<u8>> {
         y_scale: 2.0,
         bg_color: hayro::vello_cpu::color::palette::css::WHITE,
     };
-    let pixmap = hayro::render(page, &cache, &interpreter, &render_settings, &pixmap_settings);
+    let pixmap = hayro::render(
+        page,
+        &cache,
+        &interpreter,
+        &render_settings,
+        &pixmap_settings,
+    );
 
     let mut png = Vec::new();
     PngEncoder::new(&mut png)
@@ -347,13 +350,13 @@ pub fn render_pdf_bytes_to_png(pdf_bytes: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn recognize_bytes_to_text(img_bytes: Vec<u8>) -> Result<String> {
-    let pages = crate::local_ocr::recognize_pages(
-        vec![img_bytes],
-        PathBuf::from("models/ocr"),
-        1,
-        None,
-    )?;
-    Ok(pages.into_iter().map(|p| p.text).collect::<Vec<_>>().join("\n"))
+    let pages =
+        crate::local_ocr::recognize_pages(vec![img_bytes], PathBuf::from("models/ocr"), 1, None)?;
+    Ok(pages
+        .into_iter()
+        .map(|p| p.text)
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 pub fn parse_pdf_bytes(
@@ -368,14 +371,16 @@ pub fn parse_pdf_bytes(
             4, // параллельные OCR-потоки; для 5 страниц ~30–40 с
             None,
         )?;
-        pages.into_iter().map(|p| p.text).collect::<Vec<_>>().join("\n")
+        pages
+            .into_iter()
+            .map(|p| p.text)
+            .collect::<Vec<_>>()
+            .join("\n")
     } else {
         recognize_bytes_to_text(bytes.to_vec())?
     };
     Ok(get_fields(&text, fields))
 }
-
-
 
 fn collect_inns(text: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -395,26 +400,39 @@ fn collect_inns(text: &str) -> Vec<String> {
     out
 }
 
-pub async fn enqueue_document(db:&PgPool,id:i64,actor:&str)->Result<Option<i64>>{
+pub async fn enqueue_document(db: &PgPool, id: i64, actor: &str) -> Result<Option<i64>> {
     // Only current versions of existing documents are reprocessed.
-    let doc:(i64,i64)=sqlx::query_as(
+    let doc: (i64, i64) = sqlx::query_as(
         "SELECT d.id,d.package_id FROM documents d WHERE d.id=$1 AND d.is_present=true
          AND NOT EXISTS (SELECT 1 FROM documents newer WHERE newer.package_id=d.package_id
-             AND newer.relative_path=d.relative_path AND newer.version>d.version)")
-        .bind(id).fetch_optional(db).await?
-        .ok_or_else(||anyhow!("Document not found, absent, or superseded by newer version"))?;
-    let row:Option<(i64,)>=sqlx::query_as(
+             AND newer.relative_path=d.relative_path AND newer.version>d.version)",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?
+    .ok_or_else(|| anyhow!("Document not found, absent, or superseded by newer version"))?;
+    let row: Option<(i64,)> = sqlx::query_as(
         "INSERT INTO ocr_jobs(document_id,package_id,requested_by) VALUES ($1,$2,$3)
-         ON CONFLICT (document_id) WHERE status IN ('pending','running') DO NOTHING RETURNING id")
-        .bind(doc.0).bind(doc.1).bind(actor).fetch_optional(db).await?;
-    if let Some((job_id,))=row {
-        write_event(db,job_id,"queued",0,0,"Задание поставлено в очередь").await?;
-        info!(job_id,document_id=id,"OCR job queued");
+         ON CONFLICT (document_id) WHERE status IN ('pending','running') DO NOTHING RETURNING id",
+    )
+    .bind(doc.0)
+    .bind(doc.1)
+    .bind(actor)
+    .fetch_optional(db)
+    .await?;
+    if let Some((job_id,)) = row {
+        write_event(db, job_id, "queued", 0, 0, "Задание поставлено в очередь").await?;
+        info!(job_id, document_id = id, "OCR job queued");
     }
-    Ok(row.map(|r|r.0))
+    Ok(row.map(|r| r.0))
 }
 
-pub async fn enqueue_package(db:&PgPool,package_id:i64,all:bool,actor:&str)->Result<usize>{
+pub async fn enqueue_package(
+    db: &PgPool,
+    package_id: i64,
+    all: bool,
+    actor: &str,
+) -> Result<usize> {
     let ids:Vec<(i64,)>=sqlx::query_as(
         "SELECT d.id FROM documents d WHERE d.package_id=$1 AND d.is_present=true
          AND NOT EXISTS (SELECT 1 FROM documents newer WHERE newer.package_id=d.package_id
@@ -422,34 +440,66 @@ pub async fn enqueue_package(db:&PgPool,package_id:i64,all:bool,actor:&str)->Res
          AND ($2 OR d.recognition_status LIKE 'error:%' OR d.recognition_status IN ('manual','partial'))
          ORDER BY d.id")
         .bind(package_id).bind(all).fetch_all(db).await?;
-    let mut inserted=0;
+    let mut inserted = 0;
     for (id,) in ids {
-        if enqueue_document(db,id,actor).await?.is_some() {inserted+=1;}
+        if enqueue_document(db, id, actor).await?.is_some() {
+            inserted += 1;
+        }
     }
     Ok(inserted)
 }
 
-pub async fn jobs(db:&PgPool,package_id:Option<i64>,limit:i64)->Result<Vec<OcrJob>>{
+pub async fn jobs(db: &PgPool, package_id: Option<i64>, limit: i64) -> Result<Vec<OcrJob>> {
     // Fixed SQL means no concatenated user-supplied column names.
     let sql=format!("SELECT {JOB_COLUMNS} FROM ocr_jobs WHERE ($1::bigint IS NULL OR package_id=$1) ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, id DESC LIMIT $2");
-    Ok(sqlx::query_as::<_,OcrJob>(&sql).bind(package_id).bind(limit.clamp(1,100)).fetch_all(db).await?)
+    Ok(sqlx::query_as::<_, OcrJob>(&sql)
+        .bind(package_id)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(db)
+        .await?)
 }
 
-pub async fn jobs_filtered(db:&PgPool,package_id:Option<i64>,status:Option<&str>,limit:i64)->Result<Vec<OcrJob>>{
-    let status=status.filter(|s|matches!(*s,"pending"|"running"|"done"|"partial"|"failed"|"cancelled"));
+pub async fn jobs_filtered(
+    db: &PgPool,
+    package_id: Option<i64>,
+    status: Option<&str>,
+    limit: i64,
+) -> Result<Vec<OcrJob>> {
+    let status = status.filter(|s| {
+        matches!(
+            *s,
+            "pending" | "running" | "done" | "partial" | "failed" | "cancelled"
+        )
+    });
     let sql=format!("SELECT {JOB_COLUMNS} FROM ocr_jobs WHERE ($1::bigint IS NULL OR package_id=$1) AND ($2::text IS NULL OR status=$2) ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, id DESC LIMIT $3");
-    Ok(sqlx::query_as::<_,OcrJob>(&sql).bind(package_id).bind(status).bind(limit.clamp(1,200)).fetch_all(db).await?)
+    Ok(sqlx::query_as::<_, OcrJob>(&sql)
+        .bind(package_id)
+        .bind(status)
+        .bind(limit.clamp(1, 200))
+        .fetch_all(db)
+        .await?)
 }
 
-pub async fn recent_events(db:&PgPool,job_id:i64,limit:i64)->Result<Vec<OcrEvent>>{
-    Ok(sqlx::query_as::<_,OcrEvent>(
+pub async fn recent_events(db: &PgPool, job_id: i64, limit: i64) -> Result<Vec<OcrEvent>> {
+    Ok(sqlx::query_as::<_, OcrEvent>(
         "SELECT id,job_id,created_at,stage,current_step,total_steps,message
-         FROM ocr_job_events WHERE job_id=$1 ORDER BY id DESC LIMIT $2")
-        .bind(job_id).bind(limit.clamp(1,100)).fetch_all(db).await?)
+         FROM ocr_job_events WHERE job_id=$1 ORDER BY id DESC LIMIT $2",
+    )
+    .bind(job_id)
+    .bind(limit.clamp(1, 100))
+    .fetch_all(db)
+    .await?)
 }
 
-pub async fn write_event(db:&PgPool,id:i64,stage:&str,current:i32,total:i32,message:&str)->Result<()>{
-    let summary=message.chars().take(320).collect::<String>();
+pub async fn write_event(
+    db: &PgPool,
+    id: i64,
+    stage: &str,
+    current: i32,
+    total: i32,
+    message: &str,
+) -> Result<()> {
+    let summary = message.chars().take(320).collect::<String>();
     sqlx::query("UPDATE ocr_jobs SET stage=$2,current_step=GREATEST(current_step,$3),total_steps=GREATEST(total_steps,$4),message=$5,updated_at=now() WHERE id=$1")
         .bind(id).bind(stage).bind(current).bind(total).bind(&summary).execute(db).await?;
     sqlx::query("INSERT INTO ocr_job_events(job_id,stage,current_step,total_steps,message) VALUES ($1,$2,$3,$4,$5)")
@@ -457,62 +507,127 @@ pub async fn write_event(db:&PgPool,id:i64,stage:&str,current:i32,total:i32,mess
     Ok(())
 }
 
-pub async fn cancel_pending(db:&PgPool,id:i64)->Result<bool>{
-    let result=sqlx::query(
+pub async fn cancel_pending(db: &PgPool, id: i64) -> Result<bool> {
+    let result = sqlx::query(
         "UPDATE ocr_jobs SET status='cancelled',stage='cancelled',message='Отменено пользователем',
-         updated_at=now(),finished_at=now() WHERE id=$1 AND status='pending'")
-        .bind(id).execute(db).await?;
-    if result.rows_affected()>0 {
-        write_event(db,id,"cancelled",0,0,"Отменено до начала обработки").await?;
+         updated_at=now(),finished_at=now() WHERE id=$1 AND status='pending'",
+    )
+    .bind(id)
+    .execute(db)
+    .await?;
+    if result.rows_affected() > 0 {
+        write_event(db, id, "cancelled", 0, 0, "Отменено до начала обработки").await?;
     }
-    Ok(result.rows_affected()>0)
+    Ok(result.rows_affected() > 0)
 }
 
-async fn claim_next(db:&PgPool)->Result<Option<OcrJob>>{
-    let sql=format!("UPDATE ocr_jobs SET status='running',stage='starting',started_at=now(),updated_at=now(),
+async fn claim_next(db: &PgPool) -> Result<Option<OcrJob>> {
+    let sql = format!(
+        "UPDATE ocr_jobs SET status='running',stage='starting',started_at=now(),updated_at=now(),
         message='Начало обработки' WHERE id=(
         SELECT id FROM ocr_jobs WHERE status='pending' ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1
-        ) RETURNING {JOB_COLUMNS}");
-    Ok(sqlx::query_as::<_,OcrJob>(&sql).fetch_optional(db).await?)
+        ) RETURNING {JOB_COLUMNS}"
+    );
+    Ok(sqlx::query_as::<_, OcrJob>(&sql).fetch_optional(db).await?)
 }
 
-async fn process(db:&PgPool,cfg:&Config,catalog:&Catalog,job:&OcrJob)->Result<String>{
-    let doc=repo::document(db,job.document_id).await?;
-    if doc.package_id!=job.package_id {return Err(anyhow!("Document/package mismatch"));}
-    if !doc.is_present || !Path::new(&doc.archive_path).is_file() {
-        return Err(anyhow!("Archived document is absent: {}",doc.relative_path));
+async fn process(db: &PgPool, cfg: &Config, catalog: &Catalog, job: &OcrJob) -> Result<String> {
+    let doc = repo::document(db, job.document_id).await?;
+    if doc.package_id != job.package_id {
+        return Err(anyhow!("Document/package mismatch"));
     }
-    let (sender,mut receiver)=mpsc::unbounded_channel::<docs::OcrProgress>();
-    let callback:docs::ProgressCallback=Arc::new(move |event| {
-        let _=sender.send(event);
+    if !doc.is_present || !Path::new(&doc.archive_path).is_file() {
+        return Err(anyhow!(
+            "Archived document is absent: {}",
+            doc.relative_path
+        ));
+    }
+    let (sender, mut receiver) = mpsc::unbounded_channel::<docs::OcrProgress>();
+    let callback: docs::ProgressCallback = Arc::new(move |event| {
+        let _ = sender.send(event);
     });
-    let db_events=db.clone();
-    let job_id=job.id;
-    let doc_id=job.document_id;
+    let db_events = db.clone();
+    let job_id = job.id;
+    let doc_id = job.document_id;
     // Progress consumer runs while the OCR future is busy with HTTP or PDF rendering.
-    let progress_writer=tokio::spawn(async move {
-        while let Some(event)=receiver.recv().await {
-            info!(job_id,document_id=doc_id,stage=event.stage,current=event.current,total=event.total,"{}",event.message);
-            if let Err(err)=write_event(&db_events,job_id,event.stage,event.current,event.total,&event.message).await {
-                warn!(job_id,"Could not persist OCR progress: {err:#}");
+    let progress_writer = tokio::spawn(async move {
+        while let Some(event) = receiver.recv().await {
+            info!(
+                job_id,
+                document_id = doc_id,
+                stage = event.stage,
+                current = event.current,
+                total = event.total,
+                "{}",
+                event.message
+            );
+            if let Err(err) = write_event(
+                &db_events,
+                job_id,
+                event.stage,
+                event.current,
+                event.total,
+                &event.message,
+            )
+            .await
+            {
+                warn!(job_id, "Could not persist OCR progress: {err:#}");
             }
         }
     });
-    let mut safe_cfg=cfg.clone();
-    if doc.source_kind=="REFERENCE" { safe_cfg.ocr_mode="local".into(); safe_cfg.vibe_ocr_enabled=false; }
-    let extraction=docs::extract_with_progress(Path::new(&doc.archive_path),cfg.ocr_max_pages,&safe_cfg,Some(callback)).await;
+    let mut safe_cfg = cfg.clone();
+    if doc.source_kind == "REFERENCE" {
+        safe_cfg.ocr_mode = "local".into();
+        safe_cfg.vibe_ocr_enabled = false;
+    }
+    let extraction = docs::extract_with_progress(
+        Path::new(&doc.archive_path),
+        cfg.ocr_max_pages,
+        &safe_cfg,
+        Some(callback),
+    )
+    .await;
     // Ensure all progress events are persisted before final job state.
-    if let Err(err)=progress_writer.await {warn!(job_id=job.id,"Progress writer stopped: {err}");}
-    write_event(db,job.id,"saving",0,0,"Сохранение распознанного текста в PostgreSQL").await?;
-    let filename=Path::new(&doc.relative_path).file_name().and_then(|s|s.to_str()).unwrap_or("");
-    let pkg=repo::package(db,doc.package_id).await?;
-    let classification=if doc.source_kind=="ID" {
-        catalog.classify(filename,&extraction.text,pkg.catalog_name.as_deref().and_then(|x|catalog.work_type(x)))
-    } else {None};
-    let (code,dtype)=classification.map(|(c,t)|(Some(c),Some(t)))
-        .unwrap_or_else(||(None,if doc.source_kind=="ID" {
-            crate::catalog::guess_general_document_type(filename,&extraction.text)
-        }else{None}));
+    if let Err(err) = progress_writer.await {
+        warn!(job_id = job.id, "Progress writer stopped: {err}");
+    }
+    write_event(
+        db,
+        job.id,
+        "saving",
+        0,
+        0,
+        "Сохранение распознанного текста в PostgreSQL",
+    )
+    .await?;
+    let filename = Path::new(&doc.relative_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let pkg = repo::package(db, doc.package_id).await?;
+    let classification = if doc.source_kind == "ID" {
+        catalog.classify(
+            filename,
+            &extraction.text,
+            pkg.catalog_name
+                .as_deref()
+                .and_then(|x| catalog.work_type(x)),
+        )
+    } else {
+        None
+    };
+    let (code, dtype) = classification
+        .map(|(c, t)| (Some(c), Some(t)))
+        .unwrap_or_else(|| {
+            (
+                None,
+                if doc.source_kind == "ID" {
+                    crate::catalog::guess_general_document_type(filename, &extraction.text)
+                } else {
+                    None
+                },
+            )
+        });
     // Preserve engineer-selected type, all previous versions and original bytes.
     sqlx::query("UPDATE documents SET recognized_text=CASE WHEN $2 LIKE 'error:%' OR btrim($1)='' THEN recognized_text ELSE $1 END,recognition_status=$2,recognition_confidence=$3,
         document_type=COALESCE(document_type,$4),catalog_code=COALESCE(catalog_code,$5) WHERE id=$6")
@@ -521,72 +636,134 @@ async fn process(db:&PgPool,cfg:&Config,catalog:&Catalog,job:&OcrJob)->Result<St
     Ok(extraction.status)
 }
 
-pub async fn process_next(db:&PgPool,cfg:&Config,catalog:&Catalog)->Result<bool>{
-    let Some(job)=claim_next(db).await? else {return Ok(false)};
-    info!(job_id=job.id,document_id=job.document_id,package_id=job.package_id,"OCR job started");
-    let outcome=process(db,cfg,catalog,&job).await;
+pub async fn process_next(db: &PgPool, cfg: &Config, catalog: &Catalog) -> Result<bool> {
+    let Some(job) = claim_next(db).await? else {
+        return Ok(false);
+    };
+    info!(
+        job_id = job.id,
+        document_id = job.document_id,
+        package_id = job.package_id,
+        "OCR job started"
+    );
+    let outcome = process(db, cfg, catalog, &job).await;
     // Avoid generating a complete check run for each of 53 documents in one bulk job.
     // Run the package rule engine once when the last queued/running OCR item finishes.
     let remaining:(i64,)=sqlx::query_as(
         "SELECT count(*) FROM ocr_jobs WHERE package_id=$1 AND id<>$2 AND status IN ('pending','running')")
         .bind(job.package_id).bind(job.id).fetch_one(db).await?;
-    if remaining.0==0 {
-        write_event(db,job.id,"analysis",0,0,"Распознавание комплекта завершено. Пересчёт проверок...").await?;
-        if let Err(err)=engine::analyze(db,catalog,job.package_id,"ocr_reprocess_web").await {
-            warn!(job_id=job.id,"Rule analysis after OCR failed: {err:#}");
-            write_event(db,job.id,"analysis_error",0,0,&format!("OCR сохранён, но пересчёт правил не выполнен: {err}")).await?;
+    if remaining.0 == 0 {
+        write_event(
+            db,
+            job.id,
+            "analysis",
+            0,
+            0,
+            "Распознавание комплекта завершено. Пересчёт проверок...",
+        )
+        .await?;
+        if let Err(err) = engine::analyze(db, catalog, job.package_id, "ocr_reprocess_web").await {
+            warn!(job_id = job.id, "Rule analysis after OCR failed: {err:#}");
+            write_event(
+                db,
+                job.id,
+                "analysis_error",
+                0,
+                0,
+                &format!("OCR сохранён, но пересчёт правил не выполнен: {err}"),
+            )
+            .await?;
         }
     }
-    let (status,detail,error_message)=match outcome {
-        Ok(result) if result.starts_with("error:")=>("failed",result.clone(),result),
-        Ok(result) if result=="partial" || result=="manual"=>("partial",format!("Завершено с ограничениями: {result}"),String::new()),
-        Ok(result)=>("done",format!("Успешно: {result}"),String::new()),
-        Err(err)=>{
-            error!(job_id=job.id,"OCR job failed: {err:#}");
-            ("failed",format!("Ошибка задания: {err}"),err.to_string())
+    let (status, detail, error_message) = match outcome {
+        Ok(result) if result.starts_with("error:") => ("failed", result.clone(), result),
+        Ok(result) if result == "partial" || result == "manual" => (
+            "partial",
+            format!("Завершено с ограничениями: {result}"),
+            String::new(),
+        ),
+        Ok(result) => ("done", format!("Успешно: {result}"), String::new()),
+        Err(err) => {
+            error!(job_id = job.id, "OCR job failed: {err:#}");
+            ("failed", format!("Ошибка задания: {err}"), err.to_string())
         }
     };
-    sqlx::query("UPDATE ocr_jobs SET status=$2,stage=$2,message=$3,error_message=$4,
-        updated_at=now(),finished_at=now() WHERE id=$1")
-        .bind(job.id).bind(status).bind(detail.chars().take(320).collect::<String>())
-        .bind(error_message.chars().take(1000).collect::<String>()).execute(db).await
-        .with_context(||format!("Finishing OCR job {}",job.id))?;
+    sqlx::query(
+        "UPDATE ocr_jobs SET status=$2,stage=$2,message=$3,error_message=$4,
+        updated_at=now(),finished_at=now() WHERE id=$1",
+    )
+    .bind(job.id)
+    .bind(status)
+    .bind(detail.chars().take(320).collect::<String>())
+    .bind(error_message.chars().take(1000).collect::<String>())
+    .execute(db)
+    .await
+    .with_context(|| format!("Finishing OCR job {}", job.id))?;
     // Final event, status is preserved.
     sqlx::query("INSERT INTO ocr_job_events(job_id,stage,message) VALUES ($1,$2,$3)")
-        .bind(job.id).bind(status).bind(&detail).execute(db).await?;
-    if status=="done" || status=="partial" {
-        if let Err(err)=crate::classification::maybe_auto_enqueue(db,cfg,job.document_id).await {
-            warn!(document_id=job.document_id,"Could not auto-queue classification: {err:#}");
+        .bind(job.id)
+        .bind(status)
+        .bind(&detail)
+        .execute(db)
+        .await?;
+    if status == "done" || status == "partial" {
+        if let Err(err) = crate::classification::maybe_auto_enqueue(db, cfg, job.document_id).await
+        {
+            warn!(
+                document_id = job.document_id,
+                "Could not auto-queue classification: {err:#}"
+            );
         }
     }
-    info!(job_id=job.id,document_id=job.document_id,status,"OCR job completed");
+    info!(
+        job_id = job.id,
+        document_id = job.document_id,
+        status,
+        "OCR job completed"
+    );
     Ok(true)
 }
 
-pub async fn recover_interrupted(db:&PgPool)->Result<u64>{
-    let recovered=sqlx::query("UPDATE ocr_jobs SET status='pending',stage='queued',
+pub async fn recover_interrupted(db: &PgPool) -> Result<u64> {
+    let recovered = sqlx::query(
+        "UPDATE ocr_jobs SET status='pending',stage='queued',
       message='Задание восстановлено после перезапуска',started_at=NULL,updated_at=now()
-      WHERE status='running'").execute(db).await?.rows_affected();
-    if recovered>0 {warn!(recovered,"Interrupted OCR jobs restored to queue");}
+      WHERE status='running'",
+    )
+    .execute(db)
+    .await?
+    .rows_affected();
+    if recovered > 0 {
+        warn!(recovered, "Interrupted OCR jobs restored to queue");
+    }
     Ok(recovered)
 }
 
-pub async fn print_status(db:&PgPool,cfg:&Config)->Result<()> {
-    let counts:Vec<(String,i64)>=sqlx::query_as(
-        "SELECT status,count(*) FROM ocr_jobs GROUP BY status ORDER BY status").fetch_all(db).await?;
+pub async fn print_status(db: &PgPool, cfg: &Config) -> Result<()> {
+    let counts: Vec<(String, i64)> =
+        sqlx::query_as("SELECT status,count(*) FROM ocr_jobs GROUP BY status ORDER BY status")
+            .fetch_all(db)
+            .await?;
     println!("OCR: mode={} local_models_ready={} model_dir={} max_pages={} page_workers={} VibeCode_enabled={} key_present={} timeout={}s",
         cfg.ocr_mode,crate::local_ocr::ensure_models(&cfg.local_ocr_model_dir).is_ok(),
         cfg.local_ocr_model_dir.display(),cfg.ocr_max_pages,cfg.ocr_page_workers,cfg.vibe_ocr_enabled,
         cfg.vibe_ocr_key.is_some(),cfg.vibe_ocr_timeout);
     println!("OCR jobs by status: {counts:?}");
-    for job in jobs(db,None,20).await? {
-        println!("#{} document={} status={} stage={} progress={}/{} updated={} message={}",
-            job.id,job.document_id,job.status,job.stage,job.current_step,job.total_steps,
-            job.updated_at.format("%Y-%m-%d %H:%M:%S UTC"),job.message);
+    for job in jobs(db, None, 20).await? {
+        println!(
+            "#{} document={} status={} stage={} progress={}/{} updated={} message={}",
+            job.id,
+            job.document_id,
+            job.status,
+            job.stage,
+            job.current_step,
+            job.total_steps,
+            job.updated_at.format("%Y-%m-%d %H:%M:%S UTC"),
+            job.message
+        );
     }
     Ok(())
 }
-
 
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder};
@@ -642,7 +819,6 @@ use tempfile::TempDir;
 
 //     Ok(png_path)
 // }
-
 use hayro::{PixmapSettings, RenderSettings};
 
 fn render_first_pdf_page_to_png(pdf_path: &Path, work_dir: &Path) -> Result<std::path::PathBuf> {
@@ -652,8 +828,7 @@ fn render_first_pdf_page_to_png(pdf_path: &Path, work_dir: &Path) -> Result<std:
     let pdf = hayro::hayro_syntax::Pdf::new(bytes)
         .map_err(|e| anyhow::anyhow!("hayro не смог разобрать PDF: {e:?}"))?;
 
-    let page = pdf.pages().first()
-        .context("PDF не содержит страниц")?;
+    let page = pdf.pages().first().context("PDF не содержит страниц")?;
 
     let cache = hayro::RenderCache::new();
     let interpreter = hayro::hayro_interpret::InterpreterSettings::default();
@@ -697,15 +872,11 @@ fn render_first_pdf_page_to_png(pdf_path: &Path, work_dir: &Path) -> Result<std:
     Ok(png_path)
 }
 
-
-
-
-
 /// Создаёт OCR-движок RapidOCR. Модели должны лежать в `models/`
 /// или будут скачаны при первом запуске.
 fn build_ocr() -> Result<RapidOcr> {
-    let model_set = model_set_by_name("ppocrv6-small")
-        .context("неизвестный набор моделей RapidOCR")?;
+    let model_set =
+        model_set_by_name("ppocrv6-small").context("неизвестный набор моделей RapidOCR")?;
 
     let cache = ModelCache::new("models");
 
@@ -764,46 +935,49 @@ pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
     let pages = crate::local_ocr::recognize_pages(
         vec![png_bytes],
         model_dir,
-        1,    // один поток
+        1, // один поток
         None,
     )?;
 
-    let text = pages.into_iter().map(|p| p.text).collect::<Vec<_>>().join("\n");
+    let text = pages
+        .into_iter()
+        .map(|p| p.text)
+        .collect::<Vec<_>>()
+        .join("\n");
     std::fs::write("debug_ocr.txt", &text).ok();
     println!("--- OCR ---\n{}\n--- /OCR ---", text);
 
     Ok(extract_inn_from_text(&text))
 }
 
-
 fn get_correct_inn_vec(text: &str) -> Result<Vec<String>> {
     let re = Regex::new(r"(?i)[ИIНHNМMÉÈ]{2,3}[\s:№#\-]*(\d[\d\s]{8,15}\d)")?;
 
-    let mut valid:   Vec<String>   = Vec::new();
-    let mut invalid: Vec<String>   = Vec::new();
+    let mut valid: Vec<String> = Vec::new();
+    let mut invalid: Vec<String> = Vec::new();
 
-    for cap in re.captures_iter(text){
+    for cap in re.captures_iter(text) {
         let digits: String = cap[1].chars().filter(|c| c.is_ascii_digit()).collect();
         match digits.len() {
             10 | 12 => {
-                if !valid.contains(&digits){
+                if !valid.contains(&digits) {
                     valid.push(digits);
                 }
             }
 
             _ => {
-                if !invalid.contains(&digits){
+                if !invalid.contains(&digits) {
                     invalid.push(digits);
                 }
             }
         }
-    } 
+    }
 
- match (valid.is_empty(), invalid.is_empty()) {
+    match (valid.is_empty(), invalid.is_empty()) {
         (true, true) => bail!("ИНН не найден в распознанном тексте"),
-        (true, false) => bail!(
-            "Корректных ИНН нет; найдены битые (вероятно, ошибка OCR): {invalid:?}"
-        ),
+        (true, false) => {
+            bail!("Корректных ИНН нет; найдены битые (вероятно, ошибка OCR): {invalid:?}")
+        }
         (false, false) => {
             tracing::warn!(
                 ?invalid,
@@ -816,28 +990,28 @@ fn get_correct_inn_vec(text: &str) -> Result<Vec<String>> {
     }
 }
 
-
 pub fn get_correct_inn_vec_from_pdf(pdf_path: &Path) -> Result<Vec<String>> {
     let work_dir = TempDir::new().context("не удалось создать временную директорию")?;
     let png_path = render_first_pdf_page_to_png(pdf_path, work_dir.path())?;
     let png_bytes = std::fs::read(&png_path)?;
 
-    let pages = crate::local_ocr::recognize_pages(
-        vec![png_bytes],
-        PathBuf::from("models/ocr"),
-        1,
-        None,
-    )?;
-    let text = pages.into_iter().map(|p| p.text).collect::<Vec<_>>().join("\n");
+    let pages =
+        crate::local_ocr::recognize_pages(vec![png_bytes], PathBuf::from("models/ocr"), 1, None)?;
+    let text = pages
+        .into_iter()
+        .map(|p| p.text)
+        .collect::<Vec<_>>()
+        .join("\n");
     std::fs::write("debug_ocr.txt", &text).ok();
     println!("--- OCR ---\n{text}\n--- /OCR ---");
 
     get_correct_inn_vec(&text)
 }
 
-
 fn extract_inn_from_text(text: &str) -> Option<String> {
-    get_correct_inn_vec(text).ok().and_then(|v| v.into_iter().next())
+    get_correct_inn_vec(text)
+        .ok()
+        .and_then(|v| v.into_iter().next())
 }
 
 // pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
@@ -873,23 +1047,17 @@ fn extract_inn_from_text(text: &str) -> Option<String> {
 //     Ok(extract_inn_from_text(&text))
 // }
 
-
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn retry_only_problematic_documents(){
+    #[test]
+    fn retry_only_problematic_documents() {
         assert!(needs_retry("error: pdftoppm unavailable"));
         assert!(needs_retry("partial"));
         assert!(needs_retry("manual"));
         assert!(!needs_retry("ocr_vibe"));
         assert!(!needs_retry("extracted"));
     }
-
-
-
 
     #[test]
     fn extracts_10_digit_inn() {
@@ -928,10 +1096,10 @@ mod tests {
     fn extracts_inn_from_real_pdf() -> anyhow::Result<()> {
         let path = std::path::Path::new("test_data/file-114098.pdf");
         let inn = extract_inn_from_pdf(path)?;
-        assert_eq!(inn.as_deref(), Some("30000011230"));  ///!!!must failed 10, 12 INN!!!
+        assert_eq!(inn.as_deref(), Some("30000011230"));
+        ///!!!must failed 10, 12 INN!!!
         Ok(())
     }
-
 
     #[test]
     #[ignore = "требует models/ и test_data/sample_invoice.pdf"]
@@ -942,7 +1110,6 @@ mod tests {
         Ok(())
     }
 
-
     #[test]
     #[ignore = "требует models/ и test_data/sample_invoice.pdf"]
     fn extracts_inn_from_1t_pdf() -> anyhow::Result<()> {
@@ -952,172 +1119,177 @@ mod tests {
         Ok(())
     }
 
-
     #[test]
-fn get_correct_inn_vec_returns_all_valid() {
-    let text = "ИHH: 3000004184 KПП: 300001001\nИНН 7707083893";
-    assert_eq!(
-        get_correct_inn_vec(text).unwrap(),
-        vec!["3000004184".to_string(), "7707083893".to_string()]
-    );
-}
-
-#[test]
-fn get_correct_inn_vec_rejects_11_digit_inn() {
-    let err = get_correct_inn_vec("ИHH 30000011230 KПП 300001001").unwrap_err();
-    assert!(err.to_string().contains("битые"), "сообщение: {err}");
-}
-
-#[test]
-fn get_correct_inn_vec_errors_when_no_inn() {
-    let err = get_correct_inn_vec("Договор № 42").unwrap_err();
-    assert!(err.to_string().contains("не найден"));
-}
-
-#[test]
-fn get_correct_inn_vec_keeps_valid_drops_invalid() {
-    let text = "ИHH 30000011230 KПП 300001001\nИHH: 3000004184";
-    assert_eq!(
-        get_correct_inn_vec(text).unwrap(),
-        vec!["3000004184".to_string()]
-    );
-}
-
-#[test]
-#[ignore = "требует models/ocr/ и test_data/file-114098.pdf"]
-fn extracts_inn_from_real_pdf1() -> anyhow::Result<()> {
-    let started = std::time::Instant::now();
-
-    let inns = get_correct_inn_vec_from_pdf(Path::new("test_data/file-114098.pdf"))?;
-
-
-    let elapsed = started.elapsed();
-
-    println!("Found INNs: {inns:?}");
-    assert!(inns.contains(&"3000004184".to_string()), "ИНН Исполнителя не найден");
-    assert!(
-        !inns.iter().any(|i| i == "30000011230"),
-        "11-значный ИНН не должен проходить"
-    );
-
-    
-    println!("Found INNs: {inns:?}");
-    println!("Время выполнения OCR + парсинг: {:.2?} ({:.1} с)", elapsed, elapsed.as_secs_f64());
-    Ok(())
-}
-
-
-
-
-#[test]
-#[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
-fn test_parse_document_date() {
-    let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
-    let result = parse_pdf_bytes(&bytes, &[RecognizedField::DateDocum]).unwrap();
-    let dates = &result[&RecognizedField::DateDocum];
-    println!("DateDocum: {dates:?}");
-    assert_eq!(dates.len(), 1, "Ожидали одну дату, получили: {dates:?}");
-    assert_eq!(dates[0], "03-11-2026", "Дата «03» ноября 2026 г.");
-}
-
-
-#[test]
-#[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
-fn test_parse_document_number() {
-    let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
-    let result = parse_pdf_bytes(&bytes, &[RecognizedField::NumberDocum]).unwrap();
-    let numbers = &result[&RecognizedField::NumberDocum];
-    println!("NumberDocum: {numbers:?}");
-    
-    assert_eq!(numbers.len(), 1, "Ожидали один номер, получили: {numbers:?}");
-    assert_eq!(numbers[0], "131/26", "Номер договора 131/26");
-}
-
-
-#[test]   //to check
-#[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
-fn test_parse_document_names() {
-    let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
-    let result = parse_pdf_bytes(&bytes, &[RecognizedField::Name]).unwrap();
-    let names = &result[&RecognizedField::Name];
-    println!("Name: {names:?}");
-    assert_eq!(names.len(), 2, "Ожидали два названия, получили: {names:?}");
-    assert!(names.iter().any(|n| n.contains("ИНДОР МАРКЕТИНГ")), "Не найдено ООО «ИНДОР МАРКЕТИНГ», names={names:?}");
-    assert!(names.iter().any(|n| n.contains("РЭС-БАБЕФА")), "Не найдено ООО «СЗ «РЭС-БАБЕФА», names={names:?}");
-    assert!(!names.iter().any(|n| n.contains("РЭС- БАБЕФА")), "Название не нормализовано (пробел после дефиса)");
-}
-
-
-
-
-
-#[test]
-#[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
-fn test_parse_document_pdf_bytes() -> anyhow::Result<()> {
-    let bytes = std::fs::read("test_data/parse_doc.pdf")?;
-
-    let result = parse_pdf_bytes(
-        &bytes,
-        &[
-            RecognizedField::Inn,
-            RecognizedField::Name,
-            RecognizedField::NumberDocum,
-            RecognizedField::DateDocum,
-        ],
-    )?;
-
-    println!("--- Результат парсинга ---");
-    for (field, values) in &result {
-        println!("{:?}: {:?}", field, values);
+    fn get_correct_inn_vec_returns_all_valid() {
+        let text = "ИHH: 3000004184 KПП: 300001001\nИНН 7707083893";
+        assert_eq!(
+            get_correct_inn_vec(text).unwrap(),
+            vec!["3000004184".to_string(), "7707083893".to_string()]
+        );
     }
 
-    // Достаём поля через .get() — так тип &Vec<String> известен сразу
-    let dates = result.get(&RecognizedField::DateDocum)
-        .expect("DateDocum должен быть в запросе");
-    let numbers = result.get(&RecognizedField::NumberDocum)
-        .expect("NumberDocum должен быть в запросе");
-    let inns = result.get(&RecognizedField::Inn)
-        .expect("Inn должен быть в запросе");
-    let names = result.get(&RecognizedField::Name)
-        .expect("Name должен быть в запросе");
+    #[test]
+    fn get_correct_inn_vec_rejects_11_digit_inn() {
+        let err = get_correct_inn_vec("ИHH 30000011230 KПП 300001001").unwrap_err();
+        assert!(err.to_string().contains("битые"), "сообщение: {err}");
+    }
 
-    // --- Дата ---
-    assert_eq!(dates.len(), 1, "Должна быть одна дата, получили: {dates:?}");
-    assert_eq!(dates[0], "2026-11-03", "Дата «03» ноября 2026 г.");
+    #[test]
+    fn get_correct_inn_vec_errors_when_no_inn() {
+        let err = get_correct_inn_vec("Договор № 42").unwrap_err();
+        assert!(err.to_string().contains("не найден"));
+    }
 
-    // --- Номер ---
-    assert!(
-        numbers.is_empty(),
-        "В этом PDF номера нет, но нашли: {numbers:?}"
-    );
+    #[test]
+    fn get_correct_inn_vec_keeps_valid_drops_invalid() {
+        let text = "ИHH 30000011230 KПП 300001001\nИHH: 3000004184";
+        assert_eq!(
+            get_correct_inn_vec(text).unwrap(),
+            vec!["3000004184".to_string()]
+        );
+    }
 
-    // --- ИНН ---
-    assert_eq!(inns.len(), 2, "Ожидали два ИНН, получили: {inns:?}");
-    assert!(inns.contains(&"3461070140".to_string()), "ИНН ИНДОР");
-    assert!(inns.contains(&"3000012604".to_string()), "ИНН РЭС-БАБЕФА");
+    #[test]
+    #[ignore = "требует models/ocr/ и test_data/file-114098.pdf"]
+    fn extracts_inn_from_real_pdf1() -> anyhow::Result<()> {
+        let started = std::time::Instant::now();
 
-    // --- Названия ---
-    assert_eq!(names.len(), 2, "Ожидали два названия, получили: {names:?}");
-    assert!(
-        names.iter().any(|n| n.contains("ИНДОР МАРКЕТИНГ")),
-        "Не найдено ООО «ИНДОР МАРКЕТИНГ», names={names:?}"
-    );
-    assert!(
-        names.iter().any(|n| n.contains("РЭС-БАБЕФА")),
-        "Не найдено ООО «СЗ «РЭС-БАБЕФА», names={names:?}"
-    );
-    assert!(
-        !names.iter().any(|n| n.contains("РЭС- БАБЕФА")),
-        "Название не нормализовано (пробел после дефиса)"
-    );
+        let inns = get_correct_inn_vec_from_pdf(Path::new("test_data/file-114098.pdf"))?;
 
-    Ok(())
+        let elapsed = started.elapsed();
+
+        println!("Found INNs: {inns:?}");
+        assert!(
+            inns.contains(&"3000004184".to_string()),
+            "ИНН Исполнителя не найден"
+        );
+        assert!(
+            !inns.iter().any(|i| i == "30000011230"),
+            "11-значный ИНН не должен проходить"
+        );
+
+        println!("Found INNs: {inns:?}");
+        println!(
+            "Время выполнения OCR + парсинг: {:.2?} ({:.1} с)",
+            elapsed,
+            elapsed.as_secs_f64()
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
+    fn test_parse_document_date() {
+        let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
+        let result = parse_pdf_bytes(&bytes, &[RecognizedField::DateDocum]).unwrap();
+        let dates = &result[&RecognizedField::DateDocum];
+        println!("DateDocum: {dates:?}");
+        assert_eq!(dates.len(), 1, "Ожидали одну дату, получили: {dates:?}");
+        assert_eq!(dates[0], "03-11-2026", "Дата «03» ноября 2026 г.");
+    }
+
+    #[test]
+    #[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
+    fn test_parse_document_number() {
+        let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
+        let result = parse_pdf_bytes(&bytes, &[RecognizedField::NumberDocum]).unwrap();
+        let numbers = &result[&RecognizedField::NumberDocum];
+        println!("NumberDocum: {numbers:?}");
+
+        assert_eq!(
+            numbers.len(),
+            1,
+            "Ожидали один номер, получили: {numbers:?}"
+        );
+        assert_eq!(numbers[0], "131/26", "Номер договора 131/26");
+    }
+
+    #[test] //to check
+    #[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
+    fn test_parse_document_names() {
+        let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
+        let result = parse_pdf_bytes(&bytes, &[RecognizedField::Name]).unwrap();
+        let names = &result[&RecognizedField::Name];
+        println!("Name: {names:?}");
+        assert_eq!(names.len(), 2, "Ожидали два названия, получили: {names:?}");
+        assert!(
+            names.iter().any(|n| n.contains("ИНДОР МАРКЕТИНГ")),
+            "Не найдено ООО «ИНДОР МАРКЕТИНГ», names={names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("РЭС-БАБЕФА")),
+            "Не найдено ООО «СЗ «РЭС-БАБЕФА», names={names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("РЭС- БАБЕФА")),
+            "Название не нормализовано (пробел после дефиса)"
+        );
+    }
+
+    #[test]
+    #[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
+    fn test_parse_document_pdf_bytes() -> anyhow::Result<()> {
+        let bytes = std::fs::read("test_data/parse_doc.pdf")?;
+
+        let result = parse_pdf_bytes(
+            &bytes,
+            &[
+                RecognizedField::Inn,
+                RecognizedField::Name,
+                RecognizedField::NumberDocum,
+                RecognizedField::DateDocum,
+            ],
+        )?;
+
+        println!("--- Результат парсинга ---");
+        for (field, values) in &result {
+            println!("{:?}: {:?}", field, values);
+        }
+
+        // Достаём поля через .get() — так тип &Vec<String> известен сразу
+        let dates = result
+            .get(&RecognizedField::DateDocum)
+            .expect("DateDocum должен быть в запросе");
+        let numbers = result
+            .get(&RecognizedField::NumberDocum)
+            .expect("NumberDocum должен быть в запросе");
+        let inns = result
+            .get(&RecognizedField::Inn)
+            .expect("Inn должен быть в запросе");
+        let names = result
+            .get(&RecognizedField::Name)
+            .expect("Name должен быть в запросе");
+
+        // --- Дата ---
+        assert_eq!(dates.len(), 1, "Должна быть одна дата, получили: {dates:?}");
+        assert_eq!(dates[0], "2026-11-03", "Дата «03» ноября 2026 г.");
+
+        // --- Номер ---
+        assert!(
+            numbers.is_empty(),
+            "В этом PDF номера нет, но нашли: {numbers:?}"
+        );
+
+        // --- ИНН ---
+        assert_eq!(inns.len(), 2, "Ожидали два ИНН, получили: {inns:?}");
+        assert!(inns.contains(&"3461070140".to_string()), "ИНН ИНДОР");
+        assert!(inns.contains(&"3000012604".to_string()), "ИНН РЭС-БАБЕФА");
+
+        // --- Названия ---
+        assert_eq!(names.len(), 2, "Ожидали два названия, получили: {names:?}");
+        assert!(
+            names.iter().any(|n| n.contains("ИНДОР МАРКЕТИНГ")),
+            "Не найдено ООО «ИНДОР МАРКЕТИНГ», names={names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("РЭС-БАБЕФА")),
+            "Не найдено ООО «СЗ «РЭС-БАБЕФА», names={names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("РЭС- БАБЕФА")),
+            "Название не нормализовано (пробел после дефиса)"
+        );
+
+        Ok(())
+    }
 }
-
-
-
-}
-    
-    
-
-

@@ -2,14 +2,20 @@
 //! Pages are processed in parallel by a bounded pool of native threads.
 //! Each worker owns one ONNX engine (no concurrent access to an engine).
 //! The producer/consumer queue is bounded to limit PDF image memory.
+use crate::docs::{OcrProgress, ProgressCallback};
 use anyhow::{anyhow, bail, Context, Result};
-use rapidocr_core::{RapidOcr, config::{RapidOcrConfig, PipelineConfig}};
+use rapidocr_core::{
+    config::{PipelineConfig, RapidOcrConfig},
+    RapidOcr,
+};
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc, atomic::{AtomicBool, AtomicUsize, Ordering}},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc, Arc, Mutex,
+    },
     time::Instant,
 };
-use crate::docs::{OcrProgress, ProgressCallback};
 
 pub const DET_MODEL: &str = "det.onnx";
 pub const REC_MODEL: &str = "rec.onnx";
@@ -25,14 +31,30 @@ pub fn ensure_models(dir: &Path) -> Result<()> {
             .with_context(||format!("Нет локальной OCR-модели {}. Запусти scripts/install-local-ocr-models.ps1 или .sh", file.display()))?.len();
         let minimum = if i == 2 { 100 } else { 1_000_000 };
         if len < minimum {
-            bail!("OCR-модель {} слишком мала ({len} байт); проверь скачивание ONNX", file.display());
+            bail!(
+                "OCR-модель {} слишком мала ({len} байт); проверь скачивание ONNX",
+                file.display()
+            );
         }
     }
     Ok(())
 }
 
-fn progress(cb: &Option<ProgressCallback>, stage: &'static str, current: i32, total: i32, message: impl Into<String>) {
-    if let Some(cb) = cb { cb(OcrProgress { stage, current, total, message: message.into() }); }
+fn progress(
+    cb: &Option<ProgressCallback>,
+    stage: &'static str,
+    current: i32,
+    total: i32,
+    message: impl Into<String>,
+) {
+    if let Some(cb) = cb {
+        cb(OcrProgress {
+            stage,
+            current,
+            total,
+            message: message.into(),
+        });
+    }
 }
 
 /// One private inference session pair per worker. Never share a mutable engine
@@ -42,9 +64,15 @@ fn runner(dir: &Path) -> Result<RapidOcr> {
     let mut settings = RapidOcrConfig::ppocr_v6_small(dir);
     settings.pipeline = PipelineConfig::without_cls();
     settings.cls = None;
-    settings.det.as_mut().ok_or_else(||anyhow!("OCR detector configuration missing"))?
+    settings
+        .det
+        .as_mut()
+        .ok_or_else(|| anyhow!("OCR detector configuration missing"))?
         .model_path = dir.join(DET_MODEL);
-    let rec = settings.rec.as_mut().ok_or_else(||anyhow!("OCR recognizer configuration missing"))?;
+    let rec = settings
+        .rec
+        .as_mut()
+        .ok_or_else(|| anyhow!("OCR recognizer configuration missing"))?;
     rec.model_path = dir.join(REC_MODEL);
     rec.dict_path = dir.join(REC_DICT);
     // PP-OCRv5 Cyrillic model expects [channels,height,max_width] = [3,48,320].
@@ -63,15 +91,27 @@ pub struct PageText {
 fn recognize_one(engine: &mut RapidOcr, bytes: &[u8], page_index: usize) -> Result<PageText> {
     let page = page_index + 1;
     let image = image::load_from_memory(bytes)
-        .with_context(||format!("Не удалось открыть изображение страницы {page}"))?.to_rgb8();
-    let output = engine.run_image(&image)
-        .with_context(||format!("Сбой ONNX на странице {page}"))?;
-    let lines: Vec<_> = output.lines.into_iter().filter(|line|!line.text.trim().is_empty()).collect();
-    let confidence = if lines.is_empty() { None } else {
-        Some(lines.iter().map(|line|line.score).sum::<f32>() / lines.len() as f32)
+        .with_context(|| format!("Не удалось открыть изображение страницы {page}"))?
+        .to_rgb8();
+    let output = engine
+        .run_image(&image)
+        .with_context(|| format!("Сбой ONNX на странице {page}"))?;
+    let lines: Vec<_> = output
+        .lines
+        .into_iter()
+        .filter(|line| !line.text.trim().is_empty())
+        .collect();
+    let confidence = if lines.is_empty() {
+        None
+    } else {
+        Some(lines.iter().map(|line| line.score).sum::<f32>() / lines.len() as f32)
     };
     Ok(PageText {
-        text: lines.iter().map(|line|line.text.as_str()).collect::<Vec<_>>().join("\n"),
+        text: lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
         confidence,
     })
 }
@@ -91,11 +131,21 @@ pub fn recognize_stream<F>(
 where
     F: FnOnce(&mut dyn FnMut(usize, Vec<u8>) -> Result<()>) -> Result<()>,
 {
-    if total == 0 { bail!("OCR: нет страниц для распознавания"); }
+    if total == 0 {
+        bail!("OCR: нет страниц для распознавания");
+    }
     let workers = worker_count(requested_workers, total);
     let started = Instant::now();
-    progress(&cb, "local_workers", 0, total as i32,
-        format!("Запуск {workers} параллельных OCR-обработчиков; очередь до {} страниц", workers * 2));
+    progress(
+        &cb,
+        "local_workers",
+        0,
+        total as i32,
+        format!(
+            "Запуск {workers} параллельных OCR-обработчиков; очередь до {} страниц",
+            workers * 2
+        ),
+    );
 
     let (input_tx, input_rx) = mpsc::sync_channel::<(usize, Vec<u8>)>(workers * 2);
     let queue = Arc::new(Mutex::new(input_rx));
@@ -151,12 +201,21 @@ where
         drop(result_tx);
         let mut last_index = None;
         let mut enqueue = |index: usize, bytes: Vec<u8>| -> Result<()> {
-            if index >= total { bail!("OCR page index {index} exceeds total {total}"); }
-            if last_index.map(|last|index != last + 1).unwrap_or(index != 0) {
+            if index >= total {
+                bail!("OCR page index {index} exceeds total {total}");
+            }
+            if last_index
+                .map(|last| index != last + 1)
+                .unwrap_or(index != 0)
+            {
                 bail!("OCR page sequence mismatch at index {index}");
             }
-            if stopped.load(Ordering::SeqCst) { bail!("OCR stopped after a worker error"); }
-            input_tx.send((index, bytes)).map_err(|_|anyhow!("OCR workers stopped before all pages were queued"))?;
+            if stopped.load(Ordering::SeqCst) {
+                bail!("OCR stopped after a worker error");
+            }
+            input_tx
+                .send((index, bytes))
+                .map_err(|_| anyhow!("OCR workers stopped before all pages were queued"))?;
             last_index = Some(index);
             submitted += 1;
             Ok(())
@@ -167,36 +226,65 @@ where
         let mut worker_error = None;
         for handle in handles {
             match handle.join() {
-                Ok(Ok(())) => {},
-                Ok(Err(e)) => if worker_error.is_none() {worker_error = Some(e)},
-                Err(_) => if worker_error.is_none() {worker_error = Some(anyhow!("OCR worker panicked"))},
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    if worker_error.is_none() {
+                        worker_error = Some(e)
+                    }
+                }
+                Err(_) => {
+                    if worker_error.is_none() {
+                        worker_error = Some(anyhow!("OCR worker panicked"))
+                    }
+                }
             }
         }
         // Prefer ONNX initialization errors over the resulting queue disconnect.
-        if let Some(e) = worker_error { return Err(e); }
+        if let Some(e) = worker_error {
+            return Err(e);
+        }
         producer_result?;
-        if submitted != total { bail!("OCR: подготовлено {submitted} страниц вместо {total}"); }
+        if submitted != total {
+            bail!("OCR: подготовлено {submitted} страниц вместо {total}");
+        }
         Ok(())
     });
 
     // Receives text in completion order, then reconstructs original page order.
-    let mut ordered: Vec<Option<PageText>> = (0..total).map(|_|None).collect();
+    let mut ordered: Vec<Option<PageText>> = (0..total).map(|_| None).collect();
     let mut first_error = None;
     for (index, result) in result_rx {
         match result {
             Ok(page) => ordered[index] = Some(page),
-            Err(e) => if first_error.is_none() { first_error = Some(e) },
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(e)
+                }
+            }
         }
     }
     // A model error from a page is more informative than a queue disconnect.
-    if let Some(e) = first_error { return Err(e); }
-    produced?;
-    if ordered.iter().any(|page|page.is_none()) {
-        bail!("OCR обработал {} из {total} страниц, результат неполный", completed.load(Ordering::SeqCst));
+    if let Some(e) = first_error {
+        return Err(e);
     }
-    progress(&cb, "local_done", total as i32, total as i32,
-        format!("OCR завершён за {:.1} с ({:.1} страниц/мин, {workers} потоков)",
-            started.elapsed().as_secs_f64(), total as f64 * 60.0 / started.elapsed().as_secs_f64().max(0.01)));
+    produced?;
+    if ordered.iter().any(|page| page.is_none()) {
+        bail!(
+            "OCR обработал {} из {total} страниц, результат неполный",
+            completed.load(Ordering::SeqCst)
+        );
+    }
+    progress(
+        &cb,
+        "local_done",
+        total as i32,
+        total as i32,
+        format!(
+            "OCR завершён за {:.1} с ({:.1} страниц/мин, {workers} потоков)",
+            started.elapsed().as_secs_f64(),
+            total as f64 * 60.0 / started.elapsed().as_secs_f64().max(0.01)
+        ),
+    );
     Ok(ordered.into_iter().map(Option::unwrap).collect())
 }
 
@@ -204,10 +292,17 @@ pub fn worker_count(requested: usize, total: usize) -> usize {
     requested.clamp(1, 16).min(total.max(1))
 }
 
-pub fn recognize_pages(images: Vec<Vec<u8>>, dir: PathBuf, workers: usize, cb: Option<ProgressCallback>) -> Result<Vec<PageText>> {
+pub fn recognize_pages(
+    images: Vec<Vec<u8>>,
+    dir: PathBuf,
+    workers: usize,
+    cb: Option<ProgressCallback>,
+) -> Result<Vec<PageText>> {
     let total = images.len();
     recognize_stream(total, &dir, workers, cb, |emit| {
-        for (index, image) in images.into_iter().enumerate() { emit(index, image)?; }
+        for (index, image) in images.into_iter().enumerate() {
+            emit(index, image)?;
+        }
         Ok(())
     })
 }
