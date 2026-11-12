@@ -20,7 +20,9 @@ use std::sync::OnceLock;
 
 //// Номер документа, дату документа, контрагента инн и название и нашего контрагента ИНН и название.
 ///
-///
+///    ocr_jobs::tests::extracts_inn_from_real_pdf
+///    
+///   
 ///
 ///
 ///
@@ -102,18 +104,22 @@ fn re_date_num() -> &'static Regex {
 fn re_number() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        // Ищем номер либо после типа документа (Договор, Акт...), либо после знака №/N
-        Regex::new(r"(?i)(?:Договор|Акт|Соглашение|Контракт|Приказ|Счет|Счёт)\s*(?:№|N)?\s*([0-9]+(?:[\-/][0-9]+)*)|(?:№|N)\s*([0-9]+(?:[\-/][0-9]+)*)").unwrap()
+        Regex::new(
+            r"(?i)(?:Договор|Акт|Соглашение|Контракт|Приказ)\s*(?:№|N)?\s*([0-9]+(?:[\-/][0-9]+)*)|(?:№|N)\s*([0-9]+(?:[\-/][0-9]+)*)"
+        ).unwrap()
     })
 }
 
 fn collect_numbers(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for cap in re_number().captures_iter(text) {
-        // Берем либо первую, либо вторую группу (зависит от того, какой паттерн сработал)
         let m = cap.get(1).or_else(|| cap.get(2));
         if let Some(m) = m {
             let n = m.as_str().to_string();
+            // Банковские счета (р/с, к/с) — 20 цифр; номера документов короче
+            if n.len() > 15 {
+                continue;
+            }
             if !out.contains(&n) {
                 out.push(n);
             }
@@ -124,16 +130,20 @@ fn collect_numbers(text: &str) -> Vec<String> {
 
 fn re_org() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r#"(?i)(ООО|АО|ПАО|ЗАО|ОАО|ИП)\s*[«"]\s*([^»\n]+?)\s*»"#).unwrap())
+    R.get_or_init(|| {
+        Regex::new(
+            r#"(?i)(ООО|АО|ПАО|ЗАО|ОАО|Общество\s+с\s+ограниченной\s+ответственностью)\s*[«"]\s*([^»"]+?)\s*[»"]|ИП\s+([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+){1,2})"#,
+        ).unwrap()
+    })
 }
 
 fn re_role() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
+        // Ищем роль, за которой идет двоеточие (с возможными пробелами)
         Regex::new(
-            r"(?i)(Рекламораспространитель|Рекламодатель|Заказчик|Застройщик|Генподрядчик|Подрядчик|Субподрядчик|Исполнитель|Поставщик|Покупатель|Продавец|Арендодатель|Арендатор|Лицензиар|Лицензиат)",
-        )
-        .unwrap()
+            r"(?i)(Рекламораспространитель|Рекламодатель|Заказчик|Застройщик|Генподрядчик|Подрядчик|Субподрядчик|Исполнитель|Поставщик|Покупатель|Продавец|Арендодатель|Арендатор|Лицензиар|Лицензиат|Грузополучатель|Грузоотправитель|Плательщик)\s*:",
+        ).unwrap()
     })
 }
 
@@ -247,17 +257,56 @@ fn normalize_org_name(s: &str) -> String {
         .join(" ")
 }
 
+fn clean_org_name(s: &str) -> String {
+    let mut res = s.to_uppercase();
+
+    // Вырезаем названия ролей, которые OCR умудрился вставить внутрь названия
+    for role in [
+        "ПОКУПАТЕЛЬ:",
+        "ГРУЗОПОЛУЧАТЕЛЬ:",
+        "ПОСТАВЩИК:",
+        "ГРУЗООТПРАВИТЕЛЬ:",
+        "ЗАКАЗЧИК:",
+        "ИСПОЛНИТЕЛЬ:",
+        "ПОДРЯДЧИК:",
+        "ЗАСТРОЙЩИК:",
+    ] {
+        res = res.replace(role, "");
+    }
+
+    // Чистим возможные артефакты кавычек после удаления
+    res = res.replace("« ", "«").replace(" »", "»");
+
+    // Схлопываем двойные пробелы, которые остались от вырезанных ролей
+    res.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn collect_org_names(text: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for cap in re_org().captures_iter(text) {
-        let name = normalize_org_name(&format!("{} «{}»", &cap[1], cap[2].trim()));
-        if !out.contains(&name) {
-            out.push(name);
+        let raw_name = if let Some(legal) = cap.get(2) {
+            let mut prefix = cap[1].to_uppercase();
+            if prefix.starts_with("ОБЩЕСТВО") {
+                prefix = "ООО".to_string();
+            }
+            let clean_legal = legal.as_str().replace('\n', " ").trim().to_string();
+            format!("{} «{}»", prefix, clean_legal)
+        } else if let Some(ip) = cap.get(3) {
+            format!("ИП {}", ip.as_str().trim())
+        } else {
+            continue;
+        };
+
+        // Вырезаем роли и нормализуем пробелы
+        let normalized = normalize_org_name(&clean_org_name(&raw_name));
+
+        if seen.insert(normalized.clone()) {
+            out.push(normalized);
         }
     }
     out
 }
-
 // ---------- Публичный API ----------
 pub fn get_fields(text: &str, fields: &[RecognizedField]) -> HashMap<RecognizedField, Vec<String>> {
     let mut out = HashMap::with_capacity(fields.len());
@@ -276,37 +325,123 @@ pub fn get_fields(text: &str, fields: &[RecognizedField]) -> HashMap<RecognizedF
     }
     out
 }
-pub fn pair_parties(text: &str, names: &[String], _inns: &[String]) -> Vec<Party> {
+
+fn pick_best_role(text: &str) -> Option<String> {
+    let mut best = None;
+    let mut best_score = 0;
+
+    for cap in re_role().captures_iter(text) {
+        let r = cap[1].to_string();
+        let lower = r.to_lowercase();
+
+        let score = match lower.as_str() {
+            "покупатель" | "заказчик" | "поставщик" | "исполнитель" | "подрядчик" => {
+                10
+            }
+            "грузополучатель" | "грузоотправитель" | "плательщик" => {
+                5
+            }
+            _ => 1,
+        };
+
+        if score > best_score {
+            best_score = score;
+            best = Some(r);
+        }
+    }
+    best
+}
+pub fn pair_parties(text: &str) -> Vec<Party> {
     let mut parties = Vec::new();
-    for name in names {
-        let Some(pos) = text.find(name.as_str()) else {
+
+    for cap in re_org().captures_iter(text) {
+        let full = cap.get(0).unwrap();
+        let start = full.start();
+        let raw_end = full.end();
+
+        // 1. Нормализованное имя
+        let normalized = if let Some(legal) = cap.get(2) {
+            let mut prefix = cap[1].to_uppercase();
+            if prefix.starts_with("ОБЩЕСТВО") {
+                prefix = "ООО".to_string();
+            }
+            let clean = legal.as_str().replace('\n', " ").trim().to_string();
+            normalize_org_name(&clean_org_name(&format!("{} «{}»", prefix, clean)))
+        } else if let Some(ip) = cap.get(3) {
+            format!("ИП {}", ip.as_str().trim().to_uppercase())
+        } else {
             continue;
         };
-        let ctx_start = pos.saturating_sub(80);
-        let ctx = &text[ctx_start..pos];
-        let role = re_role().captures(ctx).map(|c| c[1].to_string());
 
-        let forward_end = (pos + 400).min(text.len());
-        let forward = &text[pos..forward_end];
-        let inn = re_inn().captures(forward).and_then(|c| {
-            let d: String = c[1].chars().filter(|c| c.is_ascii_digit()).collect();
-            (d.len() == 10 || d.len() == 12).then_some(d)
-        });
+        // 2. Роль — 120 байт до названия + до конца названия (для склеенных OCR меток)
+        let ctx_start = floor_char_boundary(text, start.saturating_sub(120));
+        let role_ctx = &text[ctx_start..raw_end];
+        let role = pick_best_role(role_ctx);
+
+        // 3. ИНН — 400 байт после названия
+        let forward_end = ceil_char_boundary(text, (raw_end + 400).min(text.len()));
+        let inn = re_inn()
+            .captures(&text[raw_end..forward_end])
+            .and_then(|c| {
+                let d: String = c[1].chars().filter(|ch| ch.is_ascii_digit()).collect();
+                (d.len() == 10 || d.len() == 11 || d.len() == 12).then_some(d)
+            });
 
         parties.push(Party {
-            name: name.clone(),
+            name: normalized,
             inn,
             role,
         });
     }
-    parties.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Дедуп: при равных именах оставляем роль с наивысшим приоритетом
+    parties.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then(role_priority(&a.role).cmp(&role_priority(&b.role)))
+    });
     parties.dedup_by(|a, b| a.name == b.name);
     parties
 }
 
+fn role_priority(role: &Option<String>) -> u8 {
+    match role.as_deref().map(|s| s.to_lowercase()).as_deref() {
+        Some("покупатель")
+        | Some("заказчик")
+        | Some("поставщик")
+        | Some("исполнитель")
+        | Some("подрядчик") => 0,
+        Some("застройщик") => 1,
+        Some("грузополучатель") | Some("грузоотправитель") | Some("плательщик") => {
+            2
+        }
+        Some(_) => 3,
+        None => 4,
+    }
+}
+
+fn floor_char_boundary(s: &str, mut index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    while index > 0 && !s.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(s: &str, mut index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    while index < s.len() && !s.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
 pub fn parse_parties(text: &str) -> Vec<Party> {
-    let names = collect_org_names(text);
-    pair_parties(text, &names, &[])
+    pair_parties(text)
 }
 
 // ---------- PDF из байтов ----------
@@ -765,6 +900,7 @@ pub async fn print_status(db: &PgPool, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+use hayro::{PixmapSettings, RenderSettings};
 use image::codecs::png::PngEncoder;
 use image::{ExtendedColorType, ImageEncoder};
 use rapidocr_core::{
@@ -773,53 +909,6 @@ use rapidocr_core::{
     RapidOcr,
 };
 use tempfile::TempDir;
-
-/// Рендерит первую страницу PDF в PNG и возвращает путь к временному файлу.
-// fn render_first_pdf_page_to_png(pdf_path: &Path, work_dir: &Path) -> Result<std::path::PathBuf> {
-//     let bytes = std::fs::read(pdf_path)
-//         .with_context(|| format!("не удалось прочитать PDF: {}", pdf_path.display()))?;
-
-//     let pdf = hayro::hayro_syntax::Pdf::new(bytes)
-//         .map_err(|e| anyhow::anyhow!("hayro не смог разобрать PDF: {e:?}"))?;
-
-//     let page = pdf.pages().first()
-//         .context("PDF не содержит страниц")?;
-
-//     let cache = hayro::RenderCache::new();
-//     let interpreter = hayro::hayro_interpret::InterpreterSettings::default();
-
-//     // 2.0 ≈ 144 DPI — достаточно для OCR, но без огромных PNG.
-//     let pixmap = hayro::render(
-//         page,
-//         &cache,
-//         &interpreter,
-//         &hayro::RenderSettings {
-//             x_scale: 2.0,
-//             y_scale: 2.0,
-//             bg_color: hayro::vello_cpu::color::palette::css::WHITE,
-//             ..Default::default()
-//         },
-//     );
-
-//     let width = pixmap.width() as u32;
-//     let height = pixmap.height() as u32;
-
-//     let png_path = work_dir.join("page-0.png");
-//     let file = std::fs::File::create(&png_path)
-//         .with_context(|| format!("не удалось создать PNG: {}", png_path.display()))?;
-
-//     PngEncoder::new(file)
-//         .write_image(
-//             pixmap.data_as_u8_slice(),
-//             width,
-//             height,
-//             ExtendedColorType::Rgba8,
-//         )
-//         .context("не удалось закодировать PNG")?;
-
-//     Ok(png_path)
-// }
-use hayro::{PixmapSettings, RenderSettings};
 
 fn render_first_pdf_page_to_png(pdf_path: &Path, work_dir: &Path) -> Result<std::path::PathBuf> {
     let bytes = std::fs::read(pdf_path)
@@ -898,31 +987,6 @@ fn build_ocr() -> Result<RapidOcr> {
 
     RapidOcr::from_config(cfg).context("не удалось создать RapidOCR")
 }
-
-/// Извлекает ИНН из распознанного текста.
-/// Поддерживает 10- и 12-значный ИНН, метки «ИНН» / «INN».
-/// Основная функция: принимает путь к PDF и возвращает ИНН, если он найден.
-// pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
-//     let work_dir = TempDir::new().context("не удалось создать временную директорию")?;
-
-//     let png_path = render_first_pdf_page_to_png(pdf_path, work_dir.path())?;
-
-//     let mut ocr = build_ocr()?;
-//     let result = ocr
-//         .run_path(png_path.to_str().context("путь к PNG не является UTF-8")?)
-//         .context("OCR не смог обработать изображение")?;
-
-//     // Склеиваем строки с достаточной уверенностью.
-//     let text: String = result
-//         .lines
-//         .into_iter()
-//         .filter(|line| line.score > 0.3)
-//         .map(|line| line.text)
-//         .collect::<Vec<_>>()
-//         .join("\n");
-
-//     Ok(extract_inn_from_text(&text))
-// }
 
 pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
     let work_dir = TempDir::new().context("не удалось создать временную директорию")?;
@@ -1014,39 +1078,6 @@ fn extract_inn_from_text(text: &str) -> Option<String> {
         .and_then(|v| v.into_iter().next())
 }
 
-// pub fn extract_inn_from_pdf(pdf_path: &Path) -> Result<Option<String>> {
-//     let work_dir = TempDir::new().context("не удалось создать временную директорию")?;
-
-//     let png_path = render_first_pdf_page_to_png(pdf_path, work_dir.path())?;
-
-//     // Сохраняем PNG рядом с проектом для визуальной проверки
-//     std::fs::copy(&png_path, "debug_page0.png")
-//         .context("не удалось сохранить debug_page0.png")?;
-
-//     let mut ocr = build_ocr()?;
-//     let result = ocr
-//         .run_path(png_path.to_str().context("путь к PNG не является UTF-8")?)
-//         .context("OCR не смог обработать изображение")?;
-
-//     // Печатаем все строки с их confidence, без фильтра
-//     for line in &result.lines {
-//         println!("[{:.3}] {}", line.score, line.text);
-//     }
-
-//     let text: String = result
-//         .lines
-//         .into_iter()
-//         .filter(|line| line.score > 0.3)
-//         .map(|line| line.text)
-//         .collect::<Vec<_>>()
-//         .join("\n");
-
-//     std::fs::write("debug_ocr.txt", &text)
-//         .context("не удалось сохранить debug_ocr.txt")?;
-
-//     Ok(extract_inn_from_text(&text))
-// }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1102,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "требует models/ и test_data/sample_invoice.pdf"]
+    //#[ignore = "требует models/ и test_data/sample_invoice.pdf"]
     fn extracts_inn_from_direct_pdf() -> anyhow::Result<()> {
         let path = std::path::Path::new("test_data/dirext.pdf");
         let inn = extract_inn_from_pdf(path)?;
@@ -1111,7 +1142,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "требует models/ и test_data/sample_invoice.pdf"]
+    //#[ignore = "требует models/ и test_data/sample_invoice.pdf"]
     fn extracts_inn_from_1t_pdf() -> anyhow::Result<()> {
         let path = std::path::Path::new("test_data/1.pdf");
         let inn = extract_inn_from_pdf(path)?;
@@ -1150,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "требует models/ocr/ и test_data/file-114098.pdf"]
+    //#[ignore = "требует models/ocr/ и test_data/file-114098.pdf"]
     fn extracts_inn_from_real_pdf1() -> anyhow::Result<()> {
         let started = std::time::Instant::now();
 
@@ -1178,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
+    //#[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
     fn test_parse_document_date() {
         let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
         let result = parse_pdf_bytes(&bytes, &[RecognizedField::DateDocum]).unwrap();
@@ -1189,7 +1220,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
+    //#[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
     fn test_parse_document_number() {
         let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
         let result = parse_pdf_bytes(&bytes, &[RecognizedField::NumberDocum]).unwrap();
@@ -1204,8 +1235,8 @@ mod tests {
         assert_eq!(numbers[0], "131/26", "Номер договора 131/26");
     }
 
-    #[test] //to check
-    #[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
+    #[test] //passed
+            //#[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
     fn test_parse_document_names() {
         let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
         let result = parse_pdf_bytes(&bytes, &[RecognizedField::Name]).unwrap();
@@ -1227,7 +1258,28 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
+    fn test_res_fishman() {
+        let bytes = std::fs::read("test_data/parse_doc.pdf").unwrap();
+        let result = parse_pdf_bytes(&bytes, &[RecognizedField::Name]).unwrap();
+        let names = &result[&RecognizedField::Name];
+        println!("Name: {names:?}");
+        assert_eq!(names.len(), 2, "Ожидали два названия, получили: {names:?}");
+        assert!(
+            names.iter().any(|n| n.contains("ИНДОР МАРКЕТИНГ")),
+            "Не найдено ООО «ИНДОР МАРКЕТИНГ», names={names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("РЭС-БАБЕФА")),
+            "Не найдено ООО «СЗ «РЭС-БАБЕФА», names={names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("РЭС- БАБЕФА")),
+            "Название не нормализовано (пробел после дефиса)"
+        );
+    }
+
+    #[test]
+    //#[ignore = "требует models/ocr/ и test_data/parse_doc.pdf"]
     fn test_parse_document_pdf_bytes() -> anyhow::Result<()> {
         let bytes = std::fs::read("test_data/parse_doc.pdf")?;
 
@@ -1262,13 +1314,15 @@ mod tests {
 
         // --- Дата ---
         assert_eq!(dates.len(), 1, "Должна быть одна дата, получили: {dates:?}");
-        assert_eq!(dates[0], "2026-11-03", "Дата «03» ноября 2026 г.");
+        assert_eq!(dates[0], "03-11-2026", "Дата «03» ноября 2026 г.");
 
         // --- Номер ---
-        assert!(
-            numbers.is_empty(),
-            "В этом PDF номера нет, но нашли: {numbers:?}"
+        assert_eq!(
+            numbers.len(),
+            1,
+            "Ожидали один номер, получили: {numbers:?}"
         );
+        assert_eq!(numbers[0], "131/26", "Номер договора 131/26");
 
         // --- ИНН ---
         assert_eq!(inns.len(), 2, "Ожидали два ИНН, получили: {inns:?}");
@@ -1291,5 +1345,115 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    const NAME_DOC: &str = "test_data/RES-RFISH.pdf";
+    #[test]
+    //#[ignore = "требует models/ocr/ и test_data/invoice_846.pdf"]
+    fn test_invoice_date() {
+        //passed
+        let bytes = std::fs::read(NAME_DOC).unwrap();
+        let result = parse_pdf_bytes(&bytes, &[RecognizedField::DateDocum]).unwrap();
+        let dates = &result[&RecognizedField::DateDocum];
+        println!("DateDocum: {dates:?}");
+
+        // Дата счёта: 09 ноября 2026
+        assert_eq!(dates.len(), 1, "Ожидали одну дату, получили: {dates:?}");
+        assert_eq!(dates[0], "09-11-2026");
+    }
+
+    #[test]
+    //#[ignore = "требует models/ocr/ и test_data/invoice_846.pdf"]
+    fn test_invoice_number() {
+        let bytes = std::fs::read(NAME_DOC).unwrap();
+        let result = parse_pdf_bytes(&bytes, &[RecognizedField::NumberDocum]).unwrap();
+        let numbers = &result[&RecognizedField::NumberDocum];
+        println!("NumberDocum: {numbers:?}");
+        assert_eq!(
+            numbers.len(),
+            1,
+            "Ожидали один номер, получили: {numbers:?}"
+        );
+        assert_eq!(numbers[0], "846", "Номер счёта 846");
+    }
+
+    #[test]
+    //#[ignore = "требует models/ocr/ и test_data/invoice_846.pdf"]
+    fn test_invoice_names() {
+        let bytes = std::fs::read(NAME_DOC).unwrap();
+        let result = parse_pdf_bytes(&bytes, &[RecognizedField::Name]).unwrap();
+        let names = &result[&RecognizedField::Name];
+        println!("Name: {names:?}");
+
+        assert_eq!(
+            names.len(),
+            2,
+            "Ожидали два названия (ИП и ООО), получили: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("РЭС-РЫБАЦКАЯ")),
+            "Получатель"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("ЕФИМОВ АНТОН ПЕТРОВИЧ")),
+            "Поставщик"
+        );
+    }
+
+    #[test]
+    //#[ignore = "требует models/ocr/ и test_data/invoice_846.pdf"]
+    fn test_invoice_inns() {
+        let bytes = std::fs::read(NAME_DOC).unwrap();
+        let result = parse_pdf_bytes(&bytes, &[RecognizedField::Inn]).unwrap();
+        let inns = &result[&RecognizedField::Inn];
+        println!("Inn: {inns:?}");
+
+        assert_eq!(inns.len(), 2, "Ожидали два ИНН, получили: {inns:?}");
+        // ИНН Покупателя (ООО "РЭС-РЫБАЦКАЯ")
+        assert!(inns.contains(&"3000013164".to_string()), "ИНН Покупателя");
+        // ИНН Поставщика (ИП Ефимов) - 11 цифр в счёте
+        assert!(inns.contains(&"301702747523".to_string()), "ИНН Поставщика");
+    }
+
+    #[test]
+    //#[ignore = "требует models/ocr/ и test_data/invoice_846.pdf"]
+    fn test_invoice_parties() {
+        let bytes = std::fs::read(NAME_DOC).unwrap();
+        let text = if bytes.starts_with(b"%PDF-") {
+            let pngs = render_pdf_bytes_to_pngs(&bytes).unwrap();
+            let pages =
+                crate::local_ocr::recognize_pages(pngs, PathBuf::from("models/ocr"), 4, None)
+                    .unwrap();
+            pages
+                .into_iter()
+                .map(|p| p.text)
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            recognize_bytes_to_text(bytes).unwrap()
+        };
+
+        let parties = parse_parties(&text);
+        println!("Parties: {parties:#?}");
+
+        assert_eq!(
+            parties.len(),
+            2,
+            "Ожидали 2 стороны, получили: {parties:#?}"
+        );
+
+        let supplier = parties
+            .iter()
+            .find(|p| p.name.contains("ЕФИМОВ"))
+            .expect("Поставщик не найден");
+        assert_eq!(supplier.inn.as_deref(), Some("301702747523"));
+        assert_eq!(supplier.role.as_deref(), Some("Поставщик"));
+
+        let buyer = parties
+            .iter()
+            .find(|p| p.name.contains("РЫБАЦКАЯ"))
+            .expect("Покупатель не найден");
+        assert_eq!(buyer.inn.as_deref(), Some("3000013164"));
+        assert_eq!(buyer.role.as_deref(), Some("Покупатель"));
     }
 }
